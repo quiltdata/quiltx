@@ -26,6 +26,7 @@ dev = [
 
 [tool.poe.tasks]
 test = "pytest tests"
+run = "uv run quiltx"
 
 [project.scripts]
 quiltx = "quiltx.cli:main"

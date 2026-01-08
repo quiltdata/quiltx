@@ -4,6 +4,8 @@
 
 - Install dev deps: `uv sync --extra dev`
 - Run tests: `./poe test`
+- Run quiltx from the repo: `uv run quiltx` (or `uv run quiltx --help` to see available commands)
+- Run quiltx tools via poe: `./poe run <tool>` (e.g., `./poe run config` to show current catalog)
 
 ## Publish to PyPI
 
@@ -19,10 +21,8 @@ The publish workflow uses GitHub OIDC trusted publishing (no API token in secret
      - Deployment branches: Select "Selected branches" and add `main`
    - Save the environment
 
-2. **Create or verify the project on PyPI** for each package:
+2. **Create or verify the project on PyPI**:
    - `quiltx`
-   - `quiltx-log`
-   - `quiltx-stack`
 
 3. **In PyPI, open each project and add a Trusted Publisher**:
    - Provider: GitHub
