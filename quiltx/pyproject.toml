@@ -20,8 +20,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "poethepoet",
   "pytest"
 ]
+
+[tool.poe.tasks]
+test = "pytest quiltx/tests"
 
 [project.scripts]
 quiltx = "quiltx.cli:main"
