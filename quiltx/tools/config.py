@@ -10,21 +10,16 @@ import quiltx
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Configure a Quilt catalog and display the configuration."
+        description="Configure a Quilt catalog or display the current configuration."
     )
     parser.add_argument(
         "catalog_url",
         nargs="?",
-        help="Catalog URL to configure (e.g., https://open.quiltdata.com)",
+        help="Catalog URL to configure (e.g., https://open.quiltdata.com). If omitted, shows current configuration.",
     )
     parser.add_argument(
         "--token",
         help="API token for authentication",
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Show current configuration without modifying it",
     )
     return parser
 
@@ -34,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        if args.show or not args.catalog_url:
+        if not args.catalog_url:
             # Show the current config without modifying
             import quilt3
 

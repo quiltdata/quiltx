@@ -10,8 +10,8 @@ from quiltx.tools import config
 
 
 def test_config_show_displays_config(capsys) -> None:
-    """Test that --show displays the current config."""
-    result = config.main(["--show"])
+    """Test that config without args displays the current config."""
+    result = config.main([])
     # Should succeed since quilt3 has default config
     assert result == 0
 
@@ -43,7 +43,7 @@ def test_config_sets_catalog() -> None:
 
 
 def test_config_show_after_set(capsys) -> None:
-    """Test that --show displays the configured catalog."""
+    """Test that config without args displays the configured catalog."""
     config_path = Path(util.CONFIG_PATH)
     backup = config_path.read_bytes() if config_path.exists() else None
 
@@ -52,7 +52,7 @@ def test_config_show_after_set(capsys) -> None:
         config.main([util.OPEN_DATA_URL])
 
         # Then show
-        result = config.main(["--show"])
+        result = config.main([])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -65,10 +65,12 @@ def test_config_show_after_set(capsys) -> None:
             config_path.write_bytes(backup)
 
 
-def test_config_without_args(capsys) -> None:
-    """Test that config without args and without --show shows error."""
+def test_config_without_args_shows_current(capsys) -> None:
+    """Test that config without args shows current configuration."""
     result = config.main([])
-    assert result == 1
+    # Should succeed since quilt3 has default config
+    assert result == 0
 
     captured = capsys.readouterr()
-    assert "catalog_url is required" in captured.err
+    # Should show some config key (quilt3 has defaults)
+    assert "navigator_url" in captured.out or "registry" in captured.out

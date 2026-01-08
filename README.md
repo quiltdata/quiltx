@@ -21,7 +21,7 @@ uvx quiltx --list
 uvx quiltx config https://open.quiltdata.com
 
 # Show current catalog configuration
-uvx quiltx config --show
+uvx quiltx config
 
 # Get help
 uvx quiltx --help
