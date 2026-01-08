@@ -7,27 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-01-08
 
+Initial release of quiltx - a unified toolkit for Quilt workflows.
+
 ### Added
+
 - Unified CLI with single `quiltx` entry point
-- Built-in tools: `log` and `stack`
-- Simple tool registry system for adding new tools
+- Built-in tool: `config` for configuring Quilt catalogs using `configured_catalog` API
+- Automatic tool discovery system (no explicit registry needed)
 - Shared utilities library with `configured_catalog` helper
-
-### Changed
-- **BREAKING**: Restructured from multiple separate packages to single unified package
-- **BREAKING**: Removed `quiltx-log` and `quiltx-stack` as separate packages
-- **BREAKING**: Changed command interface from `uvx quiltx run <tool>` to `uvx quiltx <tool>`
-- Flattened directory structure (removed nested `quiltx/quiltx/` directory)
-- Updated workflows to build single package instead of matrix of packages
-
-### Removed
-- Separate `tools/quiltx-log/` and `tools/quiltx-stack/` packages
-- Old CLI commands: `quiltx list`, `quiltx install`, `quiltx run`
-
-## [Pre-0.1.0] - Previous Structure
-
-Previous version consisted of:
-- `quiltx`: Shared library package
-- `quiltx-log`: Standalone logging tool
-- `quiltx-stack`: Standalone stack trace tool
-- CLI wrapper for managing separate tool installations
+- Comprehensive tests for CLI and config tool

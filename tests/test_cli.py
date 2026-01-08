@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
+
 import quiltx.cli as cli
 
 
 def test_list_tools(capsys) -> None:
-    """Test that list_tools shows all available tools."""
+    """Test that list_tools outputs available tools."""
     cli.list_tools()
     captured = capsys.readouterr()
 
-    # Should list all registered tools
-    assert "log" in captured.out
-    assert "stack" in captured.out
+    # Should have header and at least one tool
+    assert "Available tools:" in captured.out
+    assert len(cli.TOOLS) > 0
 
 
 def test_run_tool_unknown(capsys) -> None:
@@ -39,17 +41,15 @@ def test_main_list_flag(capsys) -> None:
     assert result == 0
 
     captured = capsys.readouterr()
-    assert "log" in captured.out
-    assert "stack" in captured.out
+    assert "Available tools:" in captured.out
 
 
-def test_run_tool_log() -> None:
-    """Test that log tool can be invoked."""
-    result = cli.run_tool("log", ["test message"])
-    assert result == 0
-
-
-def test_run_tool_stack() -> None:
-    """Test that stack tool can be invoked."""
-    result = cli.run_tool("stack", ["--limit", "1"])
-    assert result == 0
+def test_run_tool_exists() -> None:
+    """Test that we can invoke an existing tool."""
+    # Get any tool from the registry
+    if cli.TOOLS:
+        tool_name = next(iter(cli.TOOLS))
+        # --help causes SystemExit(0), which is expected
+        with pytest.raises(SystemExit) as exc_info:
+            cli.run_tool(tool_name, ["--help"])
+        assert exc_info.value.code == 0

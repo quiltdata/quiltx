@@ -28,6 +28,17 @@ dev = [
 test = "pytest tests"
 run = "uv run quiltx"
 
+[tool.poe.tasks.tag]
+help = "Create and push a git tag for the current version"
+shell = """
+VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+TAG="v$VERSION"
+echo "Creating tag $TAG for version $VERSION"
+git tag -a "$TAG" -m "Release $VERSION"
+git push origin "$TAG"
+echo "Tag $TAG created and pushed. Create a GitHub release to trigger PyPI publish."
+"""
+
 [project.scripts]
 quiltx = "quiltx.cli:main"
 

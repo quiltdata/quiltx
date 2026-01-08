@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import pkgutil
 import sys
 from importlib import import_module
+from pathlib import Path
 from typing import NoReturn
 
 
-# Registry of available tools
-TOOLS = {
-    "stack": "quiltx.tools.stack",
-    "log": "quiltx.tools.log",
-}
+def _discover_tools() -> dict[str, str]:
+    """Auto-discover tools from the quiltx.tools package."""
+    tools = {}
+    tools_path = Path(__file__).parent / "tools"
+
+    for module_info in pkgutil.iter_modules([str(tools_path)]):
+        if module_info.name != "__init__":
+            tools[module_info.name] = f"quiltx.tools.{module_info.name}"
+
+    return tools
+
+
+# Auto-discovered registry of available tools
+TOOLS = _discover_tools()
 
 
 def list_tools() -> None:
