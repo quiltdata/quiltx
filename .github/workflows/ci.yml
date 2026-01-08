@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e "quiltx[dev]"
+          python -m pip install -e ".[dev]"
       - name: Run tests
         run: |
-          python -m pytest quiltx/tests
+          python -m pytest tests
