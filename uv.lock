@@ -6,13 +6,6 @@ resolution-markers = [
     "python_full_version < '3.10'",
 ]
 
-[manifest]
-members = [
-    "quiltx",
-    "quiltx-log",
-    "quiltx-stack",
-]
-
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
@@ -691,7 +684,7 @@ wheels = [
 [[package]]
 name = "quiltx"
 version = "0.1.0"
-source = { editable = "quiltx" }
+source = { editable = "." }
 dependencies = [
     { name = "quilt3" },
 ]
@@ -711,28 +704,6 @@ requires-dist = [
     { name = "quilt3" },
 ]
 provides-extras = ["dev"]
-
-[[package]]
-name = "quiltx-log"
-version = "0.1.0"
-source = { editable = "tools/quiltx-log" }
-dependencies = [
-    { name = "quiltx" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "quiltx", editable = "quiltx" }]
-
-[[package]]
-name = "quiltx-stack"
-version = "0.1.0"
-source = { editable = "tools/quiltx-stack" }
-dependencies = [
-    { name = "quiltx" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "quiltx", editable = "quiltx" }]
 
 [[package]]
 name = "referencing"

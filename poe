@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 
-exec uv run --project quiltx poe "$@"
+exec uv run poe "$@"
