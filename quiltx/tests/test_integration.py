@@ -13,11 +13,9 @@ def test_configured_catalog_sets_open_quiltdata() -> None:
     backup = config_path.read_bytes() if config_path.exists() else None
 
     try:
-        catalog = quiltx.configured_catalog(util.OPEN_DATA_URL)
-        config = quilt3.config()
+        config = quiltx.configured_catalog(util.OPEN_DATA_URL)
 
         assert config.get("navigator_url") == util.OPEN_DATA_URL
-        assert isinstance(catalog, quilt3.Catalog)
     finally:
         if backup is None:
             if config_path.exists():

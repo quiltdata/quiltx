@@ -13,17 +13,21 @@ def test_configured_catalog_calls_quilt3_config(monkeypatch) -> None:
         called["args"] = args
         called["kwargs"] = kwargs
 
-    class _Catalog:
+    class _Config:
         pass
 
-    fake_quilt3 = types.SimpleNamespace(config=_config, Catalog=_Catalog)
+    def _config_return(*args, **kwargs):
+        _config(*args, **kwargs)
+        return _Config()
+
+    fake_quilt3 = types.SimpleNamespace(config=_config_return)
 
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
 
-    catalog = quiltx.configured_catalog("https://example.test", token="abc123")
+    config = quiltx.configured_catalog("https://example.test", token="abc123")
 
     assert called == {
         "args": ("https://example.test",),
         "kwargs": {"token": "abc123"},
     }
-    assert isinstance(catalog, _Catalog)
+    assert isinstance(config, _Config)

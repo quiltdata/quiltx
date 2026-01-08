@@ -9,8 +9,7 @@ __version__ = "0.1.0"
 
 
 def configured_catalog(*catalog_url: str, **config_values: Any):
-    """Configure quilt3 and return a Catalog."""
+    """Configure quilt3 and return the current config."""
     import quilt3
 
-    quilt3.config(*catalog_url, **config_values)
-    return quilt3.Catalog()
+    return quilt3.config(*catalog_url, **config_values)
