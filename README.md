@@ -29,8 +29,3 @@ A shared library plus a set of single-purpose "quiltx tools".
 
 - Install workspace deps: `uv sync`
 - Run tools locally: `uv run quiltx-log "hello"` or `uv run quiltx-stack`
-
-## Developer
-
-- Install dev deps: `uv sync --extra dev`
-- Run tests: `./poe test`
