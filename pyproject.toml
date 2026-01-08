@@ -1,0 +1,5 @@
+[tool.uv.workspace]
+members = ["quiltx", "tools/*"]
+
+[tool.uv.sources]
+quiltx = { workspace = true }

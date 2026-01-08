@@ -1,0 +1,37 @@
+version = 1
+revision = 3
+requires-python = ">=3.9"
+
+[manifest]
+members = [
+    "quiltx",
+    "quiltx-log",
+    "quiltx-stack",
+]
+
+[[package]]
+name = "quiltx"
+version = "0.1.0"
+source = { editable = "quiltx" }
+
+[[package]]
+name = "quiltx-log"
+version = "0.1.0"
+source = { editable = "tools/quiltx-log" }
+dependencies = [
+    { name = "quiltx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "quiltx", editable = "quiltx" }]
+
+[[package]]
+name = "quiltx-stack"
+version = "0.1.0"
+source = { editable = "tools/quiltx-stack" }
+dependencies = [
+    { name = "quiltx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "quiltx", editable = "quiltx" }]
