@@ -2,11 +2,9 @@
 
 ## Developer
 
-- Install dev deps: `uv sync --extra dev`
-- Run tests: `./poe test` (unit/default) or `./poe test-all` (includes integration)
-- Install git hooks: `pre-commit install && pre-commit install --hook-type pre-push`
-- Run quiltx from the repo: `uv run quiltx` (or `uv run quiltx --help` to see available commands)
-- Run quiltx tools via poe: `./poe run <tool>` (e.g., `./poe run config` to show current catalog)
+- Setup (install deps + hooks): `./poe setup`
+- Run tests: `./poe test` (unit) or `./poe test-all` (full suite with linting)
+- Run quiltx from the repo: `./poe run <tool>` (e.g., `./poe run config` or `./poe run --help`)
 
 ## Publish to PyPI
 
