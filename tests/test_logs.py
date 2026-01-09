@@ -90,3 +90,89 @@ def test_format_event() -> None:
     formatted = logs.format_event(event)
     assert "/aws/lambda/a" in formatted
     assert "hello" in formatted
+
+
+def test_parse_log_level_with_error() -> None:
+    level, msg = logs.parse_log_level("ERROR: Connection failed")
+    assert level == "ERROR"
+    assert msg == "Connection failed"
+
+
+def test_parse_log_level_with_warning() -> None:
+    level, msg = logs.parse_log_level("WARNING: High memory usage")
+    assert level == "WARN"
+    assert msg == "High memory usage"
+
+
+def test_parse_log_level_with_warn() -> None:
+    level, msg = logs.parse_log_level("WARN: Something happened")
+    assert level == "WARN"
+    assert msg == "Something happened"
+
+
+def test_parse_log_level_with_info() -> None:
+    level, msg = logs.parse_log_level("INFO: Processing request")
+    assert level == "INFO"
+    assert msg == "Processing request"
+
+
+def test_parse_log_level_with_debug() -> None:
+    level, msg = logs.parse_log_level("DEBUG: Detailed info")
+    assert level == "DEBUG"
+    assert msg == "Detailed info"
+
+
+def test_parse_log_level_with_brackets() -> None:
+    level, msg = logs.parse_log_level("[ERROR] Something broke")
+    assert level == "ERROR"
+    assert msg == "Something broke"
+
+
+def test_parse_log_level_no_level() -> None:
+    level, msg = logs.parse_log_level("Just a plain message")
+    assert level == "INFO"
+    assert msg == "Just a plain message"
+
+
+def test_parse_log_level_level_in_middle() -> None:
+    level, msg = logs.parse_log_level("Something ERROR happened")
+    assert level == "ERROR"
+    assert msg == "Something ERROR happened"
+
+
+def test_format_event_structured() -> None:
+    event = {
+        "timestamp": 1700000000000,
+        "logGroupName": "/aws/lambda/test",
+        "logStreamName": "2024/01/01/[1]abc123",
+        "message": "ERROR: Something went wrong",
+    }
+    structured = logs.format_event_structured(event)
+    assert structured["level"] == "ERROR"
+    assert structured["log_group"] == "/aws/lambda/test"
+    assert structured["log_stream"] == "2024/01"  # First two parts (service/component)
+    assert "Something went wrong" in structured["message"]
+    assert "Nov 14" in structured["timestamp"]  # Human-friendly format
+
+
+def test_format_event_structured_no_level() -> None:
+    event = {
+        "timestamp": 1700000000000,
+        "logGroupName": "/aws/ecs/service",
+        "message": "Processing request 12345",
+    }
+    structured = logs.format_event_structured(event)
+    assert structured["level"] == "INFO"
+    assert structured["log_group"] == "/aws/ecs/service"
+    assert "Processing request 12345" in structured["message"]
+
+
+def test_format_event_structured_warning() -> None:
+    event = {
+        "timestamp": 1700000000000,
+        "logGroupName": "/aws/lambda/func",
+        "message": "WARNING: Memory usage high",
+    }
+    structured = logs.format_event_structured(event)
+    assert structured["level"] == "WARN"
+    assert "Memory usage high" in structured["message"]
