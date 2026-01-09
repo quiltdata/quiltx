@@ -61,8 +61,16 @@ def main(argv: list[str] | None = None) -> int:
         log_groups = stack_lib.list_log_group_resources(
             cfn_client, stack_info["StackName"]
         )
+        ecs_resources = stack_lib.list_ecs_resources(
+            cfn_client, stack_info["StackName"]
+        )
         output_path = stack_lib.write_stack_payload(
-            catalog_name, str(catalog_url), region, stack_info, log_groups
+            catalog_name,
+            str(catalog_url),
+            region,
+            stack_info,
+            log_groups,
+            ecs_resources,
         )
 
         stack_name = stack_info.get("StackName", "unknown")
@@ -71,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Region: {region}")
         print(f"  Account: {account_id}")
         print(f"  Log groups: {len(log_groups)}")
+        print(f"  ECS resources: {len(ecs_resources)}")
         print(f"  Outputs: {len(stack_info.get('Outputs', []))}")
         print(f"  Parameters: {len(stack_info.get('Parameters', []))}")
         print(f"\nWrote stack details to {output_path}")

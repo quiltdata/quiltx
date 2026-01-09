@@ -117,6 +117,32 @@ def list_log_group_resources(cfn_client, stack_name: str) -> list[dict[str, str]
     return log_groups
 
 
+def list_ecs_resources(cfn_client, stack_name: str) -> list[dict[str, str]]:
+    paginator = cfn_client.get_paginator("list_stack_resources")
+    ecs_resources: list[dict[str, str]] = []
+
+    ecs_types = {
+        "AWS::ECS::Cluster",
+        "AWS::ECS::Service",
+        "AWS::ECS::TaskDefinition",
+    }
+
+    for page in paginator.paginate(StackName=stack_name):
+        for resource in page.get("StackResourceSummaries", []):
+            resource_type = resource.get("ResourceType")
+            if resource_type not in ecs_types:
+                continue
+            ecs_resources.append(
+                {
+                    "logical_id": resource.get("LogicalResourceId", ""),
+                    "physical_id": resource.get("PhysicalResourceId", ""),
+                    "resource_type": resource_type or "",
+                }
+            )
+
+    return ecs_resources
+
+
 def stack_account_id(stack: Mapping[str, Any]) -> str | None:
     stack_id = stack.get("StackId")
     if not stack_id:
@@ -133,6 +159,7 @@ def write_stack_payload(
     region: str,
     stack: Mapping[str, Any],
     log_groups: list[dict[str, str]],
+    ecs_resources: list[dict[str, str]] | None = None,
 ) -> Path:
     target_dir = user_data_path("quiltx") / catalog_name
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -149,6 +176,7 @@ def write_stack_payload(
         "outputs": stack.get("Outputs") or [],
         "parameters": stack.get("Parameters") or [],
         "log_groups": log_groups,
+        "ecs_resources": ecs_resources or [],
     }
 
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True))

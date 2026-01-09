@@ -109,6 +109,62 @@ def test_list_log_group_resources() -> None:
     stubber.deactivate()
 
 
+def test_list_ecs_resources() -> None:
+    client = boto3.client(
+        "cloudformation",
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    stubber = Stubber(client)
+    stubber.add_response(
+        "list_stack_resources",
+        {
+            "StackResourceSummaries": [
+                {
+                    "LastUpdatedTimestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    "LogicalResourceId": "EcsCluster",
+                    "PhysicalResourceId": "cluster-name",
+                    "ResourceType": "AWS::ECS::Cluster",
+                    "ResourceStatus": "CREATE_COMPLETE",
+                },
+                {
+                    "LastUpdatedTimestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    "LogicalResourceId": "SomeOther",
+                    "PhysicalResourceId": "other",
+                    "ResourceType": "AWS::S3::Bucket",
+                    "ResourceStatus": "CREATE_COMPLETE",
+                },
+                {
+                    "LastUpdatedTimestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    "LogicalResourceId": "EcsService",
+                    "PhysicalResourceId": "service-name",
+                    "ResourceType": "AWS::ECS::Service",
+                    "ResourceStatus": "CREATE_COMPLETE",
+                },
+            ]
+        },
+        {"StackName": "quilt-stack"},
+    )
+    stubber.activate()
+
+    ecs_resources = stack.list_ecs_resources(client, "quilt-stack")
+    assert ecs_resources == [
+        {
+            "logical_id": "EcsCluster",
+            "physical_id": "cluster-name",
+            "resource_type": "AWS::ECS::Cluster",
+        },
+        {
+            "logical_id": "EcsService",
+            "physical_id": "service-name",
+            "resource_type": "AWS::ECS::Service",
+        },
+    ]
+
+    stubber.deactivate()
+
+
 def test_write_log_groups(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(stack, "user_data_path", lambda *_args, **_kwargs: tmp_path)
 
@@ -125,6 +181,13 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
             "Parameters": [{"ParameterKey": "Env", "ParameterValue": "dev"}],
         },
         [{"logical_id": "LogGroupA", "log_group_name": "/aws/logs"}],
+        [
+            {
+                "logical_id": "EcsCluster",
+                "physical_id": "cluster-name",
+                "resource_type": "AWS::ECS::Cluster",
+            }
+        ],
     )
 
     assert output_path.exists()
@@ -134,3 +197,4 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
     assert '"stack_name": "stack"' in content
     assert '"outputs"' in content
     assert '"parameters"' in content
+    assert '"ecs_resources"' in content
