@@ -121,3 +121,30 @@ def test_collect_reachability_targets() -> None:
     assert "sentry" in names
     assert "mixpanel" in names
     assert "license" in names
+
+
+def test_default_service_from_resources_prefers_registry() -> None:
+    services = [
+        {
+            "logical_id": "OtherService",
+            "physical_id": "other",
+            "resource_type": "AWS::ECS::Service",
+        },
+        {
+            "logical_id": "RegistryService",
+            "physical_id": "registry",
+            "resource_type": "AWS::ECS::Service",
+        },
+    ]
+    assert ecs._default_service_from_resources(services) == "registry"
+
+
+def test_default_service_from_resources_singleton() -> None:
+    services = [
+        {
+            "logical_id": "OnlyService",
+            "physical_id": "only",
+            "resource_type": "AWS::ECS::Service",
+        }
+    ]
+    assert ecs._default_service_from_resources(services) == "only"

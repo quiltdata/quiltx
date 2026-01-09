@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 import boto3
 from platformdirs import user_data_path
@@ -23,10 +23,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Open an interactive shell inside a running ECS task."
     )
+    parser.add_argument(
+        "service",
+        nargs="?",
+        help="Service name to filter tasks (defaults to RegistryService).",
+    )
     parser.add_argument("--cluster", help="ECS cluster name or ARN.")
     parser.add_argument("--task", help="Task ARN or ID. Defaults to a running task.")
     parser.add_argument(
         "--service",
+        dest="service",
         help="Service name to filter tasks (optional).",
     )
     parser.add_argument(
@@ -45,6 +51,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--catalog",
         help="Catalog name or URL used to locate stack payload.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List ECS clusters and services from the stack payload.",
+    )
+    parser.add_argument(
+        "--prompt",
+        action="store_true",
+        help="Always prompt for cluster/service selection.",
     )
     parser.add_argument(
         "--reachability",
@@ -136,6 +152,42 @@ def _prompt_resource(
         return None
     selected_index = int(selection) - 1
     return resources[selected_index].get("physical_id")
+
+
+def _render_resource_list(
+    console: Console,
+    clusters: list[Mapping[str, str]],
+    services: list[Mapping[str, str]],
+) -> None:
+    def render_table(title: str, rows: list[Mapping[str, str]]) -> None:
+        if not rows:
+            return
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Logical Id", style="green")
+        table.add_column("Resource Id", style="white")
+        table.add_column("Type", style="dim")
+        for row in rows:
+            table.add_row(
+                row.get("logical_id", ""),
+                row.get("physical_id", ""),
+                row.get("resource_type", ""),
+            )
+        console.print(f"\n[bold]{title}[/bold]")
+        console.print(table)
+
+    render_table("ECS Clusters", clusters)
+    render_table("ECS Services", services)
+
+
+def _default_service_from_resources(
+    services: Sequence[Mapping[str, str]],
+) -> str | None:
+    for service in services:
+        if service.get("logical_id") == "RegistryService":
+            return service.get("physical_id")
+    if len(services) == 1:
+        return services[0].get("physical_id")
+    return None
 
 
 def _extract_ecs_resources(
@@ -374,14 +426,28 @@ def main(argv: list[str] | None = None) -> int:
         command = args.command or saved_command or "/bin/bash"
 
         clusters, services = _extract_ecs_resources(payload)
-        if not cluster:
+        if args.list:
+            if not payload:
+                raise ValueError("No stack payload found. Run 'quiltx stack' first.")
+            _render_resource_list(console, clusters, services)
+            return 0
+
+        if args.prompt and clusters:
+            cluster = _prompt_resource(
+                console,
+                "ECS Clusters",
+                clusters,
+                cluster,
+                allow_skip=False,
+            )
+        elif not cluster:
             if not payload:
                 raise ValueError(
                     "No cluster provided and no stack payload found. Run 'quiltx stack' or pass --cluster."
                 )
             if len(clusters) == 1:
                 cluster = clusters[0].get("physical_id")
-            else:
+            elif clusters:
                 cluster = _prompt_resource(
                     console,
                     "ECS Clusters",
@@ -392,17 +458,18 @@ def main(argv: list[str] | None = None) -> int:
         if not cluster:
             raise ValueError("No ECS cluster selected")
 
-        if not args.task and service is None and services:
-            if len(services) == 1:
-                service = services[0].get("physical_id")
-            else:
+        if not args.task and service is None:
+            default_service = _default_service_from_resources(services)
+            if args.prompt and services:
                 service = _prompt_resource(
                     console,
                     "ECS Services",
                     services,
-                    saved_service,
+                    default_service or saved_service,
                     allow_skip=True,
                 )
+            else:
+                service = default_service
 
         ecs_client = boto3.client("ecs", region_name=args.region)
         task_arn = _select_task(ecs_client, cluster, args.task, service)
