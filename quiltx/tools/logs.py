@@ -166,6 +166,60 @@ def _get_level_style(level: str) -> str:
     }.get(level, "")
 
 
+def _coalesce_health_checks(
+    events: list[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Coalesce consecutive health check log entries into a single summary.
+
+    Replaces consecutive health check entries with a single entry showing
+    the most recent timestamp and a count of coalesced checks.
+    """
+    if not events:
+        return events
+
+    result: list[Mapping[str, Any]] = []
+    health_check_group: list[Mapping[str, Any]] = []
+
+    for event in events:
+        message = event.get("message", "")
+        if logs_lib.is_health_check(message):
+            health_check_group.append(event)
+        else:
+            # Flush any accumulated health checks
+            if health_check_group:
+                # Keep only the most recent health check
+                most_recent = health_check_group[-1]
+                count = len(health_check_group)
+                # Add count to message if more than one
+                if count > 1:
+                    modified_event = dict(most_recent)
+                    modified_event["message"] = (
+                        f"[{count} health checks coalesced] "
+                        + modified_event.get("message", "")
+                    )
+                    result.append(modified_event)
+                else:
+                    result.append(most_recent)
+                health_check_group = []
+            result.append(event)
+
+    # Flush any remaining health checks at the end
+    if health_check_group:
+        most_recent = health_check_group[-1]
+        count = len(health_check_group)
+        if count > 1:
+            modified_event = dict(most_recent)
+            modified_event["message"] = (
+                f"[{count} health checks coalesced] "
+                + modified_event.get("message", "")
+            )
+            result.append(modified_event)
+        else:
+            result.append(most_recent)
+
+    return result
+
+
 def _display_log_section(
     console: Console,
     logical_id: str,
@@ -175,6 +229,9 @@ def _display_log_section(
     """Display logs for a single log group in a section."""
     if not events:
         return
+
+    # Coalesce health checks first
+    events = _coalesce_health_checks(events)
 
     # Apply limit if specified
     if limit > 0:
@@ -330,8 +387,11 @@ def _follow_logs_dynamic(
                 header.append(f"─── {stream_name} ───", style="bold cyan")
                 table.add_row(header)
 
+                # Coalesce health checks for this stream
+                coalesced_events = _coalesce_health_checks(display_events)
+
                 # Add events
-                for event in display_events:
+                for event in coalesced_events:
                     structured = logs_lib.format_event_structured(event)
                     text = Text()
 
