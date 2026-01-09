@@ -15,7 +15,8 @@ classifiers = [
   "Operating System :: OS Independent"
 ]
 dependencies = [
-  "quilt3"
+  "quilt3",
+  "rich"
 ]
 
 [project.optional-dependencies]
@@ -28,19 +29,27 @@ dev = [
 ]
 
 [tool.poe.tasks]
-test = "pytest tests"
 run = "uv run quiltx"
+
+[tool.poe.tasks.sync]
+help = "Install dev dependencies."
+cmd = "uv sync --extra dev"
+
+[tool.poe.tasks.test]
+help = "Run unit tests."
+sequence = ["sync", { cmd = "pytest tests" }]
 
 [tool.poe.tasks.setup]
 help = "Install pre-commit hooks."
-shell = "pre-commit install && pre-commit install --hook-type pre-push"
+sequence = ["sync", { shell = "pre-commit install && pre-commit install --hook-type pre-push" }]
 
 [tool.poe.tasks.lint]
-shell = "black . && mypy quiltx tests"
+help = "Lint and type-check code."
+sequence = ["sync", { shell = "black . && mypy quiltx tests" }]
 
 [tool.poe.tasks.lint-check]
 help = "Lint without modifying files (for CI)."
-shell = "black --check . && mypy quiltx tests"
+sequence = ["sync", { shell = "black --check . && mypy quiltx tests" }]
 
 [tool.poe.tasks.bump]
 help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch]"
@@ -48,7 +57,7 @@ cmd = "python scripts/bump_version.py"
 
 [tool.poe.tasks.test-all]
 help = "Install hooks, lint, and run all tests (including integration if enabled)."
-shell = "./poe setup && ./poe lint && QUILTX_STACK_INTEGRATION=1 ./poe test"
+sequence = ["setup", "lint", { shell = "QUILTX_STACK_INTEGRATION=1 pytest tests" }]
 
 [tool.poe.tasks.tag]
 help = "Create and push a git tag for the current version"
