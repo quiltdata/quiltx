@@ -47,8 +47,8 @@ help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch]"
 cmd = "python scripts/bump_version.py"
 
 [tool.poe.tasks.test-all]
-help = "Install hooks and run all tests (including integration if enabled)."
-shell = "./poe setup && QUILTX_STACK_INTEGRATION=1 ./poe test"
+help = "Install hooks, lint, and run all tests (including integration if enabled)."
+shell = "./poe setup && ./poe lint && QUILTX_STACK_INTEGRATION=1 ./poe test"
 
 [tool.poe.tasks.tag]
 help = "Create and push a git tag for the current version"

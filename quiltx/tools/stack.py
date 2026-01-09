@@ -13,8 +13,7 @@ from quiltx import stack as stack_lib
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Discover the CloudFormation stack for the configured Quilt catalog "
-            "and store log group resources."
+            "Discover and store information about the CloudFormation stack for the configured catalog."
         )
     )
     return parser

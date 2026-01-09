@@ -35,13 +35,15 @@ def test_main_no_args(capsys) -> None:
     assert "quiltx" in captured.out
 
 
-def test_main_list_flag(capsys) -> None:
-    """Test main with --list flag."""
-    result = cli.main(["--list"])
-    assert result == 0
+def test_main_shows_tools(capsys) -> None:
+    """Test that main shows available tools in help."""
+    result = cli.main([])
+    assert result == 1  # Returns 1 because no tool specified
 
     captured = capsys.readouterr()
-    assert "Available tools:" in captured.out
+    assert "available tools:" in captured.out
+    # Check that at least one tool is shown
+    assert any(tool in captured.out for tool in cli.TOOLS.keys())
 
 
 def test_run_tool_exists() -> None:
