@@ -1,0 +1,87 @@
+"""Tests for the ECS shell tool."""
+
+from __future__ import annotations
+
+import boto3
+from botocore.stub import Stubber
+
+from quiltx.tools import ecs
+
+
+def test_select_task_uses_explicit_task() -> None:
+    client = boto3.client(
+        "ecs",
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    assert ecs._select_task(client, "cluster", "task-123", None) == "task-123"
+
+
+def test_select_task_picks_running_task() -> None:
+    client = boto3.client(
+        "ecs",
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    stubber = Stubber(client)
+    stubber.add_response(
+        "list_tasks",
+        {"taskArns": ["arn:aws:ecs:us-east-1:123:task/abc"]},
+        {"cluster": "cluster", "desiredStatus": "RUNNING", "serviceName": "svc"},
+    )
+    stubber.activate()
+
+    task = ecs._select_task(client, "cluster", None, "svc")
+    assert task == "arn:aws:ecs:us-east-1:123:task/abc"
+
+    stubber.deactivate()
+
+
+def test_select_container_defaults_first() -> None:
+    client = boto3.client(
+        "ecs",
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    stubber = Stubber(client)
+    stubber.add_response(
+        "describe_tasks",
+        {
+            "tasks": [
+                {
+                    "taskArn": "arn:aws:ecs:us-east-1:123:task/abc",
+                    "containers": [
+                        {"name": "app"},
+                        {"name": "sidecar"},
+                    ],
+                }
+            ]
+        },
+        {
+            "cluster": "cluster",
+            "tasks": ["arn:aws:ecs:us-east-1:123:task/abc"],
+        },
+    )
+    stubber.activate()
+
+    container = ecs._select_container(
+        client, "cluster", "arn:aws:ecs:us-east-1:123:task/abc", None
+    )
+    assert container == "app"
+
+    stubber.deactivate()
+
+
+def test_build_execute_command_includes_region() -> None:
+    cmd = ecs._build_execute_command(
+        "cluster",
+        "task-arn",
+        "container",
+        "/bin/sh",
+        "us-east-1",
+    )
+    assert "--region" in cmd
+    assert cmd[0:3] == ["aws", "ecs", "execute-command"]
