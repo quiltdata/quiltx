@@ -48,7 +48,15 @@ def main(argv: list[str] | None = None) -> int:
             catalog_name, str(catalog_url), region, stack_info, log_groups
         )
 
-        print(f"Wrote {len(log_groups)} log groups to {output_path}")
+        stack_name = stack_info.get("StackName", "unknown")
+        account_id = stack_lib.stack_account_id(stack_info) or "unknown"
+        print(f"Found stack: {stack_name}")
+        print(f"  Region: {region}")
+        print(f"  Account: {account_id}")
+        print(f"  Log groups: {len(log_groups)}")
+        print(f"  Outputs: {len(stack_info.get('Outputs', []))}")
+        print(f"  Parameters: {len(stack_info.get('Parameters', []))}")
+        print(f"\nWrote stack details to {output_path}")
         return 0
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
