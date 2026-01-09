@@ -16,27 +16,45 @@ def build_parser() -> argparse.ArgumentParser:
             "Discover and store information about the CloudFormation stack for the configured catalog."
         )
     )
+    parser.add_argument(
+        "--catalog-name",
+        help="Override catalog name (e.g., example.quiltdata.com)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    parser.parse_args(argv)
+    args = parser.parse_args(argv)
 
     try:
-        import quilt3
+        if args.catalog_name:
+            # Override path: use provided catalog name
+            catalog_name = args.catalog_name
+            catalog_url = f"https://{catalog_name}"
 
-        config = quilt3.config()
-        if not config:
-            raise ValueError("No Quilt catalog configured")
+            # Fetch catalog config to get region
+            catalog_config = stack_lib.fetch_catalog_config(catalog_url)
+            region = catalog_config.get("region")
+            if not region:
+                raise ValueError(
+                    f"No region found in catalog config for {catalog_name}"
+                )
+        else:
+            # Default path: use quilt3.config() (existing logic)
+            import quilt3
 
-        catalog_url = config.get("navigator_url")
-        if not catalog_url:
-            raise ValueError("navigator_url missing from Quilt config")
+            config = quilt3.config()
+            if not config:
+                raise ValueError("No Quilt catalog configured")
 
-        catalog_name = stack_lib.extract_catalog_name(config)
-        catalog_config = stack_lib.fetch_catalog_config(str(catalog_url))
-        region = stack_lib.resolve_region(config, catalog_config)
+            catalog_url = config.get("navigator_url")
+            if not catalog_url:
+                raise ValueError("navigator_url missing from Quilt config")
+
+            catalog_name = stack_lib.extract_catalog_name(config)
+            catalog_config = stack_lib.fetch_catalog_config(str(catalog_url))
+            region = stack_lib.resolve_region(config, catalog_config)
 
         cfn_client = boto3.client("cloudformation", region_name=region)
         stack_info = stack_lib.find_matching_stack(cfn_client, str(catalog_url))
