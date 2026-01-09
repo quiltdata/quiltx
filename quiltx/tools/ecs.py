@@ -425,6 +425,13 @@ def main(argv: list[str] | None = None) -> int:
         container = args.container or saved_container
         command = args.command or saved_command or "/bin/bash"
 
+        # Default region from stack payload if not provided
+        region = args.region
+        if not region and payload:
+            payload_region = payload.get("region")
+            if isinstance(payload_region, str):
+                region = payload_region
+
         clusters, services = _extract_ecs_resources(payload)
         if args.list:
             if not payload:
@@ -471,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 service = default_service
 
-        ecs_client = boto3.client("ecs", region_name=args.region)
+        ecs_client = boto3.client("ecs", region_name=region)
         task_arn = _select_task(ecs_client, cluster, args.task, service)
         container = _select_container(ecs_client, cluster, task_arn, container)
 
@@ -483,12 +490,10 @@ def main(argv: list[str] | None = None) -> int:
                 targets, args.reachability_timeout
             )
             cmd = _build_execute_command(
-                cluster, task_arn, container, reachability_cmd, args.region
+                cluster, task_arn, container, reachability_cmd, region
             )
         else:
-            cmd = _build_execute_command(
-                cluster, task_arn, container, command, args.region
-            )
+            cmd = _build_execute_command(cluster, task_arn, container, command, region)
 
         if payload:
             updated = _merge_ecs_defaults(payload, cluster, service, container, command)
