@@ -1,6 +1,6 @@
 [project]
 name = "quiltx"
-version = "0.1.0"
+version = "0.1.1"
 description = "Unified toolkit for Quilt workflows."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -15,18 +15,49 @@ classifiers = [
   "Operating System :: OS Independent"
 ]
 dependencies = [
-  "quilt3"
+  "quilt3",
+  "rich"
 ]
 
 [project.optional-dependencies]
 dev = [
+  "black",
+  "mypy",
+  "pre-commit",
   "poethepoet",
   "pytest"
 ]
 
 [tool.poe.tasks]
-test = "pytest tests"
 run = "uv run quiltx"
+
+[tool.poe.tasks.sync]
+help = "Install dev dependencies."
+cmd = "uv sync --extra dev"
+
+[tool.poe.tasks.test]
+help = "Run unit tests."
+sequence = ["sync", { cmd = "pytest tests" }]
+
+[tool.poe.tasks.setup]
+help = "Install pre-commit hooks."
+sequence = ["sync", { shell = "pre-commit install && pre-commit install --hook-type pre-push" }]
+
+[tool.poe.tasks.lint]
+help = "Lint and type-check code."
+sequence = ["sync", { shell = "black . && mypy quiltx tests" }]
+
+[tool.poe.tasks.lint-check]
+help = "Lint without modifying files (for CI)."
+sequence = ["sync", { shell = "black --check . && mypy quiltx tests" }]
+
+[tool.poe.tasks.bump]
+help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch]"
+cmd = "python scripts/bump_version.py"
+
+[tool.poe.tasks.test-all]
+help = "Install hooks, lint, and run all tests (including integration if enabled)."
+sequence = ["setup", "lint", { shell = "QUILTX_STACK_INTEGRATION=1 pytest tests" }]
 
 [tool.poe.tasks.tag]
 help = "Create and push a git tag for the current version"
@@ -51,3 +82,19 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["quiltx"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+markers = [
+  "integration: marks tests that require live services",
+]

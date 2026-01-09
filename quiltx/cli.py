@@ -52,48 +52,66 @@ def run_tool(tool_name: str, args: list[str]) -> int:
         return 1
 
 
+def _get_tool_description(tool_name: str) -> str:
+    """Get the description for a tool by importing it and extracting from its parser."""
+    try:
+        module_path = TOOLS[tool_name]
+        module = import_module(module_path)
+        if hasattr(module, "build_parser"):
+            tool_parser = module.build_parser()
+            return tool_parser.description or "No description available"
+    except Exception:
+        pass
+    return "No description available"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser."""
     parser = argparse.ArgumentParser(
         prog="quiltx",
-        description="Unified CLI for quiltx tools",
-        epilog="Run 'quiltx <tool> --help' for tool-specific help",
+        description="quilt extended toolkit for managing stack deployments",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List available tools",
+
+    # Create subparsers for each tool
+    subparsers = parser.add_subparsers(
+        dest="tool",
+        title="available tools",
+        metavar="TOOL",
+        help="",  # Suppress the default help to use description instead
     )
-    parser.add_argument(
-        "tool",
-        nargs="?",
-        help="Tool to run",
-    )
-    parser.add_argument(
-        "args",
-        nargs=argparse.REMAINDER,
-        help="Arguments to pass to the tool",
-    )
+
+    # Add each tool as a subparser with its description
+    for tool_name in sorted(TOOLS.keys()):
+        description = _get_tool_description(tool_name)
+        subparsers.add_parser(
+            tool_name,
+            help=description,
+            add_help=False,  # Don't add help here, tool will handle it
+        )
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = build_parser()
-    args = parser.parse_args(argv)
 
-    # Handle --list flag
-    if args.list:
-        list_tools()
-        return 0
+    # If no arguments, show help
+    if not argv and len(sys.argv) == 1:
+        parser.print_help()
+        return 1
 
-    # Require a tool name if not listing
+    # Parse just the tool name first
+    args, remaining = parser.parse_known_args(argv)
+
+    # Require a tool name
     if not args.tool:
         parser.print_help()
         return 1
 
-    # Run the specified tool
-    return run_tool(args.tool, args.args)
+    # Run the specified tool with all remaining arguments
+    return run_tool(args.tool, remaining)
 
 
 if __name__ == "__main__":

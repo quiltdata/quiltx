@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["__version__", "configured_catalog"]
-__version__ = "0.1.0"
+from quiltx import logs as logs
+from quiltx import stack as stack
+
+__all__ = ["__version__", "configured_catalog", "logs", "stack"]
+__version__ = "0.1.1"
 
 
 def configured_catalog(*catalog_url: str, **config_values: Any):

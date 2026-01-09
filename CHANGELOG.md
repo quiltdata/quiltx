@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-01-08
+
+### Added
+
+- `stack` tool: Discover and cache CloudFormation stack metadata with catalog matching
+  - `--catalog-name` flag for flexible catalog specification without quilt3 config
+  - Summary display showing stack name, region, account, and resource counts
+- `logs` tool: Retrieve and follow CloudWatch logs with dynamic display
+  - Follow mode enabled by default with single-screen dynamic updates using Rich Live
+  - Time-based filtering (--since, --until)
+  - Color-coded log levels (ERROR=red, WARN=yellow, INFO=blue, DEBUG=dim)
+  - Auto-detecting console size and stream management
+- CLI improvements: Subparsers showing all available tools with descriptions
+- Developer tooling enhancements:
+  - Pre-commit hooks with Black and mypy
+  - CI lint validation workflow
+  - Poe task sequences for automated dependency management (`./poe setup`, `./poe sync`)
+  - Simplified developer documentation in AGENTS.md
+
 ## [0.1.0] - 2026-01-08
 
 Initial release of quiltx - a unified toolkit for Quilt workflows.

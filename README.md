@@ -33,11 +33,15 @@ Or if installed with `pipx`:
 ```bash
 quiltx --list
 quiltx config https://open.quiltdata.com
+quiltx stack
+quiltx logs --minutes 30 --filter "ERROR"
 ```
 
 ## Built-in Tools
 
 - **config**: Configure and display Quilt catalog settings using the `configured_catalog` API
+- **stack**: Discover the Quilt CloudFormation stack and cache log group metadata in `stack.json`
+- **logs**: Display CloudWatch Logs for the configured catalog using `stack.json`
 
 ## Development
 
