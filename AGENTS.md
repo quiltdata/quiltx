@@ -4,6 +4,7 @@
 
 - Install dev deps: `uv sync --extra dev`
 - Run tests: `./poe test`
+- Install git hooks: `pre-commit install && pre-commit install --hook-type pre-push`
 - Run quiltx from the repo: `uv run quiltx` (or `uv run quiltx --help` to see available commands)
 - Run quiltx tools via poe: `./poe run <tool>` (e.g., `./poe run config` to show current catalog)
 

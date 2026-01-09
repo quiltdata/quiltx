@@ -1,6 +1,6 @@
 [project]
 name = "quiltx"
-version = "0.1.0"
+version = "0.1.1"
 description = "Unified toolkit for Quilt workflows."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,6 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "black",
+  "mypy",
+  "pre-commit",
   "poethepoet",
   "pytest"
 ]
@@ -27,6 +30,13 @@ dev = [
 [tool.poe.tasks]
 test = "pytest tests"
 run = "uv run quiltx"
+
+[tool.poe.tasks.lint]
+shell = "black . && mypy quiltx tests"
+
+[tool.poe.tasks.bump]
+help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch]"
+cmd = "python scripts/bump_version.py"
 
 [tool.poe.tasks.tag]
 help = "Create and push a git tag for the current version"
@@ -51,3 +61,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["quiltx"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
