@@ -17,3 +17,4 @@ repos:
         entry: ./poe test-all
         language: system
         stages: [pre-push]
+        pass_filenames: false
