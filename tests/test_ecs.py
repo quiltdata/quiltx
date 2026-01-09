@@ -85,3 +85,16 @@ def test_build_execute_command_includes_region() -> None:
     )
     assert "--region" in cmd
     assert cmd[0:3] == ["aws", "ecs", "execute-command"]
+
+
+def test_merge_ecs_defaults_updates_payload() -> None:
+    payload = {"stack_name": "stack", "ecs_defaults": {"cluster": "old"}}
+    updated = ecs._merge_ecs_defaults(
+        payload, "cluster", "service", "container", "/bin/sh"
+    )
+    defaults = updated.get("ecs_defaults")
+    assert isinstance(defaults, dict)
+    assert defaults["cluster"] == "cluster"
+    assert defaults["service"] == "service"
+    assert defaults["container"] == "container"
+    assert defaults["command"] == "/bin/sh"
