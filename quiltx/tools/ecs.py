@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--catalog",
         help="Catalog name or URL used to locate stack payload.",
+    )
+    parser.add_argument(
+        "--reachability",
+        action="store_true",
+        help="Check reachability to internal and external services from ECS.",
+    )
+    parser.add_argument(
+        "--reachability-timeout",
+        type=int,
+        default=3,
+        help="TCP timeout in seconds per target (default: 3).",
     )
     parser.add_argument(
         "--dry-run",
@@ -183,6 +195,98 @@ def _coerce_str(value: object | None) -> str | None:
     return None
 
 
+def _add_url_target(
+    targets: list[dict[str, str]], name: str, value: str | None
+) -> None:
+    if not value:
+        return
+    url = value.strip()
+    if not url:
+        return
+    if not url.startswith("http"):
+        url = f"https://{url}"
+    targets.append({"name": name, "url": url})
+
+
+def _collect_reachability_targets(
+    payload: Mapping[str, object] | None,
+) -> list[dict[str, str]]:
+    if not payload:
+        return []
+    catalog_config = payload.get("catalog_config")
+    if not isinstance(catalog_config, dict):
+        return []
+
+    targets: list[dict[str, str]] = []
+    _add_url_target(targets, "registry", _coerce_str(catalog_config.get("registryUrl")))
+    _add_url_target(
+        targets, "api_gateway", _coerce_str(catalog_config.get("apiGatewayEndpoint"))
+    )
+    _add_url_target(targets, "s3_proxy", _coerce_str(catalog_config.get("s3Proxy")))
+    _add_url_target(targets, "email", _coerce_str(catalog_config.get("emailServer")))
+    _add_url_target(targets, "sentry", _coerce_str(catalog_config.get("sentryDSN")))
+
+    if _coerce_str(catalog_config.get("mixpanelToken")):
+        _add_url_target(targets, "mixpanel", "https://api.mixpanel.com/track")
+
+    for key in ("licenseUrl", "licenseServer", "licenseEndpoint"):
+        _add_url_target(targets, "license", _coerce_str(catalog_config.get(key)))
+
+    return targets
+
+
+def _build_reachability_command(
+    targets: list[dict[str, str]],
+    timeout: int,
+) -> str:
+    targets_json = json.dumps(targets)
+    script = (
+        "python_bin=$(command -v python3 || command -v python)\n"
+        'if [ -z "$python_bin" ]; then echo "python not found"; exit 1; fi\n'
+        "$python_bin - <<'PY'\n"
+        "import json\n"
+        "import socket\n"
+        "import sys\n"
+        "import urllib.parse\n\n"
+        f"TARGETS = json.loads({targets_json!r})\n"
+        f"TIMEOUT = {timeout}\n\n"
+        "errors = 0\n"
+        "for target in TARGETS:\n"
+        '    name = target.get("name", "unknown")\n'
+        '    url = target.get("url", "")\n'
+        "    parsed = urllib.parse.urlparse(url)\n"
+        "    host = parsed.hostname or url\n"
+        '    port = parsed.port or (443 if parsed.scheme == "https" else 80)\n\n'
+        "    try:\n"
+        "        socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)\n"
+        "    except Exception as exc:\n"
+        "        print(\n"
+        '            "FAIL {name} dns {host}:{port} {exc}".format(\n'
+        "                name=name, host=host, port=port, exc=exc\n"
+        "            )\n"
+        "        )\n"
+        "        errors += 1\n"
+        "        continue\n\n"
+        "    try:\n"
+        "        with socket.create_connection((host, port), timeout=TIMEOUT):\n"
+        "            print(\n"
+        '                "PASS {name} tcp {host}:{port}".format(\n'
+        "                    name=name, host=host, port=port\n"
+        "                )\n"
+        "            )\n"
+        "    except Exception as exc:\n"
+        "        print(\n"
+        '            "FAIL {name} tcp {host}:{port} {exc}".format(\n'
+        "                name=name, host=host, port=port, exc=exc\n"
+        "            )\n"
+        "        )\n"
+        "        errors += 1\n\n"
+        "sys.exit(1 if errors else 0)\n"
+        "PY\n"
+    )
+    return f"sh -lc {shlex.quote(script)}"
+
+
 def _select_task(
     ecs_client, cluster: str, task: str | None, service: str | None
 ) -> str:
@@ -300,7 +404,21 @@ def main(argv: list[str] | None = None) -> int:
         ecs_client = boto3.client("ecs", region_name=args.region)
         task_arn = _select_task(ecs_client, cluster, args.task, service)
         container = _select_container(ecs_client, cluster, task_arn, container)
-        cmd = _build_execute_command(cluster, task_arn, container, command, args.region)
+
+        if args.reachability:
+            targets = _collect_reachability_targets(payload)
+            if not targets:
+                raise ValueError("No reachability targets found in stack payload")
+            reachability_cmd = _build_reachability_command(
+                targets, args.reachability_timeout
+            )
+            cmd = _build_execute_command(
+                cluster, task_arn, container, reachability_cmd, args.region
+            )
+        else:
+            cmd = _build_execute_command(
+                cluster, task_arn, container, command, args.region
+            )
 
         if payload:
             updated = _merge_ecs_defaults(payload, cluster, service, container, command)

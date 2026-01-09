@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             stack_info,
             log_groups,
             ecs_resources,
+            catalog_config,
         )
 
         stack_name = stack_info.get("StackName", "unknown")

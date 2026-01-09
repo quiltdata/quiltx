@@ -188,6 +188,7 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
                 "resource_type": "AWS::ECS::Cluster",
             }
         ],
+        {"registryUrl": "https://registry.example.com"},
     )
 
     assert output_path.exists()
@@ -198,3 +199,4 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
     assert '"outputs"' in content
     assert '"parameters"' in content
     assert '"ecs_resources"' in content
+    assert '"catalog_config"' in content

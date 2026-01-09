@@ -98,3 +98,26 @@ def test_merge_ecs_defaults_updates_payload() -> None:
     assert defaults["service"] == "service"
     assert defaults["container"] == "container"
     assert defaults["command"] == "/bin/sh"
+
+
+def test_collect_reachability_targets() -> None:
+    payload = {
+        "catalog_config": {
+            "registryUrl": "https://registry.example.com",
+            "apiGatewayEndpoint": "https://api.example.com",
+            "s3Proxy": "https://s3proxy.example.com",
+            "emailServer": "https://email-stage.quiltdata.com",
+            "sentryDSN": "https://key@sentry.io/1410550",
+            "mixpanelToken": "token",
+            "licenseUrl": "https://license.example.com",
+        }
+    }
+    targets = ecs._collect_reachability_targets(payload)
+    names = {target["name"] for target in targets}
+    assert "registry" in names
+    assert "api_gateway" in names
+    assert "s3_proxy" in names
+    assert "email" in names
+    assert "sentry" in names
+    assert "mixpanel" in names
+    assert "license" in names

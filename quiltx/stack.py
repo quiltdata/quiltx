@@ -160,6 +160,7 @@ def write_stack_payload(
     stack: Mapping[str, Any],
     log_groups: list[dict[str, str]],
     ecs_resources: list[dict[str, str]] | None = None,
+    catalog_config: Mapping[str, Any] | None = None,
 ) -> Path:
     target_dir = user_data_path("quiltx") / catalog_name
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -177,6 +178,7 @@ def write_stack_payload(
         "parameters": stack.get("Parameters") or [],
         "log_groups": log_groups,
         "ecs_resources": ecs_resources or [],
+        "catalog_config": catalog_config or {},
     }
 
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
