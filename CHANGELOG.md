@@ -9,9 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Stack discovery tool and supporting library for CloudFormation metadata caching
-- Logs tool and helper library for CloudWatch log retrieval with time filters
-- Linting workflow with Black and mypy, plus pre-commit hooks and CI validation
+- `stack` tool: Discover and cache CloudFormation stack metadata with catalog matching
+  - `--catalog-name` flag for flexible catalog specification without quilt3 config
+  - Summary display showing stack name, region, account, and resource counts
+- `logs` tool: Retrieve and follow CloudWatch logs with dynamic display
+  - Follow mode enabled by default with single-screen dynamic updates using Rich Live
+  - Time-based filtering (--since, --until)
+  - Color-coded log levels (ERROR=red, WARN=yellow, INFO=blue, DEBUG=dim)
+  - Auto-detecting console size and stream management
+- CLI improvements: Subparsers showing all available tools with descriptions
+- Developer tooling enhancements:
+  - Pre-commit hooks with Black and mypy
+  - CI lint validation workflow
+  - Poe task sequences for automated dependency management (`./poe setup`, `./poe sync`)
+  - Simplified developer documentation in AGENTS.md
 
 ## [0.1.0] - 2026-01-08
 
