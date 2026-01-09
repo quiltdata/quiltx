@@ -6,6 +6,49 @@
 - Run tests: `./poe test` (unit) or `./poe test-all` (full suite with linting)
 - Run quiltx from the repo: `./poe run <tool>` (e.g., `./poe run config` or `./poe run --help`)
 
+## Stack Payload Version Checking
+
+The `stack.json` file includes a `quiltx_version` field that records which version of quiltx created it. Tools can use `ensure_min_version()` to check if the stack payload is compatible with features they need.
+
+### Usage Example
+
+```python
+from quiltx.stack import load_stack_payload, ensure_min_version
+
+def main(argv: list[str] | None = None) -> int:
+    catalog_name = "example.quiltdata.com"
+    payload = load_stack_payload(catalog_name)
+
+    # Check if payload has features added in 0.1.3
+    if not ensure_min_version(payload, "0.1.3"):
+        print("Stack data outdated. Run 'quiltx stack' to refresh.", file=sys.stderr)
+        return 1
+
+    # Use payload data...
+    return 0
+```
+
+### When to Require a Minimum Version
+
+Only require a minimum version when:
+
+- A new field was added to `stack.json` that your tool depends on
+- The structure of existing data changed in a breaking way
+
+Example: If version 0.1.2 added `ecs_resources` to the payload, a tool that needs ECS resources should check for `"0.1.2"`.
+
+### Version Field in stack.json
+
+The version is automatically included when `write_stack_payload()` is called:
+
+```json
+{
+  "catalog_name": "example.quiltdata.com",
+  "quiltx_version": "0.1.3",
+  ...
+}
+```
+
 ## Publish to PyPI
 
 The publish workflow uses GitHub OIDC trusted publishing (no API token in secrets) and requires approval via a GitHub environment.

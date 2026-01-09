@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from quiltx import stack as stack_lib
+from quiltx import __version__, stack as stack_lib
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,10 +70,7 @@ def _stack_payload_path(catalog_name: str) -> Path:
 
 
 def _load_stack_payload(catalog_name: str) -> Mapping[str, object] | None:
-    payload_path = _stack_payload_path(catalog_name)
-    if not payload_path.exists():
-        return None
-    return json.loads(payload_path.read_text())
+    return stack_lib.load_stack_payload(catalog_name)
 
 
 def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> None:
@@ -382,24 +379,30 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "No cluster provided and no stack payload found. Run 'quiltx stack' or pass --cluster."
                 )
-            cluster = _prompt_resource(
-                console,
-                "ECS Clusters",
-                clusters,
-                saved_cluster,
-                allow_skip=False,
-            )
+            if len(clusters) == 1:
+                cluster = clusters[0].get("physical_id")
+            else:
+                cluster = _prompt_resource(
+                    console,
+                    "ECS Clusters",
+                    clusters,
+                    saved_cluster,
+                    allow_skip=False,
+                )
         if not cluster:
             raise ValueError("No ECS cluster selected")
 
         if not args.task and service is None and services:
-            service = _prompt_resource(
-                console,
-                "ECS Services",
-                services,
-                saved_service,
-                allow_skip=True,
-            )
+            if len(services) == 1:
+                service = services[0].get("physical_id")
+            else:
+                service = _prompt_resource(
+                    console,
+                    "ECS Services",
+                    services,
+                    saved_service,
+                    allow_skip=True,
+                )
 
         ecs_client = boto3.client("ecs", region_name=args.region)
         task_arn = _select_task(ecs_client, cluster, args.task, service)

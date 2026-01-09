@@ -10,6 +10,8 @@ from urllib.parse import urlparse, urlunparse
 
 from platformdirs import user_data_path
 
+from quiltx._version import __version__
+
 
 def normalize_catalog_url(url: str) -> str:
     url = url.strip().rstrip("/")
@@ -179,7 +181,47 @@ def write_stack_payload(
         "log_groups": log_groups,
         "ecs_resources": ecs_resources or [],
         "catalog_config": catalog_config or {},
+        "quiltx_version": __version__,
     }
 
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return output_path
+
+
+def load_stack_payload(catalog_name: str) -> Mapping[str, Any] | None:
+    """Load stack payload for a catalog."""
+    target_dir = user_data_path("quiltx") / catalog_name
+    output_path = target_dir / "stack.json"
+    if not output_path.exists():
+        return None
+    return json.loads(output_path.read_text())
+
+
+def ensure_min_version(payload: Mapping[str, Any] | None, min_version: str) -> bool:
+    """Check if payload was created by a version >= min_version.
+
+    Returns True if payload has required version or higher.
+    Returns False if payload is None, missing quiltx_version, or has lower version.
+
+    Tools should check this and prompt user to run 'quiltx stack' if False.
+
+    Example:
+        payload = load_stack_payload(catalog_name)
+        if not ensure_min_version(payload, "0.1.3"):
+            print("Stack data outdated. Run 'quiltx stack' to refresh.")
+            return 1
+    """
+    if not payload:
+        return False
+    payload_version = payload.get("quiltx_version")
+    if not payload_version:
+        return False  # Old payload without version field
+
+    # Simple version comparison (works for semantic versions like "0.1.3")
+    def parse_version(v: str) -> tuple[int, ...]:
+        return tuple(int(x) for x in str(v).split("."))
+
+    try:
+        return parse_version(payload_version) >= parse_version(min_version)
+    except (ValueError, AttributeError):
+        return False
