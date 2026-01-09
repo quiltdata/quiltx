@@ -34,6 +34,10 @@ run = "uv run quiltx"
 [tool.poe.tasks.lint]
 shell = "black . && mypy quiltx tests"
 
+[tool.poe.tasks.lint-check]
+help = "Lint without modifying files (for CI)."
+shell = "black --check . && mypy quiltx tests"
+
 [tool.poe.tasks.bump]
 help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch]"
 cmd = "python scripts/bump_version.py"
