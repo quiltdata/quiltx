@@ -9,10 +9,11 @@ repos:
     hooks:
       - id: mypy
         args: ["quiltx", "tests"]
+        pass_filenames: false
   - repo: local
     hooks:
       - id: poe-test
         name: poe test
-        entry: ./poe test
+        entry: ./poe test-all
         language: system
         stages: [pre-push]

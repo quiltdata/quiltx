@@ -29,6 +29,14 @@ def normalize_catalog_url(url: str) -> str:
     return url
 
 
+def normalize_host(value: str) -> str:
+    value = value.strip().rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc:
+        return parsed.hostname.lower() if parsed.hostname else value.lower()
+    return value.lower()
+
+
 def extract_catalog_name(config: Mapping[str, Any]) -> str:
     catalog_name = config.get("catalog")
     if catalog_name:
@@ -64,22 +72,31 @@ def stack_outputs(stack: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     return stack.get("Outputs") or []
 
 
+def stack_parameters(stack: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+    return stack.get("Parameters") or []
+
+
 def find_matching_stack(cfn_client, catalog_url: str) -> Mapping[str, Any]:
-    expected_url = normalize_catalog_url(catalog_url)
+    expected_host = normalize_host(catalog_url)
     paginator = cfn_client.get_paginator("describe_stacks")
+
+    output_host_matches = []
 
     for page in paginator.paginate():
         for stack in page.get("Stacks", []):
             for output in stack_outputs(stack):
-                if str(output.get("OutputKey", "")).lower() != "quiltweburl":
-                    continue
+                output_key = str(output.get("OutputKey", "")).lower()
                 output_value = output.get("OutputValue")
                 if not output_value:
                     continue
-                if normalize_catalog_url(str(output_value)) == expected_url:
-                    return stack
+                if output_key == "quiltwebhost":
+                    if normalize_host(str(output_value)) == expected_host:
+                        output_host_matches.append(stack)
 
-    raise ValueError(f"No stack found with QuiltWebUrl matching {catalog_url}")
+    if output_host_matches:
+        return output_host_matches[0]
+
+    raise ValueError("No stack found with QuiltWebHost matching " f"{catalog_url}")
 
 
 def list_log_group_resources(cfn_client, stack_name: str) -> list[dict[str, str]]:

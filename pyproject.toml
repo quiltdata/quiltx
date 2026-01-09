@@ -31,6 +31,10 @@ dev = [
 test = "pytest tests"
 run = "uv run quiltx"
 
+[tool.poe.tasks.setup]
+help = "Install pre-commit hooks."
+shell = "pre-commit install && pre-commit install --hook-type pre-push"
+
 [tool.poe.tasks.lint]
 shell = "black . && mypy quiltx tests"
 
@@ -41,6 +45,10 @@ shell = "black --check . && mypy quiltx tests"
 [tool.poe.tasks.bump]
 help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch]"
 cmd = "python scripts/bump_version.py"
+
+[tool.poe.tasks.test-all]
+help = "Install hooks and run all tests (including integration if enabled)."
+shell = "./poe setup && QUILTX_STACK_INTEGRATION=1 ./poe test"
 
 [tool.poe.tasks.tag]
 help = "Create and push a git tag for the current version"
@@ -75,3 +83,9 @@ python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+markers = [
+  "integration: marks tests that require live services",
+]

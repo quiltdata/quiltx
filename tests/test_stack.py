@@ -52,8 +52,8 @@ def test_find_matching_stack() -> None:
                     "StackStatus": "CREATE_COMPLETE",
                     "Outputs": [
                         {
-                            "OutputKey": "QuiltWebUrl",
-                            "OutputValue": "https://example.com",
+                            "OutputKey": "QuiltWebHost",
+                            "OutputValue": "example.com",
                         }
                     ],
                 }
