@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-01-08
+
+### Added
+
+- `logs` tool: Enhanced log display and filtering capabilities
+  - Stream-based filtering: Filter logs by stream name with substring matching (e.g., `quiltx logs registry/registry`)
+  - `--wrap` flag: Option to wrap long log messages instead of truncating (auto-enabled when filtering by stream)
+  - Health check coalescing: Consecutive health check log entries are automatically summarized to reduce noise
+  - Default behavior now shows all log streams instead of just LogGroup
+- Developer tooling improvements:
+  - Enhanced `bump_version.py` script with automated git commit workflow
+  - Version bumping now automatically updates `uv.lock` and commits all changes
+  - Added git status validation to prevent bumping with uncommitted changes
+
+### Changed
+
+- `logs` tool positional arguments now filter by stream name instead of log group keys
+- Health check detection improved to recognize ELB health checker and GET / requests
+
 ## [0.1.1] - 2026-01-08
 
 ### Added

@@ -24,9 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Display CloudWatch logs for the configured Quilt catalog."
     )
     parser.add_argument(
-        "log_keys",
+        "streams",
         nargs="*",
-        help="Log keys to display (e.g., 'api', 'lambda'). Default: LogGroup (main container logs).",
+        help="Log stream names to display (substring match). If not specified, shows all streams.",
     )
     parser.add_argument(
         "--list",
@@ -93,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable colored output.",
     )
+    parser.add_argument(
+        "--wrap",
+        action="store_true",
+        help="Wrap long messages instead of truncating (default when filtering by stream).",
+    )
     return parser
 
 
@@ -128,31 +133,24 @@ def _list_available_logs(console: Console, payload: Mapping[str, Any]) -> None:
 
     console.print("\n[bold cyan]Available Log Groups[/bold cyan]")
     console.print(table)
-    console.print("\n[dim]Usage: quiltx logs [KEY...][/dim]")
-    console.print("[dim]Example: quiltx logs LogGroup BenchlingApiLogGroup[/dim]")
-    console.print("[dim]Default: quiltx logs (shows LogGroup)[/dim]")
+    console.print("\n[dim]Usage: quiltx logs [STREAM...][/dim]")
+    console.print("[dim]Example: quiltx logs registry/registry[/dim]")
+    console.print("[dim]Default: quiltx logs (shows all streams)[/dim]")
 
 
-def _select_log_groups_by_keys(
-    log_entries: list[Mapping[str, Any]], keys: list[str]
-) -> dict[str, str]:
-    """Select log groups by their logical keys.
+def _get_all_log_groups(log_entries: list[Mapping[str, Any]]) -> dict[str, str]:
+    """Get all log groups from the payload.
 
     Returns:
         Dict mapping logical_id to log_group_name
     """
-    if not keys:
-        return {}
-
-    selected = {}
+    result = {}
     for entry in log_entries:
         logical_id = entry.get("logical_id", "")
-        if logical_id in keys:
-            log_group_name = entry.get("log_group_name")
-            if log_group_name:
-                selected[logical_id] = log_group_name
-
-    return selected
+        log_group_name = entry.get("log_group_name")
+        if logical_id and log_group_name:
+            result[logical_id] = log_group_name
+    return result
 
 
 def _get_level_style(level: str) -> str:
@@ -166,6 +164,60 @@ def _get_level_style(level: str) -> str:
     }.get(level, "")
 
 
+def _coalesce_health_checks(
+    events: list[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Coalesce consecutive health check log entries into a single summary.
+
+    Replaces consecutive health check entries with a single entry showing
+    the most recent timestamp and a count of coalesced checks.
+    """
+    if not events:
+        return events
+
+    result: list[Mapping[str, Any]] = []
+    health_check_group: list[Mapping[str, Any]] = []
+
+    for event in events:
+        message = event.get("message", "")
+        if logs_lib.is_health_check(message):
+            health_check_group.append(event)
+        else:
+            # Flush any accumulated health checks
+            if health_check_group:
+                # Keep only the most recent health check
+                most_recent = health_check_group[-1]
+                count = len(health_check_group)
+                # Add count to message if more than one
+                if count > 1:
+                    modified_event = dict(most_recent)
+                    modified_event["message"] = (
+                        f"[{count} health checks coalesced] "
+                        + modified_event.get("message", "")
+                    )
+                    result.append(modified_event)
+                else:
+                    result.append(most_recent)
+                health_check_group = []
+            result.append(event)
+
+    # Flush any remaining health checks at the end
+    if health_check_group:
+        most_recent = health_check_group[-1]
+        count = len(health_check_group)
+        if count > 1:
+            modified_event = dict(most_recent)
+            modified_event["message"] = (
+                f"[{count} health checks coalesced] "
+                + modified_event.get("message", "")
+            )
+            result.append(modified_event)
+        else:
+            result.append(most_recent)
+
+    return result
+
+
 def _display_log_section(
     console: Console,
     logical_id: str,
@@ -175,6 +227,9 @@ def _display_log_section(
     """Display logs for a single log group in a section."""
     if not events:
         return
+
+    # Coalesce health checks first
+    events = _coalesce_health_checks(events)
 
     # Apply limit if specified
     if limit > 0:
@@ -248,6 +303,8 @@ def _follow_logs_dynamic(
     start_ms: int,
     filter_pattern: str | None,
     payload: Mapping[str, Any],
+    wrap: bool = False,
+    stream_filters: list[str] | None = None,
 ) -> None:
     """Follow logs in real-time with dynamic single-screen display.
 
@@ -330,8 +387,11 @@ def _follow_logs_dynamic(
                 header.append(f"─── {stream_name} ───", style="bold cyan")
                 table.add_row(header)
 
+                # Coalesce health checks for this stream
+                coalesced_events = _coalesce_health_checks(display_events)
+
                 # Add events
-                for event in display_events:
+                for event in coalesced_events:
                     structured = logs_lib.format_event_structured(event)
                     text = Text()
 
@@ -344,13 +404,14 @@ def _follow_logs_dynamic(
                     text.append(f"[{structured['level']}]", style=level_style)
                     text.append(" ")
 
-                    # Message (truncate if too long)
+                    # Message (truncate if too long, unless wrap is enabled)
                     message = structured["message"]
-                    max_msg_len = (
-                        console_width - 30
-                    )  # Reserve space for timestamp and level
-                    if len(message) > max_msg_len:
-                        message = message[: max_msg_len - 3] + "..."
+                    if not wrap:
+                        max_msg_len = (
+                            console_width - 30
+                        )  # Reserve space for timestamp and level
+                        if len(message) > max_msg_len:
+                            message = message[: max_msg_len - 3] + "..."
                     text.append(message)
 
                     table.add_row(text)
@@ -382,6 +443,11 @@ def _follow_logs_dynamic(
                     structured = logs_lib.format_event_structured(event)
                     log_group_name = event.get("logGroupName", "")
                     stream_name = structured["log_stream"] or "unknown"
+
+                    # Apply stream filters if specified
+                    if stream_filters:
+                        if not any(sf in stream_name for sf in stream_filters):
+                            continue
 
                     # Find the logical_id for this log group
                     logical_id = "unknown"
@@ -431,21 +497,19 @@ def main(argv: list[str] | None = None) -> int:
             _list_available_logs(console, payload)
             return 0
 
-        # Determine which log keys to use
-        log_keys = args.log_keys if args.log_keys else ["LogGroup"]
-
-        # Select log groups by keys
+        # Get all log groups from payload
         log_entries = payload.get("log_groups", [])
-        log_groups = _select_log_groups_by_keys(log_entries, log_keys)
+        log_groups = _get_all_log_groups(log_entries)
 
         if not log_groups:
+            console.print("[red]Error:[/red] No log groups found in stack payload")
             console.print(
-                f"[red]Error:[/red] No log groups found for keys: {', '.join(log_keys)}"
-            )
-            console.print(
-                "\n[dim]Run 'quiltx logs --list' to see available keys.[/dim]"
+                "\n[dim]Run 'quiltx logs --list' to see available log groups.[/dim]"
             )
             return 1
+
+        # Determine stream filters from positional arguments
+        stream_filters = args.streams if args.streams else None
 
         region = payload.get("region")
         if not region:
@@ -457,6 +521,9 @@ def main(argv: list[str] | None = None) -> int:
 
         logs_client = boto3.client("logs", region_name=region)
 
+        # Auto-enable wrap when stream filter is specified
+        wrap = args.wrap or bool(stream_filters)
+
         # Handle follow mode vs static display
         if args.follow:
             _follow_logs_dynamic(
@@ -466,6 +533,8 @@ def main(argv: list[str] | None = None) -> int:
                 start_ms,
                 args.filter,
                 payload,
+                wrap,
+                stream_filters,
             )
         else:
             # Display static logs organized by group

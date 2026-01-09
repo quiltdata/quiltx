@@ -94,6 +94,19 @@ def iter_log_events(
                 yield event
 
 
+def is_health_check(message: str) -> bool:
+    """Check if a log message is a health check request.
+
+    Health checks are identified by:
+    - ELB-HealthChecker user agent
+    - GET / or GET /healthcheck requests with 200 status
+    """
+    msg_lower = message.lower()
+    return "elb-healthchecker" in msg_lower or (
+        ("get /" in msg_lower or "get /healthcheck" in msg_lower) and "200" in message
+    )
+
+
 def parse_log_level(message: str) -> tuple[str, str]:
     """Extract log level from message and return (level, remaining_message).
 
