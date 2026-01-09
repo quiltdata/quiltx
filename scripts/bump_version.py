@@ -2,8 +2,23 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
+
+
+def run_command(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    """Run a shell command and return the result."""
+    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+
+
+def check_git_status() -> None:
+    """Ensure there are no uncommitted changes."""
+    result = run_command(["git", "status", "--porcelain"])
+    if result.stdout.strip():
+        print("Error: You have uncommitted changes. Please commit or stash them first.")
+        print(result.stdout)
+        sys.exit(1)
 
 
 def bump_version(version: str, part: str) -> str:
@@ -37,6 +52,9 @@ def update_file(path: Path, pattern: str, repl: str) -> None:
 def main() -> int:
     part = sys.argv[1] if len(sys.argv) > 1 else "patch"
 
+    # Check for uncommitted changes
+    check_git_status()
+
     pyproject = Path("pyproject.toml")
     init_file = Path("quiltx/__init__.py")
 
@@ -47,10 +65,22 @@ def main() -> int:
     current_version = match.group(1)
     next_version = bump_version(current_version, part)
 
+    print(f"Bumping version: {current_version} -> {next_version}")
+
+    # Update version in files
     update_file(pyproject, r'^version = "[^"]+"', f'version = "{next_version}"')
     update_file(init_file, r'^__version__ = "[^"]+"', f'__version__ = "{next_version}"')
 
-    print(f"{current_version} -> {next_version}")
+    # Update uv.lock
+    print("Updating uv.lock...")
+    run_command(["uv", "lock"])
+
+    # Commit all changes
+    print("Committing changes...")
+    run_command(["git", "add", "pyproject.toml", "quiltx/__init__.py", "uv.lock"])
+    run_command(["git", "commit", "-m", f"Bump version to {next_version}"])
+
+    print(f"✓ Version bumped to {next_version} and committed")
     return 0
 
 
