@@ -141,16 +141,18 @@ The publish workflow uses GitHub OIDC trusted publishing (no API token in secret
    git tag -d v0.1.0 && git push origin :refs/tags/v0.1.0
    ```
 
-3. **Create a GitHub Release**:
-   - Go to the repository's Releases page
-   - Click "Draft a new release"
-   - Select the tag you just pushed (e.g., `v0.1.0`)
-   - Add release notes (can copy from CHANGELOG.md)
-   - Publish the release
+3. **Automated Release and Publishing**:
 
-   This triggers the [publish workflow](.github/workflows/publish.yml) which:
+   The tag push automatically triggers the [publish workflow](.github/workflows/publish.yml) which:
+   - Builds the package with uv
+   - **Automatically creates a GitHub Release** with auto-generated release notes from commits
+   - Attaches distribution files (wheel and tarball) to the release
    - Waits for approval from a designated reviewer
-   - Builds the package
    - Publishes to PyPI using OIDC trusted publishing
 
-Alternatively, you can trigger the publish workflow manually from the Actions tab.
+   The release notes are auto-generated from commit messages. To view or edit the release:
+   - Go to the repository's Releases page (https://github.com/quiltdata/quiltx/releases)
+   - Find the newly created release for your tag
+   - Optionally edit to add custom release notes from [CHANGELOG.md](CHANGELOG.md)
+
+   You can also trigger the publish workflow manually from the Actions tab if needed.
