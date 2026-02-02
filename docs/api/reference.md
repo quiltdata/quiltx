@@ -49,7 +49,9 @@ Core utilities exported from the main `quiltx` package.
       show_root_heading: true
       show_source: false
       members:
-        - configured_catalog
+        - get_catalog_config
+        - get_catalog_url
+        - set_catalog_url
         - __version__
 
 ## Logs Module
