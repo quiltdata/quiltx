@@ -56,13 +56,13 @@ def main(argv: list[str] | None = None) -> int:
             catalog_config = stack_lib.fetch_catalog_config(str(catalog_url))
             region = stack_lib.resolve_region(config, catalog_config)
 
-        cfn_client = boto3.client("cloudformation", region_name=region)
-        stack_info = stack_lib.find_matching_stack(cfn_client, str(catalog_url))
+        # Use the simplified API - pass region and let the functions create clients
+        stack_info = stack_lib.find_matching_stack(str(catalog_url), region=region)
         log_groups = stack_lib.list_log_group_resources(
-            cfn_client, stack_info["StackName"]
+            stack_info["StackName"], region=region
         )
         ecs_resources = stack_lib.list_ecs_resources(
-            cfn_client, stack_info["StackName"]
+            stack_info["StackName"], region=region
         )
         output_path = stack_lib.write_stack_payload(
             catalog_name,

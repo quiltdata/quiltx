@@ -78,7 +78,46 @@ def stack_parameters(stack: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     return stack.get("Parameters") or []
 
 
-def find_matching_stack(cfn_client, catalog_url: str) -> Mapping[str, Any]:
+def find_matching_stack(
+    catalog_url: str,
+    region: str | None = None,
+    cfn_client: Any = None,
+) -> Mapping[str, Any]:
+    """Find CloudFormation stack matching the catalog URL.
+
+    Args:
+        catalog_url: Catalog URL to match (e.g., "https://example.quiltdata.com")
+        region: AWS region (defaults to fetching from catalog config if not provided)
+        cfn_client: Optional CloudFormation client (creates one if not provided)
+
+    Returns:
+        Stack information dictionary
+
+    Raises:
+        ValueError: If no matching stack is found
+    """
+    # Auto-detect region from catalog config if not provided
+    if region is None and cfn_client is None:
+        try:
+            catalog_config = fetch_catalog_config(catalog_url)
+            region = catalog_config.get("region")
+            if not region:
+                raise ValueError(
+                    f"No region found in catalog config for {catalog_url}. "
+                    "Please provide region parameter explicitly."
+                )
+        except Exception as exc:
+            raise ValueError(
+                f"Could not auto-detect region for {catalog_url}: {exc}. "
+                "Please provide region parameter explicitly."
+            ) from exc
+
+    # Create client if not provided
+    if cfn_client is None:
+        import boto3
+
+        cfn_client = boto3.client("cloudformation", region_name=region)
+
     expected_host = normalize_host(catalog_url)
     paginator = cfn_client.get_paginator("describe_stacks")
 
@@ -101,7 +140,28 @@ def find_matching_stack(cfn_client, catalog_url: str) -> Mapping[str, Any]:
     raise ValueError("No stack found with QuiltWebHost matching " f"{catalog_url}")
 
 
-def list_log_group_resources(cfn_client, stack_name: str) -> list[dict[str, str]]:
+def list_log_group_resources(
+    stack_name: str,
+    region: str | None = None,
+    cfn_client: Any = None,
+) -> list[dict[str, str]]:
+    """List CloudWatch log groups in a CloudFormation stack.
+
+    Args:
+        stack_name: CloudFormation stack name
+        region: AWS region (required if cfn_client not provided)
+        cfn_client: Optional CloudFormation client (creates one if not provided)
+
+    Returns:
+        List of log group resource dictionaries
+    """
+    if cfn_client is None:
+        if region is None:
+            raise ValueError("Either region or cfn_client must be provided")
+        import boto3
+
+        cfn_client = boto3.client("cloudformation", region_name=region)
+
     paginator = cfn_client.get_paginator("list_stack_resources")
     log_groups = []
 
@@ -119,7 +179,28 @@ def list_log_group_resources(cfn_client, stack_name: str) -> list[dict[str, str]
     return log_groups
 
 
-def list_ecs_resources(cfn_client, stack_name: str) -> list[dict[str, str]]:
+def list_ecs_resources(
+    stack_name: str,
+    region: str | None = None,
+    cfn_client: Any = None,
+) -> list[dict[str, str]]:
+    """List ECS resources in a CloudFormation stack.
+
+    Args:
+        stack_name: CloudFormation stack name
+        region: AWS region (required if cfn_client not provided)
+        cfn_client: Optional CloudFormation client (creates one if not provided)
+
+    Returns:
+        List of ECS resource dictionaries
+    """
+    if cfn_client is None:
+        if region is None:
+            raise ValueError("Either region or cfn_client must be provided")
+        import boto3
+
+        cfn_client = boto3.client("cloudformation", region_name=region)
+
     paginator = cfn_client.get_paginator("list_stack_resources")
     ecs_resources: list[dict[str, str]] = []
 

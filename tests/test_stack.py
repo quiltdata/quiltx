@@ -63,7 +63,7 @@ def test_find_matching_stack() -> None:
     )
     stubber.activate()
 
-    stack_info = stack.find_matching_stack(client, "https://example.com/")
+    stack_info = stack.find_matching_stack("https://example.com/", cfn_client=client)
     assert stack_info["StackName"] == "quilt-stack"
 
     stubber.deactivate()
@@ -101,7 +101,7 @@ def test_list_log_group_resources() -> None:
     )
     stubber.activate()
 
-    log_groups = stack.list_log_group_resources(client, "quilt-stack")
+    log_groups = stack.list_log_group_resources("quilt-stack", cfn_client=client)
     assert log_groups == [
         {"logical_id": "LogGroupA", "log_group_name": "/aws/lambda/log-group-a"}
     ]
@@ -148,7 +148,7 @@ def test_list_ecs_resources() -> None:
     )
     stubber.activate()
 
-    ecs_resources = stack.list_ecs_resources(client, "quilt-stack")
+    ecs_resources = stack.list_ecs_resources("quilt-stack", cfn_client=client)
     assert ecs_resources == [
         {
             "logical_id": "EcsCluster",
