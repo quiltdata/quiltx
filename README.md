@@ -39,75 +39,33 @@ quiltx logs --minutes 30 --filter "ERROR"
 
 ## Built-in Tools
 
-- **config**: Configure and display Quilt catalog settings using the `configured_catalog` API
+- **config**: Configure and display Quilt catalog settings
 - **stack**: Discover the Quilt CloudFormation stack and cache log group metadata in `stack.json`
 - **logs**: Display CloudWatch Logs for the configured catalog using `stack.json`
 
-## Development
+## API Examples
 
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/ernest/quiltx.git
-cd quiltx
-
-# Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install in development mode
-pip install -e ".[dev]"
-```
-
-### Running Tests
-
-```bash
-# Using poe (recommended)
-./poe test
-
-# Or directly with pytest
-pytest tests
-```
-
-### Project Structure
-
-```text
-quiltx/
-├─ quiltx/              # Main package
-│  ├─ cli.py           # Unified CLI with auto-discovery
-│  ├─ tools/           # Built-in tools (auto-discovered)
-│  │  └─ config.py
-│  └─ __init__.py      # Shared utilities (configured_catalog)
-├─ tests/              # Test suite
-├─ pyproject.toml      # Package configuration
-└─ poe                 # Task runner script
-```
-
-### Adding New Tools
-
-Tools are automatically discovered from the `quiltx/tools/` directory. To add a new tool:
-
-1. Create a new file in `quiltx/tools/` (e.g., `mytool.py`)
-2. Implement a `main(argv)` function that returns an exit code
-3. The tool will be automatically available via `quiltx mytool`
-4. Add tests in `tests/`
-
-Example tool structure:
+### Discover Stack Name
 
 ```python
-"""My new tool."""
-import argparse
+from quiltx import get_catalog_url
+from quiltx.stack import find_matching_stack
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="My tool description")
-    # Add arguments
-    return parser
+stack = find_matching_stack(get_catalog_url())
+print(stack["StackName"])
+```
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    # Tool implementation
-    return 0
+### Get Catalog Configuration
+
+```python
+from quiltx import get_catalog_url, get_catalog_region
+
+# Get specific configuration values
+catalog_url = get_catalog_url()
+region = get_catalog_region()
+
+print(f"Catalog: {catalog_url}")
+print(f"Region: {region}")
 ```
 
 ## License

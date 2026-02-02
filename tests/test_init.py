@@ -3,31 +3,99 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 import quiltx
 
 
-def test_configured_catalog_calls_quilt3_config(monkeypatch) -> None:
+def test_get_catalog_config(monkeypatch) -> None:
+    """Test get_catalog_config returns quilt3.config()."""
+    fake_config = {"navigator_url": "https://example.test", "region": "us-east-1"}
+
+    def _config_return():
+        return fake_config
+
+    fake_quilt3 = types.SimpleNamespace(config=_config_return)
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    config = quiltx.get_catalog_config()
+
+    assert config == fake_config
+
+
+def test_get_catalog_config_raises_when_not_configured(monkeypatch) -> None:
+    """Test get_catalog_config raises ValueError when no catalog configured."""
+
+    def _config_return():
+        return {}
+
+    fake_quilt3 = types.SimpleNamespace(config=_config_return)
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    with pytest.raises(ValueError, match="No Quilt catalog configured"):
+        quiltx.get_catalog_config()
+
+
+def test_get_catalog_url(monkeypatch) -> None:
+    """Test get_catalog_url extracts navigator_url."""
+    fake_config = {"navigator_url": "https://example.test", "region": "us-east-1"}
+
+    def _config_return():
+        return fake_config
+
+    fake_quilt3 = types.SimpleNamespace(config=_config_return)
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    url = quiltx.get_catalog_url()
+
+    assert url == "https://example.test"
+
+
+def test_get_catalog_region(monkeypatch) -> None:
+    """Test get_catalog_region extracts region."""
+    fake_config = {"navigator_url": "https://example.test", "region": "us-east-1"}
+
+    def _config_return():
+        return fake_config
+
+    fake_quilt3 = types.SimpleNamespace(config=_config_return)
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    region = quiltx.get_catalog_region()
+
+    assert region == "us-east-1"
+
+
+def test_get_catalog_region_raises_when_missing(monkeypatch) -> None:
+    """Test get_catalog_region raises ValueError when region is missing."""
+    fake_config = {"navigator_url": "https://example.test"}
+
+    def _config_return():
+        return fake_config
+
+    fake_quilt3 = types.SimpleNamespace(config=_config_return)
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    with pytest.raises(ValueError, match="region not found"):
+        quiltx.get_catalog_region()
+
+
+def test_set_catalog_url(monkeypatch) -> None:
+    """Test set_catalog_url calls quilt3.config with args."""
     called = {}
 
     def _config(*args, **kwargs):
         called["args"] = args
         called["kwargs"] = kwargs
+        return {"navigator_url": args[0] if args else None}
 
-    class _Config:
-        pass
-
-    def _config_return(*args, **kwargs):
-        _config(*args, **kwargs)
-        return _Config()
-
-    fake_quilt3 = types.SimpleNamespace(config=_config_return)
-
+    fake_quilt3 = types.SimpleNamespace(config=_config)
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
 
-    config = quiltx.configured_catalog("https://example.test", token="abc123")
+    config = quiltx.set_catalog_url("https://example.test", token="abc123")
 
     assert called == {
         "args": ("https://example.test",),
         "kwargs": {"token": "abc123"},
     }
-    assert isinstance(config, _Config)
+    assert config["navigator_url"] == "https://example.test"

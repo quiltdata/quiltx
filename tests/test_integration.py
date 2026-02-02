@@ -8,12 +8,13 @@ import quilt3.util as util
 import quiltx
 
 
-def test_configured_catalog_sets_open_quiltdata() -> None:
+def test_set_catalog_url_configures_open_quiltdata() -> None:
+    """Test set_catalog_url actually configures quilt3."""
     config_path = Path(util.CONFIG_PATH)
     backup = config_path.read_bytes() if config_path.exists() else None
 
     try:
-        config = quiltx.configured_catalog(util.OPEN_DATA_URL)
+        config = quiltx.set_catalog_url(util.OPEN_DATA_URL)
 
         assert config.get("navigator_url") == util.OPEN_DATA_URL
     finally:

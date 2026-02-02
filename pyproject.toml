@@ -1,6 +1,6 @@
 [project]
 name = "quiltx"
-version = "0.2.0"
+version = "0.3.0"
 description = "Unified toolkit for Quilt workflows."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,6 +26,12 @@ dev = [
   "pre-commit",
   "poethepoet",
   "pytest"
+]
+docs = [
+  "mkdocs>=1.5.0",
+  "mkdocs-material>=9.5.0",
+  "mkdocstrings[python]>=0.24.0",
+  "mkdocs-autorefs>=0.5.0",
 ]
 
 [tool.poe.tasks]
