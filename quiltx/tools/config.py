@@ -31,14 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.catalog_url:
             # Show the current config without modifying
-            import quilt3
-
-            config = quilt3.config()
-            if config:
+            try:
+                config = quiltx.get_catalog_config()
                 for key, value in config.items():
                     print(f"{key}: {value}")
-            else:
-                print("No catalog configured", file=sys.stderr)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
                 return 1
         else:
             # Configure the catalog
@@ -46,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.token:
                 config_kwargs["token"] = args.token
 
-            config = quiltx.configured_catalog(args.catalog_url, **config_kwargs)
+            config = quiltx.set_catalog_url(args.catalog_url, **config_kwargs)
 
             print(f"Configured catalog: {args.catalog_url}")
             if config:

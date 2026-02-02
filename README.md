@@ -43,6 +43,33 @@ quiltx logs --minutes 30 --filter "ERROR"
 - **stack**: Discover the Quilt CloudFormation stack and cache log group metadata in `stack.json`
 - **logs**: Display CloudWatch Logs for the configured catalog using `stack.json`
 
+## Quick Example: Discover Stack Name
+
+Concise version (region auto-detected):
+
+```python
+from quiltx import configured_catalog
+from quiltx.stack import find_matching_stack
+
+stack = find_matching_stack(configured_catalog()["navigator_url"])
+print(stack["StackName"])
+```
+
+Explicit version (more control):
+
+```python
+from quiltx import configured_catalog
+from quiltx.stack import find_matching_stack, fetch_catalog_config, resolve_region
+
+config = configured_catalog()
+catalog_url = config["navigator_url"]
+catalog_config = fetch_catalog_config(catalog_url)
+region = resolve_region(config, catalog_config)
+
+stack = find_matching_stack(catalog_url, region=region)
+print(stack["StackName"])
+```
+
 ## Development
 
 ### Setup
