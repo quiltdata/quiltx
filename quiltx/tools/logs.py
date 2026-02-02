@@ -272,7 +272,11 @@ def _display_logs_by_group(
         # Fetch events for this log group
         events = list(
             logs_lib.iter_log_events(
-                logs_client, [log_group_name], start_ms, end_ms, filter_pattern
+                [log_group_name],
+                start_ms,
+                end_ms,
+                filter_pattern,
+                logs_client=logs_client,
             )
         )
 
@@ -430,11 +434,11 @@ def _follow_logs_dynamic(
                 now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                 new_events = list(
                     logs_lib.iter_log_events(
-                        logs_client,
                         log_group_names,
                         last_timestamp,
                         now_ms,
                         filter_pattern,
+                        logs_client=logs_client,
                     )
                 )
 

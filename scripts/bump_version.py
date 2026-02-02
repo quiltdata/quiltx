@@ -56,7 +56,7 @@ def main() -> int:
     check_git_status()
 
     pyproject = Path("pyproject.toml")
-    init_file = Path("quiltx/__init__.py")
+    version_file = Path("quiltx/_version.py")
 
     match = re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.MULTILINE)
     if not match:
@@ -69,7 +69,9 @@ def main() -> int:
 
     # Update version in files
     update_file(pyproject, r'^version = "[^"]+"', f'version = "{next_version}"')
-    update_file(init_file, r'^__version__ = "[^"]+"', f'__version__ = "{next_version}"')
+    update_file(
+        version_file, r'^__version__ = "[^"]+"', f'__version__ = "{next_version}"'
+    )
 
     # Update uv.lock
     print("Updating uv.lock...")
@@ -77,7 +79,7 @@ def main() -> int:
 
     # Commit all changes
     print("Committing changes...")
-    run_command(["git", "add", "pyproject.toml", "quiltx/__init__.py", "uv.lock"])
+    run_command(["git", "add", "pyproject.toml", "quiltx/_version.py", "uv.lock"])
     run_command(["git", "commit", "-m", f"Bump version to {next_version}"])
 
     print(f"✓ Version bumped to {next_version} and committed")

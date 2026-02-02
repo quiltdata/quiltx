@@ -75,7 +75,9 @@ def test_iter_log_events_with_filter() -> None:
     )
     stubber.activate()
 
-    events = list(logs.iter_log_events(client, ["/aws/lambda/a"], 1, 2, "ERROR"))
+    events = list(
+        logs.iter_log_events(["/aws/lambda/a"], 1, 2, "ERROR", logs_client=client)
+    )
     assert events[0]["message"] == "hello"
 
     stubber.deactivate()

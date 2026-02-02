@@ -6,6 +6,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-01
+
+### Added
+
+- **New `ecs` tool**: Interactive shell access to ECS tasks
+  - Open interactive shells in running ECS containers using AWS Session Manager
+  - Automatic Session Manager plugin detection with installation instructions
+  - Smart defaults: Auto-selects RegistryService and remembers previous selections
+  - Reachability checks: Test network connectivity to catalog services from ECS (`--reachability`)
+  - Execute Command management: Automatically detects and enables Execute Command on services
+  - Interactive prompts for cluster/service selection with `--prompt` flag
+  - List mode: View available ECS clusters and services with `--list`
+  - Region auto-detection from stack payload
+- **New `utils` module**: General utility functions
+  - `get_bucket_region()`: Get AWS region of S3 buckets
+  - `normalize_url()`: Normalize URLs to canonical form
+  - `get_hostname()`: Extract hostname from URLs
+- **Stack payload enhancements**:
+  - ECS resources now included in stack payload (`ecs_resources`)
+  - Catalog configuration cached in stack payload (`catalog_config`)
+  - Version tracking with `quiltx_version` field
+  - New `load_stack_payload()` function for loading cached data
+  - New `ensure_min_version()` function for version compatibility checks
+- **Stack API improvements**:
+  - New `list_ecs_resources()` function for discovering ECS clusters/services
+  - Auto-detection of AWS region from catalog configuration
+  - Automatic boto3 client creation when not provided
+
+### Changed
+
+- **Stack API simplified**: CloudFormation client now optional
+  - `find_matching_stack()`: Now accepts `region` parameter and creates client automatically
+  - `list_log_group_resources()`: Now accepts `region` parameter and creates client automatically
+  - All stack functions can optionally accept pre-configured boto3 clients for advanced use cases
+- **Code organization**:
+  - Moved `configured_catalog()` to separate `quiltx.config` module
+  - Created `quiltx._version` module for centralized version management
+  - Reduced exports from `quiltx.__init__` to only `__version__` and `configured_catalog`
+- **Developer tooling**:
+  - Updated `bump_version.py` script to use `_version.py` instead of `__init__.py`
+
 ## [0.1.3] - 2026-01-09
 
 ### Changed

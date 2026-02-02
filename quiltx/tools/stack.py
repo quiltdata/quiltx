@@ -56,13 +56,22 @@ def main(argv: list[str] | None = None) -> int:
             catalog_config = stack_lib.fetch_catalog_config(str(catalog_url))
             region = stack_lib.resolve_region(config, catalog_config)
 
-        cfn_client = boto3.client("cloudformation", region_name=region)
-        stack_info = stack_lib.find_matching_stack(cfn_client, str(catalog_url))
+        # Use the simplified API - pass region and let the functions create clients
+        stack_info = stack_lib.find_matching_stack(str(catalog_url), region=region)
         log_groups = stack_lib.list_log_group_resources(
-            cfn_client, stack_info["StackName"]
+            stack_info["StackName"], region=region
+        )
+        ecs_resources = stack_lib.list_ecs_resources(
+            stack_info["StackName"], region=region
         )
         output_path = stack_lib.write_stack_payload(
-            catalog_name, str(catalog_url), region, stack_info, log_groups
+            catalog_name,
+            str(catalog_url),
+            region,
+            stack_info,
+            log_groups,
+            ecs_resources,
+            catalog_config,
         )
 
         stack_name = stack_info.get("StackName", "unknown")
@@ -71,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Region: {region}")
         print(f"  Account: {account_id}")
         print(f"  Log groups: {len(log_groups)}")
+        print(f"  ECS resources: {len(ecs_resources)}")
         print(f"  Outputs: {len(stack_info.get('Outputs', []))}")
         print(f"  Parameters: {len(stack_info.get('Parameters', []))}")
         print(f"\nWrote stack details to {output_path}")

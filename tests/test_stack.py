@@ -63,7 +63,7 @@ def test_find_matching_stack() -> None:
     )
     stubber.activate()
 
-    stack_info = stack.find_matching_stack(client, "https://example.com/")
+    stack_info = stack.find_matching_stack("https://example.com/", cfn_client=client)
     assert stack_info["StackName"] == "quilt-stack"
 
     stubber.deactivate()
@@ -101,9 +101,65 @@ def test_list_log_group_resources() -> None:
     )
     stubber.activate()
 
-    log_groups = stack.list_log_group_resources(client, "quilt-stack")
+    log_groups = stack.list_log_group_resources("quilt-stack", cfn_client=client)
     assert log_groups == [
         {"logical_id": "LogGroupA", "log_group_name": "/aws/lambda/log-group-a"}
+    ]
+
+    stubber.deactivate()
+
+
+def test_list_ecs_resources() -> None:
+    client = boto3.client(
+        "cloudformation",
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    stubber = Stubber(client)
+    stubber.add_response(
+        "list_stack_resources",
+        {
+            "StackResourceSummaries": [
+                {
+                    "LastUpdatedTimestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    "LogicalResourceId": "EcsCluster",
+                    "PhysicalResourceId": "cluster-name",
+                    "ResourceType": "AWS::ECS::Cluster",
+                    "ResourceStatus": "CREATE_COMPLETE",
+                },
+                {
+                    "LastUpdatedTimestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    "LogicalResourceId": "SomeOther",
+                    "PhysicalResourceId": "other",
+                    "ResourceType": "AWS::S3::Bucket",
+                    "ResourceStatus": "CREATE_COMPLETE",
+                },
+                {
+                    "LastUpdatedTimestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    "LogicalResourceId": "EcsService",
+                    "PhysicalResourceId": "service-name",
+                    "ResourceType": "AWS::ECS::Service",
+                    "ResourceStatus": "CREATE_COMPLETE",
+                },
+            ]
+        },
+        {"StackName": "quilt-stack"},
+    )
+    stubber.activate()
+
+    ecs_resources = stack.list_ecs_resources("quilt-stack", cfn_client=client)
+    assert ecs_resources == [
+        {
+            "logical_id": "EcsCluster",
+            "physical_id": "cluster-name",
+            "resource_type": "AWS::ECS::Cluster",
+        },
+        {
+            "logical_id": "EcsService",
+            "physical_id": "service-name",
+            "resource_type": "AWS::ECS::Service",
+        },
     ]
 
     stubber.deactivate()
@@ -125,6 +181,14 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
             "Parameters": [{"ParameterKey": "Env", "ParameterValue": "dev"}],
         },
         [{"logical_id": "LogGroupA", "log_group_name": "/aws/logs"}],
+        [
+            {
+                "logical_id": "EcsCluster",
+                "physical_id": "cluster-name",
+                "resource_type": "AWS::ECS::Cluster",
+            }
+        ],
+        {"registryUrl": "https://registry.example.com"},
     )
 
     assert output_path.exists()
@@ -134,3 +198,5 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
     assert '"stack_name": "stack"' in content
     assert '"outputs"' in content
     assert '"parameters"' in content
+    assert '"ecs_resources"' in content
+    assert '"catalog_config"' in content

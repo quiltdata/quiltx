@@ -6,35 +6,12 @@ import json
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from platformdirs import user_data_path
 
-
-def normalize_catalog_url(url: str) -> str:
-    url = url.strip().rstrip("/")
-    parsed = urlparse(url)
-    if parsed.scheme and parsed.netloc:
-        normalized = urlunparse(
-            (
-                parsed.scheme.lower(),
-                parsed.netloc.lower(),
-                parsed.path.rstrip("/"),
-                "",
-                "",
-                "",
-            )
-        )
-        return normalized.rstrip("/")
-    return url
-
-
-def normalize_host(value: str) -> str:
-    value = value.strip().rstrip("/")
-    parsed = urlparse(value)
-    if parsed.scheme and parsed.netloc:
-        return parsed.hostname.lower() if parsed.hostname else value.lower()
-    return value.lower()
+from quiltx._version import __version__
+from quiltx.utils import get_hostname, normalize_url
 
 
 def extract_catalog_name(config: Mapping[str, Any]) -> str:
@@ -76,8 +53,47 @@ def stack_parameters(stack: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     return stack.get("Parameters") or []
 
 
-def find_matching_stack(cfn_client, catalog_url: str) -> Mapping[str, Any]:
-    expected_host = normalize_host(catalog_url)
+def find_matching_stack(
+    catalog_url: str,
+    region: str | None = None,
+    cfn_client: Any = None,
+) -> Mapping[str, Any]:
+    """Find CloudFormation stack matching the catalog URL.
+
+    Args:
+        catalog_url: Catalog URL to match (e.g., "https://example.quiltdata.com")
+        region: AWS region (defaults to fetching from catalog config if not provided)
+        cfn_client: Optional CloudFormation client (creates one if not provided)
+
+    Returns:
+        Stack information dictionary
+
+    Raises:
+        ValueError: If no matching stack is found
+    """
+    # Auto-detect region from catalog config if not provided
+    if region is None and cfn_client is None:
+        try:
+            catalog_config = fetch_catalog_config(catalog_url)
+            region = catalog_config.get("region")
+            if not region:
+                raise ValueError(
+                    f"No region found in catalog config for {catalog_url}. "
+                    "Please provide region parameter explicitly."
+                )
+        except Exception as exc:
+            raise ValueError(
+                f"Could not auto-detect region for {catalog_url}: {exc}. "
+                "Please provide region parameter explicitly."
+            ) from exc
+
+    # Create CloudFormation client if not provided
+    if cfn_client is None:
+        import boto3
+
+        cfn_client = boto3.client("cloudformation", region_name=region)
+
+    expected_host = get_hostname(catalog_url)
     paginator = cfn_client.get_paginator("describe_stacks")
 
     output_host_matches = []
@@ -90,7 +106,7 @@ def find_matching_stack(cfn_client, catalog_url: str) -> Mapping[str, Any]:
                 if not output_value:
                     continue
                 if output_key == "quiltwebhost":
-                    if normalize_host(str(output_value)) == expected_host:
+                    if get_hostname(str(output_value)) == expected_host:
                         output_host_matches.append(stack)
 
     if output_host_matches:
@@ -99,7 +115,28 @@ def find_matching_stack(cfn_client, catalog_url: str) -> Mapping[str, Any]:
     raise ValueError("No stack found with QuiltWebHost matching " f"{catalog_url}")
 
 
-def list_log_group_resources(cfn_client, stack_name: str) -> list[dict[str, str]]:
+def list_log_group_resources(
+    stack_name: str,
+    region: str | None = None,
+    cfn_client: Any = None,
+) -> list[dict[str, str]]:
+    """List CloudWatch log groups in a CloudFormation stack.
+
+    Args:
+        stack_name: CloudFormation stack name
+        region: AWS region (required if cfn_client not provided)
+        cfn_client: Optional CloudFormation client (creates one if not provided)
+
+    Returns:
+        List of log group resource dictionaries
+    """
+    if cfn_client is None:
+        if region is None:
+            raise ValueError("Either region or cfn_client must be provided")
+        import boto3
+
+        cfn_client = boto3.client("cloudformation", region_name=region)
+
     paginator = cfn_client.get_paginator("list_stack_resources")
     log_groups = []
 
@@ -115,6 +152,53 @@ def list_log_group_resources(cfn_client, stack_name: str) -> list[dict[str, str]
             )
 
     return log_groups
+
+
+def list_ecs_resources(
+    stack_name: str,
+    region: str | None = None,
+    cfn_client: Any = None,
+) -> list[dict[str, str]]:
+    """List ECS resources in a CloudFormation stack.
+
+    Args:
+        stack_name: CloudFormation stack name
+        region: AWS region (required if cfn_client not provided)
+        cfn_client: Optional CloudFormation client (creates one if not provided)
+
+    Returns:
+        List of ECS resource dictionaries
+    """
+    if cfn_client is None:
+        if region is None:
+            raise ValueError("Either region or cfn_client must be provided")
+        import boto3
+
+        cfn_client = boto3.client("cloudformation", region_name=region)
+
+    paginator = cfn_client.get_paginator("list_stack_resources")
+    ecs_resources: list[dict[str, str]] = []
+
+    ecs_types = {
+        "AWS::ECS::Cluster",
+        "AWS::ECS::Service",
+        "AWS::ECS::TaskDefinition",
+    }
+
+    for page in paginator.paginate(StackName=stack_name):
+        for resource in page.get("StackResourceSummaries", []):
+            resource_type = resource.get("ResourceType")
+            if resource_type not in ecs_types:
+                continue
+            ecs_resources.append(
+                {
+                    "logical_id": resource.get("LogicalResourceId", ""),
+                    "physical_id": resource.get("PhysicalResourceId", ""),
+                    "resource_type": resource_type or "",
+                }
+            )
+
+    return ecs_resources
 
 
 def stack_account_id(stack: Mapping[str, Any]) -> str | None:
@@ -133,6 +217,8 @@ def write_stack_payload(
     region: str,
     stack: Mapping[str, Any],
     log_groups: list[dict[str, str]],
+    ecs_resources: list[dict[str, str]] | None = None,
+    catalog_config: Mapping[str, Any] | None = None,
 ) -> Path:
     target_dir = user_data_path("quiltx") / catalog_name
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +235,49 @@ def write_stack_payload(
         "outputs": stack.get("Outputs") or [],
         "parameters": stack.get("Parameters") or [],
         "log_groups": log_groups,
+        "ecs_resources": ecs_resources or [],
+        "catalog_config": catalog_config or {},
+        "quiltx_version": __version__,
     }
 
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return output_path
+
+
+def load_stack_payload(catalog_name: str) -> Mapping[str, Any] | None:
+    """Load stack payload for a catalog."""
+    target_dir = user_data_path("quiltx") / catalog_name
+    output_path = target_dir / "stack.json"
+    if not output_path.exists():
+        return None
+    return json.loads(output_path.read_text())
+
+
+def ensure_min_version(payload: Mapping[str, Any] | None, min_version: str) -> bool:
+    """Check if payload was created by a version >= min_version.
+
+    Returns True if payload has required version or higher.
+    Returns False if payload is None, missing quiltx_version, or has lower version.
+
+    Tools should check this and prompt user to run 'quiltx stack' if False.
+
+    Example:
+        payload = load_stack_payload(catalog_name)
+        if not ensure_min_version(payload, "0.1.3"):
+            print("Stack data outdated. Run 'quiltx stack' to refresh.")
+            return 1
+    """
+    if not payload:
+        return False
+    payload_version = payload.get("quiltx_version")
+    if not payload_version:
+        return False  # Old payload without version field
+
+    # Simple version comparison (works for semantic versions like "0.1.3")
+    def parse_version(v: str) -> tuple[int, ...]:
+        return tuple(int(x) for x in str(v).split("."))
+
+    try:
+        return parse_version(payload_version) >= parse_version(min_version)
+    except (ValueError, AttributeError):
+        return False
