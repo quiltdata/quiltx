@@ -95,7 +95,7 @@ All code should:
 ```text
 quiltx/
 ├── quiltx/                 # Main package
-│   ├── __init__.py        # Package exports (configured_catalog, __version__)
+│   ├── __init__.py        # Package exports (get_catalog_config, get_catalog_url, set_catalog_url, __version__)
 │   ├── _version.py        # Version string
 │   ├── cli.py             # Unified CLI with auto-discovery
 │   ├── config.py          # Catalog configuration
@@ -164,19 +164,19 @@ def main(argv: list[str] | None = None) -> int:
 Leverage existing quiltx utilities:
 
 ```python
-from quiltx import configured_catalog
-from quiltx.stack import load_stack_payload, ensure_min_version
+from quiltx import get_catalog_url
+from quiltx.stack import load_stack_payload, ensure_min_version, extract_catalog_name
 
 def main(argv: list[str] | None = None) -> int:
-    # Get configured catalog
-    catalog_url = configured_catalog()
-    if not catalog_url:
-        print("No catalog configured. Run 'quiltx config'.", file=sys.stderr)
+    # Get configured catalog URL
+    try:
+        catalog_url = get_catalog_url()
+    except ValueError:
+        print("No catalog configured. Run 'quiltx config <url>'.", file=sys.stderr)
         return 1
 
     # Load cached stack data
-    from urllib.parse import urlparse
-    catalog_name = urlparse(catalog_url).netloc
+    catalog_name = extract_catalog_name({"navigator_url": catalog_url})
     payload = load_stack_payload(catalog_name)
 
     if not payload:
