@@ -39,7 +39,7 @@ quiltx logs --minutes 30 --filter "ERROR"
 
 ## Built-in Tools
 
-- **config**: Configure and display Quilt catalog settings using the `configured_catalog` API
+- **config**: Configure and display Quilt catalog settings
 - **stack**: Discover the Quilt CloudFormation stack and cache log group metadata in `stack.json`
 - **logs**: Display CloudWatch Logs for the configured catalog using `stack.json`
 
@@ -48,21 +48,21 @@ quiltx logs --minutes 30 --filter "ERROR"
 Concise version (region auto-detected):
 
 ```python
-from quiltx import configured_catalog
+from quiltx import get_catalog_url
 from quiltx.stack import find_matching_stack
 
-stack = find_matching_stack(configured_catalog()["navigator_url"])
+stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
 ```
 
 Explicit version (more control):
 
 ```python
-from quiltx import configured_catalog
+from quiltx import get_catalog_config, get_catalog_url
 from quiltx.stack import find_matching_stack, fetch_catalog_config, resolve_region
 
-config = configured_catalog()
-catalog_url = config["navigator_url"]
+config = get_catalog_config()
+catalog_url = get_catalog_url()
 catalog_config = fetch_catalog_config(catalog_url)
 region = resolve_region(config, catalog_config)
 
