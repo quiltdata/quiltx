@@ -73,12 +73,36 @@ def resolve_time_range(
 
 
 def iter_log_events(
-    logs_client,
     log_groups: Sequence[str],
     start_ms: int,
     end_ms: int,
     filter_pattern: str | None = None,
+    region: str | None = None,
+    logs_client: Any = None,
 ) -> Iterable[Mapping[str, Any]]:
+    """Iterate over CloudWatch log events.
+
+    Args:
+        log_groups: List of log group names to query
+        start_ms: Start time in milliseconds since epoch
+        end_ms: End time in milliseconds since epoch
+        filter_pattern: Optional CloudWatch Logs filter pattern
+        region: AWS region (required if logs_client not provided)
+        logs_client: Optional CloudWatch Logs client (creates one if not provided)
+
+    Yields:
+        Log event dictionaries
+
+    Raises:
+        ValueError: If neither region nor logs_client is provided
+    """
+    if logs_client is None:
+        if region is None:
+            raise ValueError("Either region or logs_client must be provided")
+        import boto3
+
+        logs_client = boto3.client("logs", region_name=region)
+
     for log_group in log_groups:
         paginator = logs_client.get_paginator("filter_log_events")
         params: dict[str, Any] = {

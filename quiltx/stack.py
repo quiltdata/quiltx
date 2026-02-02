@@ -87,7 +87,7 @@ def find_matching_stack(
                 "Please provide region parameter explicitly."
             ) from exc
 
-    # Create client if not provided
+    # Create CloudFormation client if not provided
     if cfn_client is None:
         import boto3
 
