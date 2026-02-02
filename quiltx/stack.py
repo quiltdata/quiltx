@@ -6,37 +6,12 @@ import json
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from platformdirs import user_data_path
 
 from quiltx._version import __version__
-
-
-def normalize_catalog_url(url: str) -> str:
-    url = url.strip().rstrip("/")
-    parsed = urlparse(url)
-    if parsed.scheme and parsed.netloc:
-        normalized = urlunparse(
-            (
-                parsed.scheme.lower(),
-                parsed.netloc.lower(),
-                parsed.path.rstrip("/"),
-                "",
-                "",
-                "",
-            )
-        )
-        return normalized.rstrip("/")
-    return url
-
-
-def normalize_host(value: str) -> str:
-    value = value.strip().rstrip("/")
-    parsed = urlparse(value)
-    if parsed.scheme and parsed.netloc:
-        return parsed.hostname.lower() if parsed.hostname else value.lower()
-    return value.lower()
+from quiltx.utils import get_hostname, normalize_url
 
 
 def extract_catalog_name(config: Mapping[str, Any]) -> str:
@@ -118,7 +93,7 @@ def find_matching_stack(
 
         cfn_client = boto3.client("cloudformation", region_name=region)
 
-    expected_host = normalize_host(catalog_url)
+    expected_host = get_hostname(catalog_url)
     paginator = cfn_client.get_paginator("describe_stacks")
 
     output_host_matches = []
@@ -131,7 +106,7 @@ def find_matching_stack(
                 if not output_value:
                     continue
                 if output_key == "quiltwebhost":
-                    if normalize_host(str(output_value)) == expected_host:
+                    if get_hostname(str(output_value)) == expected_host:
                         output_host_matches.append(stack)
 
     if output_host_matches:

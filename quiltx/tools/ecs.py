@@ -18,6 +18,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from quiltx import __version__, stack as stack_lib
+from quiltx.utils import get_hostname
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -150,7 +151,7 @@ def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> No
 
 def _resolve_catalog_name(catalog_arg: str | None) -> str:
     if catalog_arg:
-        return stack_lib.normalize_host(catalog_arg)
+        return get_hostname(catalog_arg)
     try:
         import quilt3
 
