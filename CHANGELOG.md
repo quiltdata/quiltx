@@ -8,8 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-01
+
 ### Added
 
+- **Documentation and Read the Docs integration**:
+  - MkDocs documentation site with Material theme
+  - Read the Docs configuration for automated docs building
+  - Comprehensive API reference documentation with mkdocstrings
+  - User guides for CLI tools and Stack API
+  - Getting started guide and contributing documentation
+  - Dark mode support and enhanced navigation
 - **New semantic configuration functions**:
   - `get_catalog_config()`: Get the full quilt3 catalog configuration
   - `get_catalog_url()`: Get the catalog URL from configuration
@@ -24,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Use `set_catalog_url()` to configure a new catalog instead of `configured_catalog(url)`
 - All new functions have clear, semantic names that indicate whether they read or write
 - New functions raise `ValueError` with helpful messages when catalog is not configured
+- **Documentation improvements**:
+  - README simplified with focus on installation and quick examples
+  - AGENTS.md streamlined for developer reference
+  - API reference updated to use new config function names
+  - Contributing guide updated with new API exports
+
+### Fixed
+
+- Documentation now properly references the new config API instead of deprecated `configured_catalog()`
+
+## [0.2.1] - 2026-02-01
+
+### Added
+
+- Version bump to 0.2.1 for intermediate release
 
 ## [0.2.0] - 2026-02-01
 
