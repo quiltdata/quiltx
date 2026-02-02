@@ -13,6 +13,7 @@ from typing import Iterable, Mapping, Sequence
 import boto3
 from platformdirs import user_data_path
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.table import Table
 
@@ -21,7 +22,7 @@ from quiltx import __version__, stack as stack_lib
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Open an interactive shell inside a running ECS task."
+        description="Open an interactive shell inside a running ECS task. Requires AWS Session Manager plugin."
     )
     parser.add_argument(
         "service",
@@ -78,7 +79,60 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the execute-command invocation without running it.",
     )
+    parser.add_argument(
+        "--enable-execute-command",
+        action="store_true",
+        help="Automatically enable Execute Command if not enabled (skips prompt).",
+    )
     return parser
+
+
+def _check_session_manager_plugin() -> bool:
+    """Check if session-manager-plugin is installed."""
+    try:
+        subprocess.run(
+            ["session-manager-plugin"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        # Plugin exists if command runs (regardless of exit code)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _print_plugin_installation_help(console: Console) -> None:
+    """Print Session Manager plugin installation instructions."""
+    message = """
+# AWS Session Manager Plugin Required
+
+The `quiltx ecs` command requires the AWS Session Manager plugin.
+
+## Installation Instructions
+
+### macOS
+```bash
+# Download and install from AWS
+curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/mac_arm64/sessionmanager-bundle.zip" -o "sessionmanager-bundle.zip"
+unzip sessionmanager-bundle.zip
+sudo ./sessionmanager-bundle/install -i /usr/local/sessionmanagerplugin -b /usr/local/bin/session-manager-plugin
+```
+
+### Linux
+```bash
+curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o "session-manager-plugin.deb"
+sudo dpkg -i session-manager-plugin.deb
+```
+
+### Windows
+Download and run the installer:
+https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe
+
+## Official Documentation
+https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
+"""
+    console.print(Markdown(message))
 
 
 def _stack_payload_path(catalog_name: str) -> Path:
@@ -351,6 +405,132 @@ def _select_task(
     return str(task_arns[0])
 
 
+def _enable_execute_command_on_service(
+    ecs_client, cluster: str, service: str, region: str | None
+) -> bool:
+    """Enable Execute Command on an ECS service and force new deployment.
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Update service to enable execute command
+        ecs_client.update_service(
+            cluster=cluster,
+            service=service,
+            enableExecuteCommand=True,
+            forceNewDeployment=True,
+        )
+        return True
+    except Exception as e:
+        print(f"Failed to enable Execute Command: {e}", file=sys.stderr)
+        return False
+
+
+def _print_execute_command_not_enabled_error(
+    console: Console,
+    cluster: str,
+    service: str | None,
+    region: str | None,
+    auto_enable: bool = False,
+    details: str | None = None,
+) -> int:
+    """Print a helpful error message when Execute Command is not enabled.
+
+    Returns:
+        Exit code (0 if user enabled it, 1 if not enabled)
+    """
+    console.print("\n[bold red]ECS Execute Command Not Enabled[/bold red]\n")
+    console.print("The ECS task does not have Execute Command enabled. ")
+
+    # If we know the service, offer to enable it automatically
+    if service:
+        console.print("\n[bold]Quick Fix:[/bold]")
+        console.print(
+            f"I can enable Execute Command on the service and restart it for you.\n"
+        )
+
+        should_enable = auto_enable
+        if not auto_enable:
+            from rich.prompt import Confirm
+
+            should_enable = Confirm.ask(
+                "Enable Execute Command and restart the service?", default=True
+            )
+
+        if should_enable:
+            console.print("\n[dim]Enabling Execute Command on service...[/dim]")
+            import boto3
+
+            ecs_client = boto3.client("ecs", region_name=region)
+
+            if _enable_execute_command_on_service(ecs_client, cluster, service, region):
+                console.print("[green]✓[/green] Execute Command enabled!")
+                console.print(
+                    "[dim]Note: A new task deployment has started. Wait ~30-60 seconds for the new task to be ready.[/dim]"
+                )
+                console.print(
+                    "[dim]Then run 'quiltx ecs' again to connect to the new task.[/dim]\n"
+                )
+                return 0
+            else:
+                console.print(
+                    "[red]✗[/red] Failed to enable Execute Command. You may need additional IAM permissions.\n"
+                )
+
+    console.print("\n[bold]Manual Fix:[/bold]")
+    console.print(
+        "1. Update the ECS Service definition to set enableExecuteCommand: true"
+    )
+    console.print("2. Redeploy the ECS service")
+    console.print("3. New tasks will launch with Execute Command enabled\n")
+    console.print("[bold]AWS CLI Example:[/bold]")
+    console.print(
+        f"[dim]aws ecs update-service --cluster {cluster} "
+        f"--service {service or '<service-name>'} "
+        "--enable-execute-command --force-new-deployment[/dim]\n"
+    )
+    console.print("[bold]AWS CDK Example:[/bold]")
+    console.print(
+        "[dim]service = ecs.FargateService(..., enable_execute_command=True)[/dim]\n"
+    )
+    console.print("[bold]AWS CloudFormation Example:[/bold]")
+    console.print(
+        "[dim]EnableExecuteCommand: true  # In AWS::ECS::Service resource[/dim]\n"
+    )
+    console.print(
+        "[dim]See: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html[/dim]\n"
+    )
+    if details:
+        console.print(f"[dim]Details: {details}[/dim]")
+
+    return 1
+
+
+def _check_execute_command_enabled(
+    ecs_client, cluster: str, task_arn: str
+) -> tuple[bool, str | None]:
+    """Check if Execute Command is enabled for the task.
+
+    Returns:
+        Tuple of (is_enabled, error_message)
+    """
+    try:
+        response = ecs_client.describe_tasks(cluster=cluster, tasks=[task_arn])
+        tasks = response.get("tasks", [])
+        if not tasks:
+            return False, "Task not found"
+
+        task = tasks[0]
+        # Check if enableExecuteCommand is set on the task
+        if not task.get("enableExecuteCommand", False):
+            return False, "Execute Command not enabled on task"
+
+        return True, None
+    except Exception as e:
+        return False, f"Failed to check task: {e}"
+
+
 def _select_container(
     ecs_client, cluster: str, task_arn: str, container: str | None
 ) -> str:
@@ -480,6 +660,22 @@ def main(argv: list[str] | None = None) -> int:
 
         ecs_client = boto3.client("ecs", region_name=region)
         task_arn = _select_task(ecs_client, cluster, args.task, service)
+
+        # Check if Execute Command is enabled before proceeding
+        is_enabled, error_msg = _check_execute_command_enabled(
+            ecs_client, cluster, task_arn
+        )
+        if not is_enabled and not args.dry_run:
+            exit_code = _print_execute_command_not_enabled_error(
+                console,
+                cluster,
+                service,
+                region,
+                args.enable_execute_command,
+                error_msg,
+            )
+            return exit_code
+
         container = _select_container(ecs_client, cluster, task_arn, container)
 
         if args.reachability:
@@ -503,7 +699,33 @@ def main(argv: list[str] | None = None) -> int:
             print(_format_command(cmd))
             return 0
 
-        result = subprocess.run(cmd, check=False)
+        # Check for session-manager-plugin
+        if not _check_session_manager_plugin():
+            _print_plugin_installation_help(console)
+            return 2
+
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+
+        # Check for specific execute command error
+        if result.returncode != 0:
+            error_output = result.stderr + result.stdout
+            if "execute command was not enabled" in error_output.lower():
+                exit_code = _print_execute_command_not_enabled_error(
+                    console,
+                    cluster,
+                    service,
+                    region,
+                    args.enable_execute_command,
+                    error_output.strip(),
+                )
+                return exit_code
+            else:
+                # Print the actual error for other failures
+                if result.stderr:
+                    print(result.stderr, file=sys.stderr)
+                if result.stdout:
+                    print(result.stdout)
+
         return result.returncode
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
