@@ -6,6 +6,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **New semantic configuration functions**:
+  - `get_catalog_config()`: Get the full quilt3 catalog configuration
+  - `get_catalog_url()`: Get the catalog URL from configuration
+  - `get_catalog_region()`: Get the AWS region from configuration
+  - `set_catalog_url()`: Set the catalog URL in quilt3 configuration
+
+### Changed
+
+- **BREAKING**: Removed `configured_catalog()` function
+  - Replace `configured_catalog()` with `get_catalog_config()` for full config
+  - Replace `configured_catalog()["navigator_url"]` with `get_catalog_url()`
+  - Use `set_catalog_url()` to configure a new catalog instead of `configured_catalog(url)`
+- All new functions have clear, semantic names that indicate whether they read or write
+- New functions raise `ValueError` with helpful messages when catalog is not configured
+
 ## [0.2.0] - 2026-02-01
 
 ### Added

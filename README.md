@@ -43,9 +43,9 @@ quiltx logs --minutes 30 --filter "ERROR"
 - **stack**: Discover the Quilt CloudFormation stack and cache log group metadata in `stack.json`
 - **logs**: Display CloudWatch Logs for the configured catalog using `stack.json`
 
-## Quick Example: Discover Stack Name
+## API Examples
 
-Concise version (region auto-detected):
+### Discover Stack Name
 
 ```python
 from quiltx import get_catalog_url
@@ -55,86 +55,17 @@ stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
 ```
 
-Explicit version (more control):
+### Get Catalog Configuration
 
 ```python
-from quiltx import get_catalog_config, get_catalog_url
-from quiltx.stack import find_matching_stack, fetch_catalog_config, resolve_region
+from quiltx import get_catalog_url, get_catalog_region
 
-config = get_catalog_config()
+# Get specific configuration values
 catalog_url = get_catalog_url()
-catalog_config = fetch_catalog_config(catalog_url)
-region = resolve_region(config, catalog_config)
+region = get_catalog_region()
 
-stack = find_matching_stack(catalog_url, region=region)
-print(stack["StackName"])
-```
-
-## Development
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/ernest/quiltx.git
-cd quiltx
-
-# Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install in development mode
-pip install -e ".[dev]"
-```
-
-### Running Tests
-
-```bash
-# Using poe (recommended)
-./poe test
-
-# Or directly with pytest
-pytest tests
-```
-
-### Project Structure
-
-```text
-quiltx/
-├─ quiltx/              # Main package
-│  ├─ cli.py           # Unified CLI with auto-discovery
-│  ├─ tools/           # Built-in tools (auto-discovered)
-│  │  └─ config.py
-│  └─ __init__.py      # Shared utilities (configured_catalog)
-├─ tests/              # Test suite
-├─ pyproject.toml      # Package configuration
-└─ poe                 # Task runner script
-```
-
-### Adding New Tools
-
-Tools are automatically discovered from the `quiltx/tools/` directory. To add a new tool:
-
-1. Create a new file in `quiltx/tools/` (e.g., `mytool.py`)
-2. Implement a `main(argv)` function that returns an exit code
-3. The tool will be automatically available via `quiltx mytool`
-4. Add tests in `tests/`
-
-Example tool structure:
-
-```python
-"""My new tool."""
-import argparse
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="My tool description")
-    # Add arguments
-    return parser
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    # Tool implementation
-    return 0
+print(f"Catalog: {catalog_url}")
+print(f"Region: {region}")
 ```
 
 ## License

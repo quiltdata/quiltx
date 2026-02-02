@@ -40,6 +40,22 @@ def get_catalog_url() -> str:
     return str(url)
 
 
+def get_catalog_region() -> str:
+    """Get the AWS region from the current quilt3 configuration.
+
+    Returns:
+        The region from the configured catalog
+
+    Raises:
+        ValueError: If no catalog is configured or region is missing
+    """
+    config = get_catalog_config()
+    region = config.get("region")
+    if not region:
+        raise ValueError("region not found in Quilt config")
+    return str(region)
+
+
 def set_catalog_url(catalog_url: str, **config_values: Any) -> dict[str, Any]:
     """Set the catalog URL in quilt3 configuration.
 
