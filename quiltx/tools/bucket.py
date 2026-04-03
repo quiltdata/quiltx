@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 import boto3
 from rich.console import Console
+from rich.syntax import Syntax
 from rich.table import Table
 
 from quiltx import bucket as bucket_lib
@@ -326,6 +327,7 @@ def _print_dry_run_plan(
     merged_policy: Mapping[str, Any],
     sns_topic_arn: str | None,
 ) -> None:
+    console = Console()
     print("Dry-run plan:")
     print(f"  Catalog: {catalog_name} ({catalog_url})")
     print(
@@ -338,7 +340,7 @@ def _print_dry_run_plan(
     )
     print()
     print("Planned bucket policy:")
-    print(json.dumps(merged_policy, indent=2, sort_keys=True))
+    _print_json(console, merged_policy)
 
     if sns_topic_arn:
         print(f"\nPlanned SNS topic: reuse existing {sns_topic_arn}")
@@ -350,15 +352,22 @@ def _print_dry_run_plan(
     )
     print(f"\nPlanned SNS topic: create {planned_topic_arn}")
     print("Planned SNS topic policy statement:")
-    print(
-        json.dumps(
-            bucket_lib._build_sns_topic_policy_statement(
-                bucket_name,
-                planned_topic_arn,
-                data_account_id,
-            ),
-            indent=2,
-            sort_keys=True,
+    _print_json(
+        console,
+        bucket_lib._build_sns_topic_policy_statement(
+            bucket_name,
+            planned_topic_arn,
+            data_account_id,
+        ),
+    )
+
+
+def _print_json(console: Console, payload: Mapping[str, Any]) -> None:
+    console.print(
+        Syntax(
+            json.dumps(payload, indent=2, sort_keys=True),
+            "json",
+            background_color="default",
         )
     )
 
