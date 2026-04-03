@@ -26,7 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket",
         description="Register S3 buckets with the configured Quilt catalog.",
     )
-    subparsers = parser.add_subparsers(dest="action")
+    subparsers = parser.add_subparsers(
+        dest="action",
+        title="actions",
+        metavar="ACTION",
+    )
 
     add_parser = subparsers.add_parser(
         "add",

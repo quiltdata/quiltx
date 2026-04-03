@@ -766,5 +766,9 @@ def test_list(monkeypatch, capsys) -> None:
 def test_build_parser_uses_bucket_prog() -> None:
     parser = bucket_tool.build_parser()
     assert parser.prog == "quiltx bucket"
+    help_text = parser.format_help()
+    assert "actions:" in help_text
+    assert "ACTION" in help_text
+    assert "{add,list,test}" not in help_text
     with contextlib.suppress(SystemExit):
         parser.parse_args(["add", "--help"])
