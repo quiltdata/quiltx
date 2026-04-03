@@ -23,12 +23,14 @@ TEST_OBJECT_PREFIX = ".quiltx/add-bucket-tests"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Register S3 buckets with the configured Quilt catalog."
+        prog="quiltx bucket",
+        description="Register S3 buckets with the configured Quilt catalog.",
     )
     subparsers = parser.add_subparsers(dest="action")
 
     add_parser = subparsers.add_parser(
         "add",
+        prog="quiltx bucket add",
         help="Register a bucket and configure bucket/SNS notifications.",
     )
     add_parser.add_argument("bucket_name", help="S3 bucket name to register.")
@@ -51,10 +53,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply changes without prompting for confirmation.",
     )
 
-    subparsers.add_parser("list", help="List buckets registered in the catalog.")
+    subparsers.add_parser(
+        "list",
+        prog="quiltx bucket list",
+        help="List buckets registered in the catalog.",
+    )
 
     test_parser = subparsers.add_parser(
         "test",
+        prog="quiltx bucket test",
         help="Upload and remove a test object, then print index verification steps.",
     )
     test_parser.add_argument("bucket_name", help="S3 bucket name to test.")

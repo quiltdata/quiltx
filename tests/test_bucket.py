@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import contextlib
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -760,3 +761,10 @@ def test_list(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "bucket-a" in captured.out
     assert "Bucket A" in captured.out
+
+
+def test_build_parser_uses_bucket_prog() -> None:
+    parser = bucket_tool.build_parser()
+    assert parser.prog == "quiltx bucket"
+    with contextlib.suppress(SystemExit):
+        parser.parse_args(["add", "--help"])
