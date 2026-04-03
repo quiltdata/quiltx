@@ -409,14 +409,30 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
-        lambda catalog_name: {"account_id": "123456789012"},
+        lambda catalog_name: {
+            "account_id": "123456789012",
+            "stack_name": "quilt-demo-stack",
+            "region": "us-east-1",
+        },
     )
     _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
 
     assert bucket_tool.main(["add", "bucket", "--dry-run"]) == 0
     captured = capsys.readouterr()
+    assert "Catalog: demo (demo)" in captured.out
+    assert (
+        "Control plane: stack quilt-demo-stack, account 123456789012, region us-east-1"
+        in captured.out
+    )
+    assert (
+        "Data plane: bucket bucket, account 111122223333, region us-west-2, profile <default>"
+        in captured.out
+    )
     assert "Planned bucket policy:" in captured.out
-    assert "Planned SNS topic: create" in captured.out
+    assert (
+        "Planned SNS topic: create arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+        in captured.out
+    )
 
     s3_stubber.assert_no_pending_responses()
     sns_stubber.assert_no_pending_responses()

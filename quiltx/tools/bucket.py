@@ -98,6 +98,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
         catalog_name = stack_lib.extract_catalog_name(config)
         stack_payload = stack_lib.load_stack_payload(catalog_name)
         control_account_id = _load_control_account_id(stack_payload)
+        stack_name = _stack_payload_value(stack_payload, "stack_name", "unknown")
+        control_region = _stack_payload_value(stack_payload, "region", "unknown")
+        catalog_url = str(config.get("navigator_url") or catalog_name)
 
         session = boto3.Session(profile_name=args.profile)
         s3_client = session.client("s3")
@@ -127,14 +130,32 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
         if args.dry_run:
             _print_dry_run_plan(
+                catalog_name,
+                catalog_url,
+                stack_name,
+                control_account_id,
+                control_region,
                 args.bucket_name,
+                bucket_region,
                 data_account_id,
+                args.profile,
                 merged_policy,
                 sns_topic_arn,
             )
             return 0
 
-        if not args.yes and not _confirm_bucket_add(args.bucket_name, sns_topic_arn):
+        if not args.yes and not _confirm_bucket_add(
+            catalog_name,
+            catalog_url,
+            stack_name,
+            control_account_id,
+            control_region,
+            args.bucket_name,
+            bucket_region,
+            data_account_id,
+            args.profile,
+            sns_topic_arn,
+        ):
             print("Aborted.")
             return 1
 
@@ -247,12 +268,43 @@ def _load_control_account_id(stack_payload: Mapping[str, Any] | None) -> str:
     return str(account_id)
 
 
+def _stack_payload_value(
+    stack_payload: Mapping[str, Any] | None, key: str, default: str
+) -> str:
+    if not stack_payload:
+        return default
+    value = stack_payload.get(key)
+    if not value:
+        return default
+    return str(value)
+
+
 def _get_session_account_id(session: boto3.Session) -> str:
     return str(session.client("sts").get_caller_identity()["Account"])
 
 
-def _confirm_bucket_add(bucket_name: str, sns_topic_arn: str | None) -> bool:
+def _confirm_bucket_add(
+    catalog_name: str,
+    catalog_url: str,
+    stack_name: str,
+    control_account_id: str,
+    control_region: str,
+    bucket_name: str,
+    bucket_region: str,
+    data_account_id: str,
+    profile: str | None,
+    sns_topic_arn: str | None,
+) -> bool:
     print(f"About to register bucket {bucket_name}.")
+    print(f"Catalog: {catalog_name} ({catalog_url})")
+    print(
+        f"Control plane: stack {stack_name}, account {control_account_id}, "
+        f"region {control_region}"
+    )
+    print(
+        f"Data plane: bucket account {data_account_id}, region {bucket_region}, "
+        f"profile {profile or '<default>'}"
+    )
     if sns_topic_arn:
         print(f"Existing SNS topic will be reused: {sns_topic_arn}")
     else:
@@ -262,11 +314,29 @@ def _confirm_bucket_add(bucket_name: str, sns_topic_arn: str | None) -> bool:
 
 
 def _print_dry_run_plan(
+    catalog_name: str,
+    catalog_url: str,
+    stack_name: str,
+    control_account_id: str,
+    control_region: str,
     bucket_name: str,
+    bucket_region: str,
     data_account_id: str,
+    profile: str | None,
     merged_policy: Mapping[str, Any],
     sns_topic_arn: str | None,
 ) -> None:
+    print("Dry-run plan:")
+    print(f"  Catalog: {catalog_name} ({catalog_url})")
+    print(
+        f"  Control plane: stack {stack_name}, account {control_account_id}, "
+        f"region {control_region}"
+    )
+    print(
+        f"  Data plane: bucket {bucket_name}, account {data_account_id}, "
+        f"region {bucket_region}, profile {profile or '<default>'}"
+    )
+    print()
     print("Planned bucket policy:")
     print(json.dumps(merged_policy, indent=2, sort_keys=True))
 
@@ -275,7 +345,7 @@ def _print_dry_run_plan(
         return
 
     planned_topic_arn = (
-        f"arn:aws:sns:<bucket-region>:{data_account_id}:"
+        f"arn:aws:sns:{bucket_region}:{data_account_id}:"
         f"{bucket_lib._sns_topic_name(bucket_name)}"
     )
     print(f"\nPlanned SNS topic: create {planned_topic_arn}")
