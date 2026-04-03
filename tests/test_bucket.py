@@ -419,15 +419,14 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
 
     assert bucket_tool.main(["add", "bucket", "--dry-run"]) == 0
     captured = capsys.readouterr()
-    assert "Catalog: demo (demo)" in captured.out
-    assert (
-        "Control plane: stack quilt-demo-stack, account 123456789012, region us-east-1"
-        in captured.out
-    )
-    assert (
-        "Data plane: bucket bucket, account 111122223333, region us-west-2, profile <default>"
-        in captured.out
-    )
+    assert "Bucket add dry-run" in captured.out
+    assert "Catalog" in captured.out
+    assert "demo (demo)" in captured.out
+    assert "quilt-demo-stack" in captured.out
+    assert "123456789012" in captured.out
+    assert "111122223333" in captured.out
+    assert "us-west-2" in captured.out
+    assert "<default>" in captured.out
     assert "Planned bucket policy:" in captured.out
     assert (
         "Planned SNS topic: create arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"

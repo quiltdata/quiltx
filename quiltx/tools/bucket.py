@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 import boto3
 from rich.console import Console
+from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -328,15 +329,28 @@ def _print_dry_run_plan(
     sns_topic_arn: str | None,
 ) -> None:
     console = Console()
-    print("Dry-run plan:")
-    print(f"  Catalog: {catalog_name} ({catalog_url})")
-    print(
-        f"  Control plane: stack {stack_name}, account {control_account_id}, "
-        f"region {control_region}"
+    context_table = Table.grid(padding=(0, 2))
+    context_table.add_column(style="bold cyan", no_wrap=True)
+    context_table.add_column()
+    context_table.add_row("Catalog", f"{catalog_name} ({catalog_url})")
+    context_table.add_row(
+        "Control plane",
+        f"stack {stack_name} / account {control_account_id} / region {control_region}",
     )
-    print(
-        f"  Data plane: bucket {bucket_name}, account {data_account_id}, "
-        f"region {bucket_region}, profile {profile or '<default>'}"
+    context_table.add_row(
+        "Data plane",
+        (
+            f"bucket {bucket_name} / account {data_account_id} / "
+            f"region {bucket_region} / profile {profile or '<default>'}"
+        ),
+    )
+    console.print(
+        Panel(
+            context_table,
+            title="Bucket add dry-run",
+            border_style="cyan",
+            expand=False,
+        )
     )
     print()
     print("Planned bucket policy:")
