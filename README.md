@@ -39,6 +39,7 @@ quiltx logs --minutes 30 --filter "ERROR"
 
 ## Built-in Tools
 
+- **bucket**: Register buckets with Quilt and configure bucket policy/SNS notifications
 - **config**: Configure and display Quilt catalog settings
 - **stack**: Discover the Quilt CloudFormation stack and cache log group metadata in `stack.json`
 - **logs**: Display CloudWatch Logs for the configured catalog using `stack.json`

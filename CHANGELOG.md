@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `bucket` tool for registering cross-account S3 buckets with Quilt:
+  - `quiltx bucket add|list|test`
+  - merge/update S3 bucket policy and bucket notifications
+  - create or reuse SNS topics and patch topic policies for S3 publish plus Quilt
+    `RegistryRoleARN` subscribe access
+  - `bucket add` automatically runs the same registration/read verification as
+    `bucket test` unless `--no-test` is set
+  - `bucket test` verifies the bucket is registered in Quilt and readable from the
+    control account
+  - `--profile`, `--dry-run`, `--title`, and `--no-test` support for data-account workflows
+  - Rich context tables and JSON syntax highlighting for dry-run/confirmation output
+
 ## [0.3.0] - 2026-02-01
 
 ### Added
