@@ -355,6 +355,14 @@ class FakeSession:
         raise AssertionError(f"unexpected service: {service_name}")
 
 
+class FakeQuiltBucket:
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
+
+    def ls(self):
+        return iter(["file.txt"])
+
+
 def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls=None):
     admin_buckets = SimpleNamespace()
     admin_buckets.get = lambda name: get_result
@@ -373,6 +381,7 @@ def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls
     admin_module.buckets = admin_buckets
     quilt3_module = ModuleType("quilt3")
     quilt3_module.admin = admin_module
+    quilt3_module.Bucket = FakeQuiltBucket
     monkeypatch.setitem(sys.modules, "quilt3", quilt3_module)
     monkeypatch.setitem(sys.modules, "quilt3.admin", admin_module)
 
@@ -873,6 +882,26 @@ def test_list(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "bucket-a" in captured.out
     assert "Bucket A" in captured.out
+
+
+def test_test_checks_registration_and_read_access(monkeypatch, capsys) -> None:
+    _install_fake_quilt3(
+        monkeypatch,
+        listed=[FakeBucket("bucket-a", "Bucket A")],
+    )
+
+    assert bucket_tool.main(["test", "bucket-a"]) == 0
+    captured = capsys.readouterr()
+    assert "OK: bucket-a is registered in Quilt as Bucket A" in captured.out
+    assert "OK: control account can read s3://bucket-a" in captured.out
+
+
+def test_test_fails_when_bucket_not_registered(monkeypatch, capsys) -> None:
+    _install_fake_quilt3(monkeypatch, listed=[FakeBucket("other", "Other")])
+
+    assert bucket_tool.main(["test", "bucket-a"]) == 1
+    captured = capsys.readouterr()
+    assert "bucket-a is not registered in Quilt" in captured.err
 
 
 def test_build_parser_uses_bucket_prog() -> None:

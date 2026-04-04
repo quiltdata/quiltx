@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - merge/update S3 bucket policy and bucket notifications
   - create or reuse SNS topics and patch topic policies for S3 publish plus Quilt
     `RegistryRoleARN` subscribe access
+  - `bucket test` verifies the bucket is registered in Quilt and readable from the
+    control account
   - `--profile`, `--dry-run`, and `--title` support for data-account workflows
   - Rich context tables and JSON syntax highlighting for dry-run/confirmation output
 

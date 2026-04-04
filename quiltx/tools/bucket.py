@@ -226,9 +226,22 @@ def _cmd_list() -> int:
 
 def _cmd_test(args: argparse.Namespace) -> int:
     import quilt3
+    from quilt3.admin import buckets as admin_buckets
 
     bucket_uri = f"s3://{args.bucket_name}"
     try:
+        registered = next(
+            (
+                bucket
+                for bucket in admin_buckets.list()
+                if bucket.name == args.bucket_name
+            ),
+            None,
+        )
+        if registered is None:
+            raise ValueError(f"{args.bucket_name} is not registered in Quilt")
+        print(f"OK: {args.bucket_name} is registered in Quilt as {registered.title}")
+
         b = quilt3.Bucket(bucket_uri)
         # ls() goes through the control account — if the cross-account
         # bucket policy is wrong, this raises AccessDenied.
