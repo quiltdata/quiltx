@@ -252,7 +252,7 @@ def _build_sns_topic_publish_policy_statement(
         "Sid": SNS_PUBLISH_POLICY_SID,
         "Effect": "Allow",
         "Principal": {"Service": "s3.amazonaws.com"},
-        "Action": "SNS:Publish",
+        "Action": "sns:Publish",
         "Resource": sns_topic_arn,
         "Condition": {
             "ArnEquals": {"aws:SourceArn": f"arn:aws:s3:::{bucket}"},

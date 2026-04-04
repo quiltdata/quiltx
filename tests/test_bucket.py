@@ -219,7 +219,7 @@ def test_configure_sns_topic_policy_creates_or_merges() -> None:
                 "Sid": "QuiltBucketNotifications",
                 "Effect": "Allow",
                 "Principal": {"Service": "s3.amazonaws.com"},
-                "Action": "SNS:Publish",
+                "Action": "sns:Publish",
                 "Resource": topic_arn,
                 "Condition": {
                     "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
@@ -616,7 +616,7 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
                             "Sid": "QuiltBucketNotifications",
                             "Effect": "Allow",
                             "Principal": {"Service": "s3.amazonaws.com"},
-                            "Action": "SNS:Publish",
+                            "Action": "sns:Publish",
                             "Resource": topic_arn,
                             "Condition": {
                                 "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
@@ -780,7 +780,7 @@ def test_add_creates_sns(monkeypatch) -> None:
                             "Sid": "QuiltBucketNotifications",
                             "Effect": "Allow",
                             "Principal": {"Service": "s3.amazonaws.com"},
-                            "Action": "SNS:Publish",
+                            "Action": "sns:Publish",
                             "Resource": topic_arn,
                             "Condition": {
                                 "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
@@ -913,3 +913,27 @@ def test_confirm_bucket_add_renders_context_table(monkeypatch, capsys) -> None:
     assert "s3://bucket" in captured.out
     assert "reuse existing SNS topic" in captured.out
     assert "AWS profile open" in captured.out
+
+
+def test_sns_topic_source_labels_known_topic_names() -> None:
+    assert (
+        bucket_tool._sns_topic_source(
+            "bucket",
+            "arn:aws:sns:us-east-1:123456789012:quilt-bucket-notifications",
+        )
+        == "reuse quiltx SNS topic"
+    )
+    assert (
+        bucket_tool._sns_topic_source(
+            "bucket",
+            "arn:aws:sns:us-east-1:123456789012:bucket-QuiltNotifications-abc",
+        )
+        == "reuse Quilt SNS topic"
+    )
+    assert (
+        bucket_tool._sns_topic_source(
+            "bucket",
+            "arn:aws:sns:us-east-1:123456789012:custom-topic",
+        )
+        == "reuse existing SNS topic"
+    )

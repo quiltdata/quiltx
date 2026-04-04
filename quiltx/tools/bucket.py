@@ -437,7 +437,7 @@ def _print_context_table(
             sns_topic_arn,
             data_account_id,
             bucket_region,
-            "reuse existing SNS topic",
+            _sns_topic_source(bucket_name, sns_topic_arn),
         )
     else:
         context_table.add_row(
@@ -450,6 +450,15 @@ def _print_context_table(
             "create SNS topic",
         )
     console.print(context_table)
+
+
+def _sns_topic_source(bucket_name: str, sns_topic_arn: str) -> str:
+    topic_name = sns_topic_arn.rsplit(":", 1)[-1]
+    if topic_name == bucket_lib._sns_topic_name(bucket_name):
+        return "reuse quiltx SNS topic"
+    if topic_name.startswith(f"{bucket_name}-QuiltNotifications-"):
+        return "reuse Quilt SNS topic"
+    return "reuse existing SNS topic"
 
 
 def _print_json(console: Console, payload: Mapping[str, Any]) -> None:
