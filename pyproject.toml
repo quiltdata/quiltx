@@ -73,7 +73,18 @@ TAG="v$VERSION"
 echo "Creating tag $TAG for version $VERSION"
 git tag -a "$TAG" -m "Release $VERSION"
 git push origin "$TAG"
-gh release create "$TAG" --generate-notes --title "Release $VERSION"
+NOTES=$(gh api repos/{owner}/{repo}/releases/generate-notes -f tag_name="$TAG" --jq .body)
+BODY="## Install
+
+\`\`\`bash
+pip install quiltx==$VERSION
+\`\`\`
+
+📦 [PyPI](https://pypi.org/project/quiltx/$VERSION/) · 📖 [Docs](https://docs.quiltdata.com/)
+
+## What's Changed
+$NOTES"
+gh release create "$TAG" --title "Release $VERSION" --notes "$BODY"
 echo "Tag $TAG created, pushed, and GitHub release published."
 """
 

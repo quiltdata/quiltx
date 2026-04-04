@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-03
+
+### Changed
+
+- `poe tag` now automatically creates a GitHub release with install instructions and PyPI/docs links
+
 ### Added
 
 - `bucket` tool for registering cross-account S3 buckets with Quilt:
