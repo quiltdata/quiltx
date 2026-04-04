@@ -271,7 +271,6 @@ def _build_sns_topic_subscribe_policy_statement(
         "Action": [
             "sns:GetTopicAttributes",
             "sns:Subscribe",
-            "sns:Unsubscribe",
         ],
         "Resource": sns_topic_arn,
     }

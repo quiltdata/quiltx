@@ -233,7 +233,6 @@ def test_configure_sns_topic_policy_creates_or_merges() -> None:
                 "Action": [
                     "sns:GetTopicAttributes",
                     "sns:Subscribe",
-                    "sns:Unsubscribe",
                 ],
                 "Resource": topic_arn,
             },
@@ -632,7 +631,6 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
                             "Action": [
                                 "sns:GetTopicAttributes",
                                 "sns:Subscribe",
-                                "sns:Unsubscribe",
                             ],
                             "Resource": topic_arn,
                         },
@@ -796,7 +794,6 @@ def test_add_creates_sns(monkeypatch) -> None:
                             "Action": [
                                 "sns:GetTopicAttributes",
                                 "sns:Subscribe",
-                                "sns:Unsubscribe",
                             ],
                             "Resource": topic_arn,
                         },
