@@ -74,11 +74,12 @@ echo "Creating tag $TAG for version $VERSION"
 git tag -a "$TAG" -m "Release $VERSION"
 git push origin "$TAG"
 NOTES=$(gh api repos/{owner}/{repo}/releases/generate-notes -f tag_name="$TAG" --jq .body)
+BT='```'
 BODY="## Install
 
-\`\`\`bash
+${BT}bash
 pip install quiltx==$VERSION
-\`\`\`
+${BT}
 
 📦 [PyPI](https://pypi.org/project/quiltx/$VERSION/) · 📖 [Docs](https://docs.quiltdata.com/)
 
