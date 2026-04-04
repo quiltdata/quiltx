@@ -364,16 +364,22 @@ class FakeQuiltBucket:
 
 
 def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls=None):
+    bucket_list = list(listed or [])
+    if get_result is not None and listed is None:
+        bucket_list.append(get_result)
+
     admin_buckets = SimpleNamespace()
     admin_buckets.get = lambda name: get_result
-    admin_buckets.list = lambda: listed or []
+    admin_buckets.list = lambda: list(bucket_list)
 
     def add(**kwargs):
         if add_calls is not None:
             add_calls.append(kwargs)
-        return FakeBucket(
+        bucket = FakeBucket(
             kwargs["name"], kwargs["title"], kwargs.get("sns_notification_arn"), []
         )
+        bucket_list.append(bucket)
+        return bucket
 
     admin_buckets.add = add
 
@@ -498,6 +504,37 @@ def test_add_skip_already_registered(monkeypatch, capsys) -> None:
     assert bucket_tool.main(["add", "bucket", "--yes"]) == 0
     captured = capsys.readouterr()
     assert "already registered" in captured.out
+
+    s3_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+
+
+def test_add_skip_post_test_when_no_test_flag(monkeypatch) -> None:
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+
+    session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
+    monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
+    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: {"account_id": "123456789012"},
+    )
+    _install_fake_quilt3(monkeypatch, get_result=FakeBucket("bucket", "bucket"))
+    monkeypatch.setattr(
+        bucket_tool,
+        "_verify_bucket_registration_and_access",
+        lambda bucket_name: (_ for _ in ()).throw(AssertionError("should not run")),
+    )
+
+    assert bucket_tool.main(["add", "bucket", "--yes", "--no-test"]) == 0
 
     s3_stubber.assert_no_pending_responses()
     s3_stubber.deactivate()

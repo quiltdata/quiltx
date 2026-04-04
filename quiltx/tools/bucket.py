@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Apply changes without prompting for confirmation.",
     )
+    add_parser.add_argument(
+        "--no-test",
+        action="store_true",
+        help="Skip the post-add registration/read verification.",
+    )
 
     subparsers.add_parser(
         "list",
@@ -108,7 +113,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
         existing_bucket = admin_buckets.get(args.bucket_name)
         if existing_bucket is not None:
             print(f"Bucket {args.bucket_name} is already registered.")
-            return 0
+            if args.no_test:
+                return 0
+            return _verify_bucket_registration_and_access(args.bucket_name)
 
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
@@ -192,8 +199,13 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
         print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
         print(f"SNS notifications: {sns_topic_arn}")
-        print(f"Run `quiltx bucket test {args.bucket_name}` to verify indexing.")
-        return 0
+        if args.no_test:
+            print(
+                f"Run `quiltx bucket test {args.bucket_name}` to verify registration and access."
+            )
+            return 0
+        print()
+        return _verify_bucket_registration_and_access(args.bucket_name)
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -225,22 +237,22 @@ def _cmd_list() -> int:
 
 
 def _cmd_test(args: argparse.Namespace) -> int:
+    return _verify_bucket_registration_and_access(args.bucket_name)
+
+
+def _verify_bucket_registration_and_access(bucket_name: str) -> int:
     import quilt3
     from quilt3.admin import buckets as admin_buckets
 
-    bucket_uri = f"s3://{args.bucket_name}"
+    bucket_uri = f"s3://{bucket_name}"
     try:
         registered = next(
-            (
-                bucket
-                for bucket in admin_buckets.list()
-                if bucket.name == args.bucket_name
-            ),
+            (bucket for bucket in admin_buckets.list() if bucket.name == bucket_name),
             None,
         )
         if registered is None:
-            raise ValueError(f"{args.bucket_name} is not registered in Quilt")
-        print(f"OK: {args.bucket_name} is registered in Quilt as {registered.title}")
+            raise ValueError(f"{bucket_name} is not registered in Quilt")
+        print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
 
         b = quilt3.Bucket(bucket_uri)
         # ls() goes through the control account — if the cross-account
