@@ -296,20 +296,21 @@ def _confirm_bucket_add(
     profile: str | None,
     sns_topic_arn: str | None,
 ) -> bool:
-    print(f"About to register bucket {bucket_name}.")
-    print(f"Catalog: {catalog_name} ({catalog_url})")
-    print(
-        f"Control plane: stack {stack_name}, account {control_account_id}, "
-        f"region {control_region}"
+    console = Console(width=120)
+    _print_context_table(
+        console,
+        "Bucket add confirmation",
+        catalog_name,
+        catalog_url,
+        stack_name,
+        control_account_id,
+        control_region,
+        bucket_name,
+        bucket_region,
+        data_account_id,
+        profile,
+        sns_topic_arn,
     )
-    print(
-        f"Data plane: bucket account {data_account_id}, region {bucket_region}, "
-        f"profile {profile or '<default>'}"
-    )
-    if sns_topic_arn:
-        print(f"Existing SNS topic will be reused: {sns_topic_arn}")
-    else:
-        print("A new SNS topic will be created for bucket notifications.")
     response = input("Continue? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
 
@@ -327,18 +328,68 @@ def _print_dry_run_plan(
     merged_policy: Mapping[str, Any],
     sns_topic_arn: str | None,
 ) -> None:
-    console = Console()
+    console = Console(width=120)
+    _print_context_table(
+        console,
+        "Bucket add dry-run",
+        catalog_name,
+        catalog_url,
+        stack_name,
+        control_account_id,
+        control_region,
+        bucket_name,
+        bucket_region,
+        data_account_id,
+        profile,
+        sns_topic_arn,
+    )
+    print()
+    print("Planned bucket policy:")
+    _print_json(console, merged_policy)
+
+    if sns_topic_arn:
+        return
+
+    planned_topic_arn = (
+        f"arn:aws:sns:{bucket_region}:{data_account_id}:"
+        f"{bucket_lib._sns_topic_name(bucket_name)}"
+    )
+    print("\nPlanned SNS topic policy statement:")
+    _print_json(
+        console,
+        bucket_lib._build_sns_topic_policy_statement(
+            bucket_name,
+            planned_topic_arn,
+            data_account_id,
+        ),
+    )
+
+
+def _print_context_table(
+    console: Console,
+    title: str,
+    catalog_name: str,
+    catalog_url: str,
+    stack_name: str,
+    control_account_id: str,
+    control_region: str,
+    bucket_name: str,
+    bucket_region: str,
+    data_account_id: str,
+    profile: str | None,
+    sns_topic_arn: str | None,
+) -> None:
     context_table = Table(
-        title="Bucket add dry-run",
+        title=title,
         show_header=True,
         header_style="bold cyan",
         border_style="cyan",
         expand=False,
     )
-    context_table.add_column("Resource", style="green", no_wrap=True)
+    context_table.add_column("Resource", style="green", overflow="fold")
     context_table.add_column("Account", no_wrap=True)
     context_table.add_column("Region", no_wrap=True)
-    context_table.add_column("Source")
+    context_table.add_column("Source", overflow="fold")
     context_table.add_row(
         catalog_name,
         control_account_id,
@@ -357,29 +408,24 @@ def _print_dry_run_plan(
         bucket_region,
         f"AWS profile {profile or '<default>'}",
     )
-    console.print(context_table)
-    print()
-    print("Planned bucket policy:")
-    _print_json(console, merged_policy)
-
     if sns_topic_arn:
-        print(f"\nPlanned SNS topic: reuse existing {sns_topic_arn}")
-        return
-
-    planned_topic_arn = (
-        f"arn:aws:sns:{bucket_region}:{data_account_id}:"
-        f"{bucket_lib._sns_topic_name(bucket_name)}"
-    )
-    print(f"\nPlanned SNS topic: create {planned_topic_arn}")
-    print("Planned SNS topic policy statement:")
-    _print_json(
-        console,
-        bucket_lib._build_sns_topic_policy_statement(
-            bucket_name,
-            planned_topic_arn,
+        context_table.add_row(
+            sns_topic_arn,
             data_account_id,
-        ),
-    )
+            bucket_region,
+            "reuse existing SNS topic",
+        )
+    else:
+        context_table.add_row(
+            (
+                f"arn:aws:sns:{bucket_region}:{data_account_id}:"
+                f"{bucket_lib._sns_topic_name(bucket_name)}"
+            ),
+            data_account_id,
+            bucket_region,
+            "create SNS topic",
+        )
+    console.print(context_table)
 
 
 def _print_json(console: Console, payload: Mapping[str, Any]) -> None:

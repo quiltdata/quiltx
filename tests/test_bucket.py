@@ -432,11 +432,12 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
     assert "111122223333" in captured.out
     assert "us-west-2" in captured.out
     assert "AWS profile <default>" in captured.out
+    assert "create SNS topic" in captured.out
     assert "Planned bucket policy:" in captured.out
     assert (
-        "Planned SNS topic: create arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
-        in captured.out
+        "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications" in captured.out
     )
+    assert "Planned SNS topic policy statement:" in captured.out
 
     s3_stubber.assert_no_pending_responses()
     sns_stubber.assert_no_pending_responses()
@@ -792,3 +793,26 @@ def test_build_parser_uses_bucket_prog() -> None:
     assert "{add,list,test}" not in help_text
     with contextlib.suppress(SystemExit):
         parser.parse_args(["add", "--help"])
+
+
+def test_confirm_bucket_add_renders_context_table(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    assert bucket_tool._confirm_bucket_add(
+        "demo",
+        "https://demo.example.com",
+        "quilt-demo-stack",
+        "123456789012",
+        "us-east-1",
+        "bucket",
+        "us-west-2",
+        "111122223333",
+        "open",
+        "arn:aws:sns:us-west-2:111122223333:existing",
+    )
+
+    captured = capsys.readouterr()
+    assert "Bucket add confirmation" in captured.out
+    assert "s3://bucket" in captured.out
+    assert "reuse existing SNS topic" in captured.out
+    assert "AWS profile open" in captured.out
