@@ -426,6 +426,7 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
     assert "Source" in captured.out
     assert "demo" in captured.out
     assert "cached stack.json" in captured.out
+    assert "s3://bucket" in captured.out
     assert "quilt-demo-stack" in captured.out
     assert "123456789012" in captured.out
     assert "111122223333" in captured.out

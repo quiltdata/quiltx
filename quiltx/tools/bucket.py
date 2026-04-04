@@ -352,7 +352,7 @@ def _print_dry_run_plan(
         "cached stack.json",
     )
     context_table.add_row(
-        bucket_name,
+        f"s3://{bucket_name}",
         data_account_id,
         bucket_region,
         f"AWS profile {profile or '<default>'}",
