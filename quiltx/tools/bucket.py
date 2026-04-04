@@ -11,7 +11,6 @@ from typing import Any, Mapping
 
 import boto3
 from rich.console import Console
-from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -329,29 +328,36 @@ def _print_dry_run_plan(
     sns_topic_arn: str | None,
 ) -> None:
     console = Console()
-    context_table = Table.grid(padding=(0, 2))
-    context_table.add_column(style="bold cyan", no_wrap=True)
-    context_table.add_column()
-    context_table.add_row("Catalog", f"{catalog_name} ({catalog_url})")
+    context_table = Table(
+        title="Bucket add dry-run",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+        expand=False,
+    )
+    context_table.add_column("Resource", style="green", no_wrap=True)
+    context_table.add_column("Account", no_wrap=True)
+    context_table.add_column("Region", no_wrap=True)
+    context_table.add_column("Source")
     context_table.add_row(
-        "Control plane",
-        f"stack {stack_name} / account {control_account_id} / region {control_region}",
+        catalog_name,
+        control_account_id,
+        control_region,
+        catalog_url,
     )
     context_table.add_row(
-        "Data plane",
-        (
-            f"bucket {bucket_name} / account {data_account_id} / "
-            f"region {bucket_region} / profile {profile or '<default>'}"
-        ),
+        stack_name,
+        control_account_id,
+        control_region,
+        "cached stack.json",
     )
-    console.print(
-        Panel(
-            context_table,
-            title="Bucket add dry-run",
-            border_style="cyan",
-            expand=False,
-        )
+    context_table.add_row(
+        bucket_name,
+        data_account_id,
+        bucket_region,
+        f"AWS profile {profile or '<default>'}",
     )
+    console.print(context_table)
     print()
     print("Planned bucket policy:")
     _print_json(console, merged_policy)
