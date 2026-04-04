@@ -8,7 +8,8 @@ from typing import Any, Mapping
 from botocore.exceptions import ClientError
 
 QUILT_POLICY_SID = "QuiltCrossAccountAccess"
-SNS_POLICY_SID = "QuiltBucketNotifications"
+SNS_PUBLISH_POLICY_SID = "QuiltBucketNotifications"
+SNS_SUBSCRIBE_POLICY_SID = "QuiltCrossAccountSNSAccess"
 SNS_TOPIC_CONFIG_ID = "QuiltBucketNotifications"
 
 QUILT_POLICY_ACTIONS = [
@@ -127,9 +128,10 @@ def configure_sns_topic_policy(
     bucket: str,
     sns_topic_arn: str,
     data_account_id: str,
+    control_principal_arn: str,
     sns_client: Any = None,
 ) -> None:
-    """Ensure the SNS topic policy allows S3 notifications from this bucket only."""
+    """Ensure the SNS topic policy allows S3 publish and Quilt subscribe access."""
     if sns_client is None:
         import boto3
 
@@ -139,20 +141,24 @@ def configure_sns_topic_policy(
         "Attributes", {}
     )
     existing_policy = _parse_json_document(attributes.get("Policy"))
-    statement = _build_sns_topic_policy_statement(
+    publish_statement = _build_sns_topic_publish_policy_statement(
         bucket, sns_topic_arn, data_account_id
+    )
+    subscribe_statement = _build_sns_topic_subscribe_policy_statement(
+        sns_topic_arn, control_principal_arn
     )
 
     if existing_policy is None:
         policy = {
             "Version": "2012-10-17",
-            "Statement": [statement],
+            "Statement": [publish_statement, subscribe_statement],
         }
     else:
         policy = dict(existing_policy)
-        policy["Statement"] = _merge_policy_statements(
-            existing_policy.get("Statement"), statement
+        statements = _merge_policy_statements(
+            existing_policy.get("Statement"), publish_statement
         )
+        policy["Statement"] = _merge_policy_statements(statements, subscribe_statement)
 
     sns_client.set_topic_attributes(
         TopicArn=sns_topic_arn,
@@ -239,11 +245,11 @@ def _sns_topic_name(bucket: str) -> str:
     return f"quilt-{bucket[: 256 - len('quilt-') - len(suffix)]}{suffix}"
 
 
-def _build_sns_topic_policy_statement(
+def _build_sns_topic_publish_policy_statement(
     bucket: str, sns_topic_arn: str, data_account_id: str
 ) -> dict[str, Any]:
     return {
-        "Sid": SNS_POLICY_SID,
+        "Sid": SNS_PUBLISH_POLICY_SID,
         "Effect": "Allow",
         "Principal": {"Service": "s3.amazonaws.com"},
         "Action": "SNS:Publish",
@@ -252,6 +258,22 @@ def _build_sns_topic_policy_statement(
             "ArnEquals": {"aws:SourceArn": f"arn:aws:s3:::{bucket}"},
             "StringEquals": {"aws:SourceAccount": data_account_id},
         },
+    }
+
+
+def _build_sns_topic_subscribe_policy_statement(
+    sns_topic_arn: str, control_principal_arn: str
+) -> dict[str, Any]:
+    return {
+        "Sid": SNS_SUBSCRIBE_POLICY_SID,
+        "Effect": "Allow",
+        "Principal": {"AWS": control_principal_arn},
+        "Action": [
+            "sns:GetTopicAttributes",
+            "sns:Subscribe",
+            "sns:Unsubscribe",
+        ],
+        "Resource": sns_topic_arn,
     }
 
 

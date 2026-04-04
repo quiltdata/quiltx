@@ -226,6 +226,17 @@ def test_configure_sns_topic_policy_creates_or_merges() -> None:
                     "StringEquals": {"aws:SourceAccount": "123456789012"},
                 },
             },
+            {
+                "Sid": "QuiltCrossAccountSNSAccess",
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::123456789012:role/quilt-registry"},
+                "Action": [
+                    "sns:GetTopicAttributes",
+                    "sns:Subscribe",
+                    "sns:Unsubscribe",
+                ],
+                "Resource": topic_arn,
+            },
         ],
     }
     stubber.add_response(
@@ -248,6 +259,7 @@ def test_configure_sns_topic_policy_creates_or_merges() -> None:
         "bucket",
         topic_arn,
         "123456789012",
+        "arn:aws:iam::123456789012:role/quilt-registry",
         sns_client=client,
     )
 
@@ -413,6 +425,12 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
             "account_id": "123456789012",
             "stack_name": "quilt-demo-stack",
             "region": "us-east-1",
+            "outputs": [
+                {
+                    "OutputKey": "RegistryRoleARN",
+                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+                }
+            ],
         },
     )
     _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
@@ -428,6 +446,8 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
     assert "cached stack.json" in captured.out
     assert "s3://bucket" in captured.out
     assert "quilt-demo-stack" in captured.out
+    assert "arn:aws:iam::123456789012:role/quilt-registry" in captured.out
+    assert "RegistryRoleARN" in captured.out
     assert "123456789012" in captured.out
     assert "111122223333" in captured.out
     assert "us-west-2" in captured.out
@@ -576,6 +596,51 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
 
     sns_client = _client("sns", region_name="us-west-2")
     sns_stubber = Stubber(sns_client)
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:existing"
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {}},
+        {"TopicArn": topic_arn},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "QuiltBucketNotifications",
+                            "Effect": "Allow",
+                            "Principal": {"Service": "s3.amazonaws.com"},
+                            "Action": "SNS:Publish",
+                            "Resource": topic_arn,
+                            "Condition": {
+                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
+                                "StringEquals": {"aws:SourceAccount": "111122223333"},
+                            },
+                        },
+                        {
+                            "Sid": "QuiltCrossAccountSNSAccess",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "AWS": "arn:aws:iam::123456789012:role/quilt-registry"
+                            },
+                            "Action": [
+                                "sns:GetTopicAttributes",
+                                "sns:Subscribe",
+                                "sns:Unsubscribe",
+                            ],
+                            "Resource": topic_arn,
+                        },
+                    ],
+                }
+            ),
+        },
+    )
     sns_stubber.activate()
 
     sts_client = _client("sts")
@@ -602,7 +667,15 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
-        lambda catalog_name: {"account_id": "123456789012"},
+        lambda catalog_name: {
+            "account_id": "123456789012",
+            "outputs": [
+                {
+                    "OutputKey": "RegistryRoleARN",
+                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+                }
+            ],
+        },
     )
 
     assert bucket_tool.main(["add", "bucket", "--title", "Demo Bucket", "--yes"]) == 0
@@ -713,7 +786,20 @@ def test_add_creates_sns(monkeypatch) -> None:
                                 "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
                                 "StringEquals": {"aws:SourceAccount": "111122223333"},
                             },
-                        }
+                        },
+                        {
+                            "Sid": "QuiltCrossAccountSNSAccess",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "AWS": "arn:aws:iam::123456789012:role/quilt-registry"
+                            },
+                            "Action": [
+                                "sns:GetTopicAttributes",
+                                "sns:Subscribe",
+                                "sns:Unsubscribe",
+                            ],
+                            "Resource": topic_arn,
+                        },
                     ],
                 }
             ),
@@ -745,7 +831,15 @@ def test_add_creates_sns(monkeypatch) -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
-        lambda catalog_name: {"account_id": "123456789012"},
+        lambda catalog_name: {
+            "account_id": "123456789012",
+            "outputs": [
+                {
+                    "OutputKey": "RegistryRoleARN",
+                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+                }
+            ],
+        },
     )
 
     assert bucket_tool.main(["add", "bucket", "--yes"]) == 0
@@ -803,6 +897,7 @@ def test_confirm_bucket_add_renders_context_table(monkeypatch, capsys) -> None:
         "https://demo.example.com",
         "quilt-demo-stack",
         "123456789012",
+        "arn:aws:iam::123456789012:role/quilt-registry",
         "us-east-1",
         "bucket",
         "us-west-2",
@@ -813,6 +908,8 @@ def test_confirm_bucket_add_renders_context_table(monkeypatch, capsys) -> None:
 
     captured = capsys.readouterr()
     assert "Bucket add confirmation" in captured.out
+    assert "arn:aws:iam::123456789012:role/quilt-registry" in captured.out
+    assert "RegistryRoleARN" in captured.out
     assert "s3://bucket" in captured.out
     assert "reuse existing SNS topic" in captured.out
     assert "AWS profile open" in captured.out

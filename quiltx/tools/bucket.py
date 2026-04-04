@@ -5,8 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
-import uuid
 from typing import Any, Mapping
 
 import boto3
@@ -18,8 +16,6 @@ from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
 from quiltx.config import get_catalog_config
 from quiltx.utils import get_bucket_region
-
-TEST_OBJECT_PREFIX = ".quiltx/add-bucket-tests"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,13 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser = subparsers.add_parser(
         "test",
         prog="quiltx bucket test",
-        help="Upload and remove a test object, then print index verification steps.",
+        help="Verify the control account can read the bucket (tests cross-account policy).",
     )
     test_parser.add_argument("bucket_name", help="S3 bucket name to test.")
-    test_parser.add_argument(
-        "--profile",
-        help="AWS profile for the data account that owns the bucket.",
-    )
 
     return parser
 
@@ -99,6 +91,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
         catalog_name = stack_lib.extract_catalog_name(config)
         stack_payload = stack_lib.load_stack_payload(catalog_name)
         control_account_id = _load_control_account_id(stack_payload)
+        control_principal_arn = _load_control_principal_arn(
+            stack_payload, control_account_id
+        )
         stack_name = _stack_payload_value(stack_payload, "stack_name", "unknown")
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
         catalog_url = str(config.get("navigator_url") or catalog_name)
@@ -135,6 +130,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 catalog_url,
                 stack_name,
                 control_account_id,
+                control_principal_arn,
                 control_region,
                 args.bucket_name,
                 bucket_region,
@@ -150,6 +146,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
             catalog_url,
             stack_name,
             control_account_id,
+            control_principal_arn,
             control_region,
             args.bucket_name,
             bucket_region,
@@ -166,12 +163,14 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 bucket_region,
                 sns_client=sns_client,
             )
-            bucket_lib.configure_sns_topic_policy(
-                args.bucket_name,
-                sns_topic_arn,
-                data_account_id,
-                sns_client=sns_client,
-            )
+
+        bucket_lib.configure_sns_topic_policy(
+            args.bucket_name,
+            sns_topic_arn,
+            data_account_id,
+            control_principal_arn,
+            sns_client=sns_client,
+        )
 
         bucket_lib.apply_bucket_policy(
             args.bucket_name,
@@ -226,34 +225,20 @@ def _cmd_list() -> int:
 
 
 def _cmd_test(args: argparse.Namespace) -> int:
-    test_key = f"{TEST_OBJECT_PREFIX}/{uuid.uuid4().hex}.txt"
-    session = boto3.Session(profile_name=args.profile)
-    s3_client = session.client("s3")
-    try:
-        s3_client.put_object(
-            Bucket=args.bucket_name,
-            Key=test_key,
-            Body=b"quiltx bucket test\n",
-            ContentType="text/plain",
-        )
-        print(f"Uploaded s3://{args.bucket_name}/{test_key}")
-        print("Waiting briefly before cleanup...")
-        time.sleep(2)
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    import quilt3
 
+    bucket_uri = f"s3://{args.bucket_name}"
     try:
-        s3_client.delete_object(Bucket=args.bucket_name, Key=test_key)
-        print(f"Removed s3://{args.bucket_name}/{test_key}")
-        print(
-            "Verify bucket indexing in the Quilt catalog UI or search API for "
-            f"{test_key}."
-        )
+        b = quilt3.Bucket(bucket_uri)
+        # ls() goes through the control account — if the cross-account
+        # bucket policy is wrong, this raises AccessDenied.
+        list(b.ls())
+        print(f"OK: control account can read {bucket_uri}")
         return 0
     except Exception as exc:
         print(
-            f"Warning: uploaded test object but failed cleanup: {exc}", file=sys.stderr
+            f"Control account cannot read {bucket_uri}: {exc}",
+            file=sys.stderr,
         )
         return 1
 
@@ -269,6 +254,15 @@ def _load_control_account_id(stack_payload: Mapping[str, Any] | None) -> str:
     return str(account_id)
 
 
+def _load_control_principal_arn(
+    stack_payload: Mapping[str, Any] | None, control_account_id: str
+) -> str:
+    role_arn = _stack_output_value(stack_payload, "RegistryRoleARN")
+    if role_arn:
+        return role_arn
+    return f"arn:aws:iam::{control_account_id}:root"
+
+
 def _stack_payload_value(
     stack_payload: Mapping[str, Any] | None, key: str, default: str
 ) -> str:
@@ -280,6 +274,19 @@ def _stack_payload_value(
     return str(value)
 
 
+def _stack_output_value(
+    stack_payload: Mapping[str, Any] | None, output_key: str
+) -> str | None:
+    if not stack_payload:
+        return None
+    for output in stack_payload.get("outputs") or []:
+        if not isinstance(output, Mapping):
+            continue
+        if output.get("OutputKey") == output_key and output.get("OutputValue"):
+            return str(output["OutputValue"])
+    return None
+
+
 def _get_session_account_id(session: boto3.Session) -> str:
     return str(session.client("sts").get_caller_identity()["Account"])
 
@@ -289,6 +296,7 @@ def _confirm_bucket_add(
     catalog_url: str,
     stack_name: str,
     control_account_id: str,
+    control_principal_arn: str,
     control_region: str,
     bucket_name: str,
     bucket_region: str,
@@ -304,6 +312,7 @@ def _confirm_bucket_add(
         catalog_url,
         stack_name,
         control_account_id,
+        control_principal_arn,
         control_region,
         bucket_name,
         bucket_region,
@@ -320,6 +329,7 @@ def _print_dry_run_plan(
     catalog_url: str,
     stack_name: str,
     control_account_id: str,
+    control_principal_arn: str,
     control_region: str,
     bucket_name: str,
     bucket_region: str,
@@ -336,6 +346,7 @@ def _print_dry_run_plan(
         catalog_url,
         stack_name,
         control_account_id,
+        control_principal_arn,
         control_region,
         bucket_name,
         bucket_region,
@@ -347,21 +358,27 @@ def _print_dry_run_plan(
     print("Planned bucket policy:")
     _print_json(console, merged_policy)
 
-    if sns_topic_arn:
-        return
-
-    planned_topic_arn = (
+    planned_topic_arn = sns_topic_arn or (
         f"arn:aws:sns:{bucket_region}:{data_account_id}:"
         f"{bucket_lib._sns_topic_name(bucket_name)}"
     )
     print("\nPlanned SNS topic policy statement:")
     _print_json(
         console,
-        bucket_lib._build_sns_topic_policy_statement(
-            bucket_name,
-            planned_topic_arn,
-            data_account_id,
-        ),
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                bucket_lib._build_sns_topic_publish_policy_statement(
+                    bucket_name,
+                    planned_topic_arn,
+                    data_account_id,
+                ),
+                bucket_lib._build_sns_topic_subscribe_policy_statement(
+                    planned_topic_arn,
+                    control_principal_arn,
+                ),
+            ],
+        },
     )
 
 
@@ -372,6 +389,7 @@ def _print_context_table(
     catalog_url: str,
     stack_name: str,
     control_account_id: str,
+    control_principal_arn: str,
     control_region: str,
     bucket_name: str,
     bucket_region: str,
@@ -401,6 +419,12 @@ def _print_context_table(
         control_account_id,
         control_region,
         "cached stack.json",
+    )
+    context_table.add_row(
+        control_principal_arn,
+        control_account_id,
+        control_region,
+        "RegistryRoleARN",
     )
     context_table.add_row(
         f"s3://{bucket_name}",
