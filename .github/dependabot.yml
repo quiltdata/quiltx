@@ -1,0 +1,4 @@
+# Dependabot is disabled — we use Renovate instead.
+# This file prevents GitHub from suggesting dependabot enablement.
+version: 2
+updates: []
