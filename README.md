@@ -4,33 +4,26 @@
 
 Quilt extension toolkit for working with [Quilt](https://quiltdata.com) catalogs.
 
-## Install
-
-```bash
-uvx quiltx --list
-```
-
 ## Usage
 
 ```bash
-# List available tools
-quiltx --list
+# See available tools
+uvx quiltx
 
 # Configure a Quilt catalog
-quiltx config https://open.quiltdata.com
+uvx quiltx config https://open.quiltdata.com
 
 # Register a cross-account S3 bucket
-quiltx bucket add s3://my-data-bucket
+uvx quiltx bucket add s3://my-data-bucket
 
 # Discover the Quilt CloudFormation stack
-quiltx stack
+uvx quiltx stack
 
 # Tail CloudWatch logs
-quiltx logs --minutes 30 --filter "ERROR"
+uvx quiltx logs --minutes 30 --filter "ERROR"
 
-# Get help
-quiltx --help
-quiltx <tool> --help
+# Get help for a specific tool
+uvx quiltx <tool> --help
 ```
 
 ## Tools
@@ -53,6 +46,14 @@ print(get_catalog_region()) # us-east-1
 # Discover stack
 stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
+```
+
+## Persistent install (optional)
+
+```bash
+uv tool install -U quiltx
+# Now use without the uvx prefix:
+quiltx --list
 ```
 
 ## License

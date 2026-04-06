@@ -65,6 +65,10 @@ cmd = "python scripts/bump_version.py"
 help = "Install hooks, lint, and run all tests (including integration if enabled)."
 sequence = ["setup", "lint", { shell = "QUILTX_STACK_INTEGRATION=1 pytest tests" }]
 
+[tool.poe.tasks.release-notes]
+help = "Preview release notes for the current version"
+cmd = "python scripts/release_notes.py"
+
 [tool.poe.tasks.tag]
 help = "Create and push a git tag for the current version"
 shell = """

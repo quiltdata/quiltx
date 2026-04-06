@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `poe tag` release notes now embed actual CHANGELOG content instead of GitHub-generated PR links
 - `poe tag` uses `scripts/release_notes.py` to extract notes from CHANGELOG.md
-- README: `uvx quiltx --list` as the primary install, removed `uv pip install`
+- README: use `uvx quiltx` consistently throughout, drop "Install" section
+
+## [0.4.0] - 2026-04-03
 
 ### Added
 
