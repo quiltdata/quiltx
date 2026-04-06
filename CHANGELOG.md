@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-04-06
+
+### Fixed
+
+- Fix publish workflow: remove `gh release create` from `poe tag` to avoid conflict with CI release step
+
 ## [0.4.5] - 2026-04-06
 
 ### Changed
