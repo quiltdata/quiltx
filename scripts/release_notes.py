@@ -5,6 +5,7 @@ Usage:
     python scripts/release_notes.py          # uses version from pyproject.toml
     python scripts/release_notes.py 0.4.0    # explicit version
 """
+
 from __future__ import annotations
 
 import re
