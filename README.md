@@ -54,6 +54,13 @@ print(get_catalog_config()) # full config dict
 # Discover stack
 stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
+
+# Register an S3 bucket (policy, SNS, notifications, catalog)
+from quiltx.bucket import add_bucket
+
+result = add_bucket("my-data-bucket", title="My Data")
+print(result.sns_topic_arn)
+print(result.already_registered)
 ```
 
 ## Persistent install (optional)
