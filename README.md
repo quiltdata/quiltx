@@ -19,6 +19,9 @@ uvx quiltx bucket add s3://my-data-bucket
 # Discover the Quilt CloudFormation stack
 uvx quiltx stack
 
+# Open an interactive shell in a running ECS task
+uvx quiltx ecs
+
 # Tail CloudWatch logs
 uvx quiltx logs --minutes 30 --filter "ERROR"
 
@@ -30,22 +33,34 @@ uvx quiltx <tool> --help
 
 - **bucket** — Register S3 buckets with Quilt (policy, SNS, notifications)
 - **config** — Configure and display Quilt catalog settings
-- **stack** — Discover the Quilt CloudFormation stack and cache metadata
+- **ecs** — Interactive shell access to running ECS tasks via Session Manager
 - **logs** — Display and tail CloudWatch logs for the configured catalog
+- **stack** — Discover the Quilt CloudFormation stack and cache metadata
 
 ## Python API
 
 ```python
-from quiltx import get_catalog_url, get_catalog_region
+from quiltx import get_catalog_url, get_catalog_region, get_catalog_config, set_catalog_url
 from quiltx.stack import find_matching_stack
 
-# Get catalog configuration
+# Configure a catalog
+set_catalog_url("https://open.quiltdata.com")
+
+# Read catalog configuration
 print(get_catalog_url())    # https://open.quiltdata.com
 print(get_catalog_region()) # us-east-1
+print(get_catalog_config()) # full config dict
 
 # Discover stack
 stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
+
+# Register an S3 bucket (policy, SNS, notifications, catalog)
+from quiltx.bucket import add_bucket
+
+result = add_bucket("my-data-bucket", title="My Data")
+print(result.sns_topic_arn)
+print(result.already_registered)
 ```
 
 ## Persistent install (optional)

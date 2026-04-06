@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from botocore.exceptions import ClientError
+
+from quiltx import stack as stack_lib
+from quiltx.config import get_catalog_config
+from quiltx.utils import get_bucket_region
 
 QUILT_POLICY_SID = "QuiltCrossAccountAccess"
 SNS_PUBLISH_POLICY_SID = "QuiltBucketNotifications"
@@ -203,6 +208,120 @@ def configure_bucket_notifications(
     s3_client.put_bucket_notification_configuration(
         Bucket=bucket,
         NotificationConfiguration=notification_config,
+    )
+
+
+@dataclass
+class AddBucketResult:
+    """Result of registering a bucket with Quilt."""
+
+    bucket: str
+    title: str
+    sns_topic_arn: str
+    already_registered: bool
+
+
+def add_bucket(
+    bucket: str,
+    *,
+    title: str | None = None,
+    profile: str | None = None,
+) -> AddBucketResult:
+    """Register an S3 bucket with the configured Quilt catalog.
+
+    Configures cross-account bucket policy, SNS topic and policy,
+    and bucket event notifications, then registers the bucket
+    in the Quilt catalog.
+
+    Requires a cached stack payload (run ``quiltx stack`` first).
+
+    Args:
+        bucket: S3 bucket name.
+        title: Display title in the catalog (defaults to bucket name).
+        profile: AWS profile for the data account that owns the bucket.
+
+    Returns:
+        AddBucketResult with bucket details and registration status.
+
+    Raises:
+        ValueError: If no catalog is configured or stack metadata is missing.
+    """
+    import boto3
+    from quilt3.admin import buckets as admin_buckets
+
+    config = get_catalog_config()
+    catalog_name = stack_lib.extract_catalog_name(config)
+    payload = stack_lib.load_stack_payload(catalog_name)
+    if not payload:
+        raise ValueError("No cached stack metadata. Run 'quiltx stack' first.")
+
+    control_account_id = payload.get("account_id")
+    if not control_account_id:
+        raise ValueError("Stack metadata missing account_id. Run 'quiltx stack' first.")
+    control_account_id = str(control_account_id)
+
+    # Find RegistryRoleARN from stack outputs, fall back to account root
+    control_principal_arn = f"arn:aws:iam::{control_account_id}:root"
+    for output in payload.get("outputs") or []:
+        if isinstance(output, Mapping):
+            if output.get("OutputKey") == "RegistryRoleARN" and output.get(
+                "OutputValue"
+            ):
+                control_principal_arn = str(output["OutputValue"])
+                break
+
+    bucket_title = title or bucket
+
+    # Check if already registered
+    existing = admin_buckets.get(bucket)
+    if existing is not None:
+        return AddBucketResult(
+            bucket=bucket,
+            title=getattr(existing, "title", bucket_title),
+            sns_topic_arn=getattr(existing, "sns_notification_arn", "") or "",
+            already_registered=True,
+        )
+
+    session = boto3.Session(profile_name=profile)
+    s3_client = session.client("s3")
+    bucket_region = get_bucket_region(bucket, s3_client=s3_client)
+    sns_client = session.client("sns", region_name=bucket_region)
+    data_account_id = str(session.client("sts").get_caller_identity()["Account"])
+
+    # Bucket policy
+    existing_policy = get_bucket_policy(bucket, s3_client=s3_client)
+    statement = build_quilt_policy_statement(bucket, control_account_id)
+    merged = merge_bucket_policy(existing_policy, statement)
+    apply_bucket_policy(bucket, merged, s3_client=s3_client)
+
+    # SNS topic
+    sns_topic_arn = get_bucket_notification_sns(bucket, s3_client=s3_client)
+    if sns_topic_arn is None:
+        sns_topic_arn = ensure_sns_topic(bucket, bucket_region, sns_client=sns_client)
+
+    configure_sns_topic_policy(
+        bucket,
+        sns_topic_arn,
+        data_account_id,
+        control_principal_arn,
+        sns_client=sns_client,
+    )
+
+    # Bucket notifications
+    configure_bucket_notifications(bucket, sns_topic_arn, s3_client=s3_client)
+
+    # Register in Quilt catalog
+    admin_buckets.add(
+        name=bucket,
+        title=bucket_title,
+        sns_notification_arn=sns_topic_arn,
+    )
+
+    return AddBucketResult(
+        bucket=bucket,
+        title=bucket_title,
+        sns_topic_arn=sns_topic_arn,
+        already_registered=False,
     )
 
 
