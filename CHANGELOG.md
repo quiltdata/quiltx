@@ -8,14 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.3] - 2026-04-03
+## [0.4.3] - 2026-04-06
 
 ### Changed
 
-- `poe tag` now automatically creates a GitHub release with PyPI badge, install command, and auto-generated changelog
-- `poe tag` release notes use `uv pip install` instead of `pip install`
-- `poe tag` passes `previous_tag_name` so "What's Changed" includes actual PR/commit diffs
-- README rewritten: PyPI badge at top, `uv` install, streamlined tool/API docs
+- `poe tag` release notes now embed actual CHANGELOG content instead of GitHub-generated PR links
+- `poe tag` uses `scripts/release_notes.py` to extract notes from CHANGELOG.md
+- README: `uvx quiltx --list` as the primary install, removed `uv pip install`
 
 ### Added
 

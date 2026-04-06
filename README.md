@@ -7,12 +7,6 @@ Quilt extension toolkit for working with [Quilt](https://quiltdata.com) catalogs
 ## Install
 
 ```bash
-uv pip install quiltx
-```
-
-Or run directly without installing:
-
-```bash
 uvx quiltx --list
 ```
 
