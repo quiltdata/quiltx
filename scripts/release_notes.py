@@ -36,7 +36,7 @@ def build_release_notes(version: str) -> str:
     return f"""\
 [![PyPI](https://img.shields.io/pypi/v/quiltx)](https://pypi.org/project/quiltx/{version}/)
 
-A new release of quiltx is available. To see all available commands, run:
+A new release of quiltx is [available](https://pypi.org/project/quiltx/{version}/). To see all available commands, run:
 ```bash
 uvx quiltx
 ```
