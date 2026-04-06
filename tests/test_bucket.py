@@ -36,7 +36,7 @@ def test_build_quilt_policy_statement() -> None:
         "arn:aws:s3:::demo-bucket/*",
     ]
     assert statement["Action"] == bucket_lib.QUILT_POLICY_ACTIONS
-    assert len(statement["Action"]) == 14
+    assert len(statement["Action"]) == 12
 
 
 def test_merge_bucket_policy_no_existing() -> None:

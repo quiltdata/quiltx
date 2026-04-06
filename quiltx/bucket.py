@@ -30,8 +30,6 @@ QUILT_POLICY_ACTIONS = [
     "s3:DeleteObjectVersion",
     "s3:PutObject",
     "s3:PutObjectTagging",
-    "s3:GetBucketNotification",
-    "s3:PutBucketNotification",
 ]
 
 BUCKET_NOTIFICATION_EVENTS = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
