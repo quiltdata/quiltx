@@ -1642,7 +1642,7 @@ wheels = [
 
 [[package]]
 name = "quiltx"
-version = "0.4.0"
+version = "0.4.4"
 source = { editable = "." }
 dependencies = [
     { name = "quilt3" },

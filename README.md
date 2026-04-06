@@ -1,74 +1,61 @@
 # quiltx
 
-Quilt extension toolkit with shared utilities for working with [Quilt](https://docs.quilt.bio) catalogs.
+[![PyPI](https://img.shields.io/pypi/v/quiltx)](https://pypi.org/project/quiltx/)
 
-## Installation
-
-```bash
-# No installation needed! Use uvx to run directly:
-uvx quiltx --list
-```
+Quilt extension toolkit for working with [Quilt](https://quiltdata.com) catalogs.
 
 ## Usage
 
-Run tools directly with `uvx` (recommended):
-
 ```bash
-# List available tools
-uvx quiltx --list
+# See available tools
+uvx quiltx
 
 # Configure a Quilt catalog
 uvx quiltx config https://open.quiltdata.com
 
-# Show current catalog configuration
-uvx quiltx config
+# Register a cross-account S3 bucket
+uvx quiltx bucket add s3://my-data-bucket
 
-# Get help
-uvx quiltx --help
+# Discover the Quilt CloudFormation stack
+uvx quiltx stack
+
+# Tail CloudWatch logs
+uvx quiltx logs --minutes 30 --filter "ERROR"
+
+# Get help for a specific tool
 uvx quiltx <tool> --help
 ```
 
-Or if installed with `pipx`:
+## Tools
 
-```bash
-quiltx --list
-quiltx config https://open.quiltdata.com
-quiltx stack
-quiltx logs --minutes 30 --filter "ERROR"
-```
+- **bucket** — Register S3 buckets with Quilt (policy, SNS, notifications)
+- **config** — Configure and display Quilt catalog settings
+- **stack** — Discover the Quilt CloudFormation stack and cache metadata
+- **logs** — Display and tail CloudWatch logs for the configured catalog
 
-## Built-in Tools
-
-- **bucket**: Register buckets with Quilt and configure bucket policy/SNS notifications
-- **config**: Configure and display Quilt catalog settings
-- **stack**: Discover the Quilt CloudFormation stack and cache log group metadata in `stack.json`
-- **logs**: Display CloudWatch Logs for the configured catalog using `stack.json`
-
-## API Examples
-
-### Discover Stack Name
+## Python API
 
 ```python
-from quiltx import get_catalog_url
+from quiltx import get_catalog_url, get_catalog_region
 from quiltx.stack import find_matching_stack
 
+# Get catalog configuration
+print(get_catalog_url())    # https://open.quiltdata.com
+print(get_catalog_region()) # us-east-1
+
+# Discover stack
 stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
 ```
 
-### Get Catalog Configuration
+## Persistent install (optional)
 
-```python
-from quiltx import get_catalog_url, get_catalog_region
-
-# Get specific configuration values
-catalog_url = get_catalog_url()
-region = get_catalog_region()
-
-print(f"Catalog: {catalog_url}")
-print(f"Region: {region}")
+```bash
+uv tool install -U quiltx
+# Now use without the uvx prefix:
+quiltx --list
 ```
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT
