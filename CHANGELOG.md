@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-04-06
+
+### Changed
+
+- Configure Renovate for grouped major/minor+patch dependency PRs, disable Dependabot
+- Hyperlink "available" to PyPI release page in release notes script
+
 ## [0.4.4] - 2026-04-06
 
 ### Changed
