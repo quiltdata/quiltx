@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `bucket add` auto-discovers CloudFormation stack when no cached metadata exists, removing the need to run `quiltx stack` first
+
 ## [0.4.8] - 2026-04-06
 
 ### Changed
