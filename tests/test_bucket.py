@@ -553,53 +553,17 @@ def test_add_no_config(monkeypatch, capsys) -> None:
     assert "No Quilt catalog configured" in captured.err
 
 
-def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
-    """When no cached stack payload exists, _ensure_stack_payload auto-discovers."""
-    call_count = {"n": 0}
-
-    def _load_stack_payload(catalog_name):
-        call_count["n"] += 1
-        if call_count["n"] <= 1:
-            return None  # first call: no cache
-        return {
-            "account_id": "123456789012",
-            "stack_name": "quilt",
-            "region": "us-east-1",
-            "outputs": [],
-        }
-
+def test_add_no_stack_cache(monkeypatch, capsys) -> None:
     monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
     monkeypatch.setattr(
-        bucket_tool.stack_lib, "load_stack_payload", _load_stack_payload
-    )
-    monkeypatch.setattr(
         bucket_tool.stack_lib,
-        "fetch_catalog_config",
-        lambda url: {"region": "us-east-1"},
-    )
-    monkeypatch.setattr(
-        bucket_tool.stack_lib, "resolve_region", lambda config, cc: "us-east-1"
-    )
-    monkeypatch.setattr(
-        bucket_tool.stack_lib,
-        "find_matching_stack",
-        lambda url, region: {
-            "StackName": "quilt",
-            "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/quilt/abc",
-        },
-    )
-    monkeypatch.setattr(
-        bucket_tool.stack_lib, "list_log_group_resources", lambda name, region: []
-    )
-    monkeypatch.setattr(
-        bucket_tool.stack_lib, "write_stack_payload", lambda *a, **kw: None
+        "load_stack_payload",
+        lambda catalog_name: None,
     )
 
-    # Should fail later (no S3 stub), but NOT with "Run 'quiltx stack' first"
     assert bucket_tool.main(["add", "bucket", "--dry-run"]) == 1
     captured = capsys.readouterr()
-    assert "Run 'quiltx stack' first" not in captured.err
-    assert "Discovering stack" in captured.out
+    assert "Run 'quiltx stack' first" in captured.err
 
 
 def test_add_reuses_existing_sns(monkeypatch) -> None:

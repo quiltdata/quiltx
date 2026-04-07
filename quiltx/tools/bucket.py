@@ -90,42 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-def _ensure_stack_payload(
-    config: Mapping[str, Any], catalog_name: str
-) -> Mapping[str, Any]:
-    """Load cached stack payload, discovering and caching it if missing."""
-    payload = stack_lib.load_stack_payload(catalog_name)
-    if payload is not None:
-        return payload
-
-    catalog_url = str(config.get("navigator_url") or f"https://{catalog_name}")
-    catalog_config = stack_lib.fetch_catalog_config(catalog_url)
-    region = stack_lib.resolve_region(config, catalog_config)
-
-    print(f"Discovering stack for {catalog_name}...")
-    stack_info = stack_lib.find_matching_stack(catalog_url, region=region)
-    log_groups = stack_lib.list_log_group_resources(
-        stack_info["StackName"], region=region
-    )
-    stack_lib.write_stack_payload(
-        catalog_name,
-        catalog_url,
-        region,
-        stack_info,
-        log_groups,
-        catalog_config=catalog_config,
-    )
-    payload = stack_lib.load_stack_payload(catalog_name)
-    if payload is None:
-        raise ValueError("Failed to cache stack metadata.")
-    return payload
-
-
 def _cmd_add(args: argparse.Namespace) -> int:
     try:
         config = get_catalog_config()
         catalog_name = stack_lib.extract_catalog_name(config)
-        stack_payload = _ensure_stack_payload(config, catalog_name)
+        stack_payload = stack_lib.load_stack_payload(catalog_name)
         control_account_id = _load_control_account_id(stack_payload)
         control_principal_arn = _load_control_principal_arn(
             stack_payload, control_account_id
