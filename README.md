@@ -11,13 +11,13 @@ Quilt extension toolkit for working with [Quilt](https://quiltdata.com) catalogs
 uvx quiltx
 
 # Configure a Quilt catalog
-uvx quiltx config https://open.quiltdata.com
+uvx quiltx stack catalog https://open.quiltdata.com
 
 # Register a cross-account S3 bucket
 uvx quiltx bucket add s3://my-data-bucket
 
 # Discover the Quilt CloudFormation stack
-uvx quiltx stack
+uvx quiltx stack cfn
 
 # Open an interactive shell in a running ECS task
 uvx quiltx ecs
@@ -32,10 +32,11 @@ uvx quiltx <tool> --help
 ## Tools
 
 - **bucket** — Register S3 buckets with Quilt (policy, SNS, notifications)
-- **config** — Configure and display Quilt catalog settings
 - **ecs** — Interactive shell access to running ECS tasks via Session Manager
 - **logs** — Display and tail CloudWatch logs for the configured catalog
-- **stack** — Discover the Quilt CloudFormation stack and cache metadata
+- **stack** — Manage Quilt stack
+  - **stack catalog** — Configure and display Quilt catalog settings
+  - **stack cfn** — Discover the Quilt CloudFormation stack and cache metadata
 
 ## Python API
 
