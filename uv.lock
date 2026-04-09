@@ -1604,7 +1604,7 @@ wheels = [
 
 [[package]]
 name = "quilt3"
-version = "7.2.0"
+version = "7.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "awscrt" },
@@ -1621,9 +1621,9 @@ dependencies = [
     { name = "tenacity" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/38/88fdc3af768f201e26988a7596a1a94e6657c08efe5ee8829a774a14a7a6/quilt3-7.2.0.tar.gz", hash = "sha256:5518017ffd7409dc781655a3cb0561c12739ba6e6dc9f8da3cdbb49289d4a108", size = 94563, upload-time = "2026-01-28T12:46:00.637Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/59/1f1706ef37aece70fa174ebf0d2119d741cebf49bf104a1a733e22a63277/quilt3-7.3.0.tar.gz", hash = "sha256:34553cfefa4cf1ac5cdb10af9144248a8018db720541b7f3e819402ed0e15fca", size = 101821, upload-time = "2026-04-07T21:15:30.363Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ea/64/27741a8cb8ea46a1f6997773c13fa9823f9555d05f00057c3dc042668785/quilt3-7.2.0-py3-none-any.whl", hash = "sha256:74c23dcfcb887f911669581cc14d84330594b248f6c3ef41c0e9b369c77dd87c", size = 121988, upload-time = "2026-01-28T12:45:58.598Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/25/4511e114e3f8420a0edd9febd12de1a4a56b3259a779d7ce5d92c5dfd6ac/quilt3-7.3.0-py3-none-any.whl", hash = "sha256:585245b73ad40586af6fc5be689e1113d3e44bcb75e198b3ee9a03a036b79d07", size = 136740, upload-time = "2026-04-07T21:15:31.782Z" },
 ]
 
 [[package]]
@@ -1631,6 +1631,7 @@ name = "quiltx"
 version = "0.6.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pyyaml" },
     { name = "quilt3" },
     { name = "rich" },
 ]
@@ -1646,6 +1647,8 @@ dev = [
     { name = "pre-commit", version = "4.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "pytest", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pytest", version = "9.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "types-pyyaml", version = "6.0.12.20250915", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "types-pyyaml", version = "6.0.12.20260408", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
 docs = [
     { name = "mkdocs" },
@@ -1666,8 +1669,10 @@ requires-dist = [
     { name = "poethepoet", marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
-    { name = "quilt3" },
+    { name = "pyyaml" },
+    { name = "quilt3", specifier = ">=7.3.0" },
     { name = "rich" },
+    { name = "types-pyyaml", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "docs"]
 
@@ -2140,6 +2145,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/27/89/4b0001b2dab8df0a5ee2787dcbe771de75ded01f18f1f8d53dedeea2882b/tqdm-4.67.2.tar.gz", hash = "sha256:649aac53964b2cb8dec76a14b405a4c0d13612cb8933aae547dd144eacc99653", size = 169514, upload-time = "2026-01-30T23:12:06.555Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f5/e2/31eac96de2915cf20ccaed0225035db149dfb9165a9ed28d4b252ef3f7f7/tqdm-4.67.2-py3-none-any.whl", hash = "sha256:9a12abcbbff58b6036b2167d9d3853042b9d436fe7330f06ae047867f2f8e0a7", size = 78354, upload-time = "2026-01-30T23:12:04.368Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20250915"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.10'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7e/69/3c51b36d04da19b92f9e815be12753125bd8bc247ba0470a982e6979e71c/types_pyyaml-6.0.12.20250915.tar.gz", hash = "sha256:0f8b54a528c303f0e6f7165687dd33fafa81c807fcac23f632b63aa624ced1d3", size = 17522, upload-time = "2025-09-15T03:01:00.728Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bd/e0/1eed384f02555dde685fff1a1ac805c1c7dcb6dd019c916fe659b1c1f9ec/types_pyyaml-6.0.12.20250915-py3-none-any.whl", hash = "sha256:e7d4d9e064e89a3b3cae120b4990cd370874d2bf12fa5f46c97018dd5d3c9ab6", size = 20338, upload-time = "2025-09-15T03:00:59.218Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260408"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.10'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/73/b759b1e413c31034cc01ecdfb96b38115d0ab4db55a752a3929f0cd449fd/types_pyyaml-6.0.12.20260408.tar.gz", hash = "sha256:92a73f2b8d7f39ef392a38131f76b970f8c66e4c42b3125ae872b7c93b556307", size = 17735, upload-time = "2026-04-08T04:30:50.974Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/f0/c391068b86abb708882c6d75a08cd7d25b2c7227dab527b3a3685a3c635b/types_pyyaml-6.0.12.20260408-py3-none-any.whl", hash = "sha256:fbc42037d12159d9c801ebfcc79ebd28335a7c13b08a4cfbc6916df78fee9384", size = 20339, upload-time = "2026-04-08T04:30:50.113Z" },
 ]
 
 [[package]]

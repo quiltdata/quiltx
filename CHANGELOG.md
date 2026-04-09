@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `quiltx stack acl` for declarative reconciliation of Quilt buckets, managed policies, managed roles, and SSO mappings from YAML
+
+### Changed
+
+- Add `pyyaml` as a runtime dependency for YAML-backed ACL configuration
+- Require `quilt3>=7.3.0` so `quiltx stack acl` can use the new admin policies API
+
 ## [0.5.0] - 2026-04-09
 
 ### Changed

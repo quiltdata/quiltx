@@ -15,7 +15,8 @@ classifiers = [
   "Operating System :: OS Independent"
 ]
 dependencies = [
-  "quilt3",
+  "pyyaml",
+  "quilt3>=7.3.0",
   "rich"
 ]
 
@@ -25,7 +26,8 @@ dev = [
   "mypy",
   "pre-commit",
   "poethepoet",
-  "pytest"
+  "pytest",
+  "types-PyYAML",
 ]
 docs = [
   "mkdocs>=1.5.0",

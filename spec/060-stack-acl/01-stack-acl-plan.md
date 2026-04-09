@@ -75,13 +75,12 @@ sso:
 
 **`fetch_current_state() -> CurrentState`** — call `quilt3.admin.{buckets,policies,roles,sso_config}.list()/get()`.
 
-**`compute_diff(desired, current) -> AclDiff`** — compare desired vs current for buckets, policies (by title, match permissions), roles (by name, match policy refs), SSO config. Only touch managed policies/roles.
+**`compute_diff(desired, current) -> AclDiff`** — compare desired vs current for buckets, policies (by title, match permissions), roles (by name, match policy refs), SSO config. Only touch managed policies/roles. If a desired name collides with an existing **unmanaged** policy or role, emit a warning and skip it (do not overwrite).
 
-**`build_sso_config(mappings, default_role) -> str`** — translate simplified `match.groups` to Quilt's JSON Schema SSO format:
+**`build_sso_config(mappings) -> str`** — translate simplified `match.groups` to Quilt's JSON Schema SSO format. Does **not** set a `default_role` (omitted to avoid granting unintended access):
 
 ```yaml
 version: "1.0"
-default_role: <first SSO mapping's first role>
 mappings:
   - schema:
       type: object
@@ -96,11 +95,11 @@ mappings:
 
 **`apply_acl(diff)`** — execute in order:
 
-1. Add buckets (`buckets.add`)
-2. Create/update policies (`policies.create_managed` / `policies.update_managed`)
-3. Create/update roles (`roles.create_managed` / `roles.update_managed`)
-4. Set SSO config (`sso_config.set`)
-5. Remove roles, then policies (reverse order). Skip bucket removal in v1 — warn only.
+1. Add buckets (`buckets.add`) — if a bucket cannot be added (e.g. not found, permissions error), warn and continue
+2. Create/update managed policies (`policies.create_managed` / `policies.update_managed`) — warn and skip on unmanaged name collision
+3. Create/update managed roles (`roles.create_managed` / `roles.update_managed`) — warn and skip on unmanaged name collision
+4. Update SSO config (`sso_config.set`) — merge/replace mappings but never remove the SSO config entirely
+5. Never remove buckets (warn only). Never delete unmanaged roles or policies.
 
 ### Step 2: `quiltx/tools/stack/acl.py` — CLI
 
@@ -130,10 +129,12 @@ Mock `quilt3.admin.*` modules. Test:
 
 ## Safety
 
-- Never remove buckets automatically (warn only)
-- Only manage managed policies/roles; ignore unmanaged (IAM ARN-backed)
-- SSO config is full-replacement (matches Quilt's model)
-- Show full diff before applying; require `--yes` or interactive confirmation
+1. **No default role** — SSO config omits `default_role` to avoid granting unintended access
+2. **No deletion of unmanaged entities** — never delete unmanaged roles or policies; warn on name collision and skip
+3. **Warn on bucket failures** — if a bucket cannot be added, warn and continue (do not abort)
+4. **SSO config is update-only** — set/replace SSO mappings but never remove the SSO config entirely
+5. **Never remove buckets** — warn only
+6. **Show full diff** before applying; require `--yes` or interactive confirmation
 
 ## Verification
 
