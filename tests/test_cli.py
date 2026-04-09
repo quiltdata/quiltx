@@ -17,6 +17,16 @@ def test_list_tools(capsys) -> None:
     assert len(cli.TOOLS) > 0
 
 
+def test_config_not_top_level() -> None:
+    """Test that config is no longer a top-level tool (moved to stack catalog)."""
+    assert "config" not in cli.TOOLS
+
+
+def test_stack_is_top_level() -> None:
+    """Test that stack is a top-level tool."""
+    assert "stack" in cli.TOOLS
+
+
 def test_run_tool_unknown(capsys) -> None:
     """Test running an unknown tool fails gracefully."""
     result = cli.run_tool("nonexistent", [])
@@ -44,6 +54,30 @@ def test_main_shows_tools(capsys) -> None:
     assert "available tools:" in captured.out
     # Check that at least one tool is shown
     assert any(tool in captured.out for tool in cli.TOOLS.keys())
+
+
+def test_stack_no_subcommand(capsys) -> None:
+    """Test that 'quiltx stack' with no subcommand shows help."""
+    result = cli.main(["stack"])
+    assert result == 1
+
+    captured = capsys.readouterr()
+    assert "catalog" in captured.out
+    assert "cfn" in captured.out
+
+
+def test_stack_catalog_help() -> None:
+    """Test that 'quiltx stack catalog --help' works."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["stack", "catalog", "--help"])
+    assert exc_info.value.code == 0
+
+
+def test_stack_cfn_help() -> None:
+    """Test that 'quiltx stack cfn --help' works."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["stack", "cfn", "--help"])
+    assert exc_info.value.code == 0
 
 
 def test_run_tool_exists() -> None:

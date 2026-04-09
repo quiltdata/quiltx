@@ -8,9 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-09
+
 ### Changed
 
-- `bucket add` auto-discovers CloudFormation stack when no cached metadata exists, removing the need to run `quiltx stack` first
+- **BREAKING**: `quiltx stack` is now a subcommand namespace with:
+  - `quiltx stack catalog` — show/set the Quilt catalog (replaces `quiltx config`)
+  - `quiltx stack cfn` — discover the CloudFormation stack (replaces bare `quiltx stack`)
+- **BREAKING**: `quiltx config` removed as a top-level command; use `quiltx stack catalog` instead
+- `bucket add` auto-discovers CloudFormation stack when no cached metadata exists, removing the need to run `quiltx stack cfn` first
 
 ## [0.4.8] - 2026-04-06
 

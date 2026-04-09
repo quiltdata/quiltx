@@ -10,7 +10,8 @@ import quiltx
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Show or set the Quilt catalog configured by quilt3."
+        prog="quiltx stack catalog",
+        description="Show or set the Quilt catalog configured by quilt3.",
     )
     parser.add_argument(
         "catalog_url",
