@@ -12,9 +12,10 @@ from quiltx import stack as stack_lib
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog="quiltx stack cfn",
         description=(
             "Discover and store information about the CloudFormation stack for the configured catalog."
-        )
+        ),
     )
     parser.add_argument(
         "--catalog-name",
