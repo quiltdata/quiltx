@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ class AclBucketPolicy:
 class AclRole:
     name: str
     bucket_policies: list[str] = field(default_factory=list)
+    default: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class AclConfig:
     bucket_policies: dict[str, AclBucketPolicy]
     roles: dict[str, AclRole]
     sso: list[AclSsoMapping]
+    default_role_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,8 @@ class AclDiff:
     roles_to_create: list[RoleUpdate] = field(default_factory=list)
     roles_to_update: list[RoleUpdate] = field(default_factory=list)
     roles_to_delete: list[str] = field(default_factory=list)
+    default_role_name: str | None = None
+    default_role_needs_update: bool = False
     sso_config_text: str | None = None
     sso_is_create: bool = False
     sso_needs_update: bool = False
@@ -92,6 +96,7 @@ class AclDiff:
                 self.roles_to_create,
                 self.roles_to_update,
                 self.roles_to_delete,
+                self.default_role_needs_update,
                 self.sso_needs_update,
             )
         )
@@ -133,6 +138,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
         )
 
     roles: dict[str, AclRole] = {}
+    default_roles: list[str] = []
     for name, value in raw_roles.items():
         if not isinstance(name, str):
             raise ValueError("Role names must be strings")
@@ -146,7 +152,18 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError(
                 f"Role '{name}' references unknown bucket policies: {', '.join(missing)}"
             )
-        roles[name] = AclRole(name=name, bucket_policies=policy_names)
+        default = value.get("default", False)
+        if not isinstance(default, bool):
+            raise ValueError(f"roles.{name}.default must be a boolean")
+        if default:
+            default_roles.append(name)
+        roles[name] = AclRole(name=name, bucket_policies=policy_names, default=default)
+
+    if len(default_roles) > 1:
+        raise ValueError(
+            "Only one role may set default: true; found "
+            + ", ".join(sorted(default_roles))
+        )
 
     sso: list[AclSsoMapping] = []
     for index, value in enumerate(raw_sso):
@@ -182,7 +199,13 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             AclSsoMapping(match=normalized_match, roles=mapping_roles, admin=admin)
         )
 
-    return AclConfig(bucket_policies=bucket_policies, roles=roles, sso=sso)
+    default_role_name = default_roles[0] if default_roles else None
+    return AclConfig(
+        bucket_policies=bucket_policies,
+        roles=roles,
+        sso=sso,
+        default_role_name=default_role_name,
+    )
 
 
 def all_buckets(config: AclConfig) -> set[str]:
@@ -304,6 +327,14 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
                 f"Role '{name}' is the current default role; skipping delete."
             )
 
+    if (
+        desired.default_role_name is not None
+        and desired.default_role_name in desired.roles
+        and desired.default_role_name != current.default_role_name
+    ):
+        diff.default_role_name = desired.default_role_name
+        diff.default_role_needs_update = True
+
     desired_sso_text = build_sso_config(desired.sso) if desired.sso else None
     if desired_sso_text is not None and not _same_yaml(
         current.sso_config_text, desired_sso_text
@@ -348,8 +379,22 @@ def build_sso_config(mappings: list[AclSsoMapping]) -> str:
     return yaml.safe_dump(payload, sort_keys=False)
 
 
-def print_diff(diff: AclDiff, *, verbose: bool = False) -> None:
+def print_diff(
+    diff: AclDiff,
+    *,
+    verbose: bool = False,
+    desired: AclConfig | None = None,
+    current: CurrentState | None = None,
+) -> None:
     """Print a readable summary of ACL changes."""
+    if verbose and desired is not None:
+        _print_verbose_state(diff, desired, current)
+        for warning in diff.warnings:
+            print(f"! {warning}")
+        if not diff.has_changes() and not diff.warnings:
+            print("Stack ACL is up to date")
+        return
+
     for bucket in diff.buckets_to_add:
         print(f"+ bucket {bucket}")
 
@@ -374,6 +419,9 @@ def print_diff(diff: AclDiff, *, verbose: bool = False) -> None:
             print(f"    policies: {', '.join(role.policy_titles)}")
     for name in diff.roles_to_delete:
         print(f"- role {name}")
+
+    if diff.default_role_needs_update and diff.default_role_name is not None:
+        print(f"~ default role {diff.default_role_name}")
 
     if diff.sso_needs_update:
         prefix = "+" if diff.sso_is_create else "~"
@@ -439,6 +487,10 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
         admin_roles.update_managed(role.name, name=role.name, policies=policy_ids)
         print(f"  ~ role {role.name}")
 
+    if diff.default_role_needs_update and diff.default_role_name is not None:
+        admin_roles.set_default(diff.default_role_name)
+        print(f"  ~ default role {diff.default_role_name}")
+
     if diff.sso_needs_update and diff.sso_config_text is not None:
         admin_sso_config.set(diff.sso_config_text)
         prefix = "+" if diff.sso_is_create else "~"
@@ -464,6 +516,64 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
 def _print_permissions(permissions: list[Permission]) -> None:
     for perm in permissions:
         print(f"    {perm.level}: {perm.bucket}")
+
+
+def _print_verbose_state(
+    diff: AclDiff, desired: AclConfig, current: CurrentState | None
+) -> None:
+    print("Desired ACL:")
+
+    changed_buckets = set(diff.buckets_to_add)
+    for bucket in sorted(all_buckets(desired)):
+        prefix = "+" if bucket in changed_buckets else "="
+        print(f"{prefix} bucket {bucket}")
+
+    created_policies = {policy.title for policy in diff.policies_to_create}
+    updated_policies = {policy.title for policy in diff.policies_to_update}
+    for title, policy in desired.bucket_policies.items():
+        if title in created_policies:
+            prefix = "+"
+        elif title in updated_policies:
+            prefix = "~"
+        else:
+            prefix = "="
+        print(f"{prefix} policy {title}")
+        _print_permissions(_permissions_for_policy(policy))
+
+    created_roles = {role.name for role in diff.roles_to_create}
+    updated_roles = {role.name for role in diff.roles_to_update}
+    for name, role in desired.roles.items():
+        if name in created_roles:
+            prefix = "+"
+        elif name in updated_roles:
+            prefix = "~"
+        else:
+            prefix = "="
+        print(f"{prefix} role {name}")
+        print(f"    policies: {', '.join(role.bucket_policies) or '(none)'}")
+        if role.default:
+            print("    default: true")
+
+    if desired.default_role_name is not None:
+        prefix = "~" if diff.default_role_needs_update else "="
+        print(f"{prefix} default role {desired.default_role_name}")
+
+    if desired.sso:
+        prefix = (
+            "+"
+            if diff.sso_is_create and diff.sso_needs_update
+            else "~" if diff.sso_needs_update else "="
+        )
+        print(f"{prefix} sso config")
+        sso_text = (
+            diff.sso_config_text
+            if diff.sso_config_text is not None
+            else build_sso_config(desired.sso)
+        )
+        for line in sso_text.rstrip().splitlines():
+            print(f"    {line}")
+    elif current is not None and current.sso_config_text:
+        print("= no sso config requested")
 
 
 def _coerce_string_list(value: Any, field_name: str) -> list[str]:
@@ -520,3 +630,8 @@ def _extract_sso_roles(config_text: str | None) -> set[str]:
                         role for role in mapping_roles if isinstance(role, str)
                     )
     return roles
+
+
+def with_default_role(config: AclConfig, default_role_name: str | None) -> AclConfig:
+    """Return a copy of config with the selected default role name."""
+    return replace(config, default_role_name=default_role_name)
