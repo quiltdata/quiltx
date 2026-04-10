@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -487,6 +488,7 @@ def apply_acl(
 ) -> list[str]:
     """Apply ACL changes. Returns any runtime warnings."""
     warnings = list(diff.warnings)
+    failed_buckets: set[str] = set()
 
     for bucket in diff.buckets_to_add:
         try:
@@ -494,24 +496,52 @@ def apply_acl(
             admin_buckets.add(bucket, bucket)
             print(f"  + bucket {bucket}")
         except Exception as exc:  # pragma: no cover - external API surface
+            failed_buckets.add(bucket)
             warnings.append(f"Bucket '{bucket}' could not be added: {exc}")
+            print(f"  ! bucket {bucket}: {exc}", file=sys.stderr)
 
     known_policies = dict(current.all_policies)
     for policy in diff.policies_to_create:
         _print_apply_step(f"create policy {policy.title}", verbose=verbose)
-        created = admin_policies.create_managed(
-            policy.title, permissions=policy.permissions
-        )
+        affected = _policy_uses_buckets(policy.permissions, failed_buckets)
+        try:
+            created = admin_policies.create_managed(
+                policy.title, permissions=policy.permissions
+            )
+        except Exception as exc:
+            hint = (
+                f" (references failed buckets: {', '.join(sorted(affected))})"
+                if affected
+                else ""
+            )
+            warnings.append(
+                f"Policy '{policy.title}' could not be created{hint}: {exc}"
+            )
+            print(f"  ! policy {policy.title}: {exc}", file=sys.stderr)
+            continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
     for policy in diff.policies_to_update:
         _print_apply_step(f"update policy {policy.title}", verbose=verbose)
-        updated = admin_policies.update_managed(
-            policy.title,
-            title=policy.title,
-            permissions=policy.permissions,
-            roles=[],
-        )
+        affected = _policy_uses_buckets(policy.permissions, failed_buckets)
+        try:
+            updated = admin_policies.update_managed(
+                policy.title,
+                title=policy.title,
+                permissions=policy.permissions,
+                roles=[],
+            )
+        except Exception as exc:
+            hint = (
+                f" (references failed buckets: {', '.join(sorted(affected))})"
+                if affected
+                else ""
+            )
+            warnings.append(
+                f"Policy '{policy.title}' could not be updated{hint}: {exc}"
+            )
+            print(f"  ! policy {policy.title}: {exc}", file=sys.stderr)
+            continue
         known_policies[policy.title] = updated
         print(f"  ~ policy {policy.title}")
 
@@ -644,6 +674,11 @@ def _permissions_for_policy(policy: AclBucketPolicy) -> list[Permission]:
         Permission.read_write(bucket) for bucket in sorted(set(policy.read_write))
     )
     return permissions
+
+
+def _policy_uses_buckets(permissions: list[Permission], buckets: set[str]) -> set[str]:
+    """Return the subset of *buckets* referenced by *permissions*."""
+    return {p.bucket for p in permissions} & buckets
 
 
 def _canonical_permissions(permissions: list[Permission]) -> list[tuple[str, str]]:
