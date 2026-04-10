@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from quiltx.config import auto_login
 from quilt3.admin import buckets as admin_buckets
 from quilt3.admin import policies as admin_policies
 from quilt3.admin import roles as admin_roles
@@ -76,6 +78,7 @@ class AclDiff:
     roles_to_update: list[RoleUpdate] = field(default_factory=list)
     roles_to_delete: list[str] = field(default_factory=list)
     sso_config_text: str | None = None
+    sso_is_create: bool = False
     sso_needs_update: bool = False
     warnings: list[str] = field(default_factory=list)
 
@@ -191,6 +194,7 @@ def all_buckets(config: AclConfig) -> set[str]:
     return result
 
 
+@auto_login
 def fetch_current_state() -> CurrentState:
     """Fetch current buckets, policies, roles, and SSO configuration."""
     bucket_items = {bucket.name: bucket for bucket in admin_buckets.list()}
@@ -305,6 +309,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         current.sso_config_text, desired_sso_text
     ):
         diff.sso_config_text = desired_sso_text
+        diff.sso_is_create = current.sso_config_text is None
         diff.sso_needs_update = True
 
     return diff
@@ -343,27 +348,39 @@ def build_sso_config(mappings: list[AclSsoMapping]) -> str:
     return yaml.safe_dump(payload, sort_keys=False)
 
 
-def print_diff(diff: AclDiff) -> None:
+def print_diff(diff: AclDiff, *, verbose: bool = False) -> None:
     """Print a readable summary of ACL changes."""
     for bucket in diff.buckets_to_add:
         print(f"+ bucket {bucket}")
 
     for policy in diff.policies_to_create:
         print(f"+ policy {policy.title}")
+        if verbose:
+            _print_permissions(policy.permissions)
     for policy in diff.policies_to_update:
         print(f"~ policy {policy.title}")
+        if verbose:
+            _print_permissions(policy.permissions)
     for title in diff.policies_to_delete:
         print(f"- policy {title}")
 
     for role in diff.roles_to_create:
         print(f"+ role {role.name}")
+        if verbose:
+            print(f"    policies: {', '.join(role.policy_titles)}")
     for role in diff.roles_to_update:
         print(f"~ role {role.name}")
+        if verbose:
+            print(f"    policies: {', '.join(role.policy_titles)}")
     for name in diff.roles_to_delete:
         print(f"- role {name}")
 
     if diff.sso_needs_update:
-        print("~ sso config")
+        prefix = "+" if diff.sso_is_create else "~"
+        print(f"{prefix} sso config")
+        if verbose and diff.sso_config_text:
+            for line in diff.sso_config_text.rstrip().splitlines():
+                print(f"    {line}")
 
     for warning in diff.warnings:
         print(f"! {warning}")
@@ -379,6 +396,7 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
     for bucket in diff.buckets_to_add:
         try:
             admin_buckets.add(bucket, bucket)
+            print(f"  + bucket {bucket}")
         except Exception as exc:  # pragma: no cover - external API surface
             warnings.append(f"Bucket '{bucket}' could not be added: {exc}")
 
@@ -388,6 +406,7 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
             policy.title, permissions=policy.permissions
         )
         known_policies[policy.title] = created
+        print(f"  + policy {policy.title}")
     for policy in diff.policies_to_update:
         updated = admin_policies.update_managed(
             policy.title,
@@ -396,6 +415,7 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
             roles=[],
         )
         known_policies[policy.title] = updated
+        print(f"  ~ policy {policy.title}")
 
     for role in diff.roles_to_create:
         try:
@@ -406,6 +426,7 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
             )
             continue
         admin_roles.create_managed(role.name, policies=policy_ids)
+        print(f"  + role {role.name}")
 
     for role in diff.roles_to_update:
         try:
@@ -416,23 +437,33 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
             )
             continue
         admin_roles.update_managed(role.name, name=role.name, policies=policy_ids)
+        print(f"  ~ role {role.name}")
 
     if diff.sso_needs_update and diff.sso_config_text is not None:
         admin_sso_config.set(diff.sso_config_text)
+        prefix = "+" if diff.sso_is_create else "~"
+        print(f"  {prefix} sso config")
 
     for role_name in diff.roles_to_delete:
         try:
             admin_roles.delete(role_name)
+            print(f"  - role {role_name}")
         except Exception as exc:  # pragma: no cover - external API surface
             warnings.append(f"Role '{role_name}' could not be deleted: {exc}")
 
     for policy_title in diff.policies_to_delete:
         try:
             admin_policies.delete(policy_title)
+            print(f"  - policy {policy_title}")
         except Exception as exc:  # pragma: no cover - external API surface
             warnings.append(f"Policy '{policy_title}' could not be deleted: {exc}")
 
     return warnings
+
+
+def _print_permissions(permissions: list[Permission]) -> None:
+    for perm in permissions:
+        print(f"    {perm.level}: {perm.bucket}")
 
 
 def _coerce_string_list(value: Any, field_name: str) -> list[str]:

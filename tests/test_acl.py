@@ -213,8 +213,65 @@ mappings:
     assert diff.roles_to_create == []
     assert diff.roles_to_delete == ["legacy"]
     assert diff.sso_needs_update is True
+    assert diff.sso_is_create is False
     assert any("unmanaged" in warning for warning in diff.warnings)
     assert any("protected" in warning for warning in diff.warnings)
+
+
+def test_compute_diff_sso_create_when_no_existing_config() -> None:
+    desired = acl.AclConfig(
+        bucket_policies={
+            "public": acl.AclBucketPolicy(name="public", read=["bucket-a"]),
+        },
+        roles={
+            "visitor": acl.AclRole(name="visitor", bucket_policies=["public"]),
+        },
+        sso=[acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["visitor"])],
+    )
+    current = acl.CurrentState(
+        buckets={"bucket-a": FakeBucket("bucket-a", "bucket-a")},
+        managed_policies={
+            "public": FakePolicy(
+                id="policy-public",
+                title="public",
+                managed=True,
+                permissions=[acl.Permission.read("bucket-a")],
+                roles=[],
+            ),
+        },
+        unmanaged_policies={},
+        all_policies={},
+        managed_roles={
+            "visitor": FakeRole(
+                id="role-visitor",
+                name="visitor",
+                policies=[FakePolicySummary(id="policy-public", title="public")],
+                permissions=[],
+            ),
+        },
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
+    )
+
+    diff = acl.compute_diff(desired, current)
+    assert diff.sso_needs_update is True
+    assert diff.sso_is_create is True
+
+
+def test_print_diff_sso_create_vs_update(capsys) -> None:
+    create_diff = acl.AclDiff(
+        sso_config_text="test", sso_is_create=True, sso_needs_update=True
+    )
+    acl.print_diff(create_diff)
+    assert "+ sso config" in capsys.readouterr().out
+
+    update_diff = acl.AclDiff(
+        sso_config_text="test", sso_is_create=False, sso_needs_update=True
+    )
+    acl.print_diff(update_diff)
+    assert "~ sso config" in capsys.readouterr().out
 
 
 def test_compute_diff_does_not_remove_existing_sso_when_desired_is_empty() -> None:
@@ -380,6 +437,68 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
     assert any("bucket-bad" in warning for warning in warnings)
 
 
+def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:
+    diff = acl.AclDiff(buckets_to_add=["bucket-a"])
+    current = acl.CurrentState(
+        buckets={},
+        managed_policies={},
+        unmanaged_policies={},
+        all_policies={},
+        managed_roles={},
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
+    )
+
+    monkeypatch.setattr(
+        acl_tool.acl_lib, "parse_acl_config", lambda path: SimpleNamespace(path=path)
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
+    monkeypatch.setattr(acl_tool.acl_lib, "compute_diff", lambda desired, state: diff)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "apply_acl",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("apply_acl should not be called")
+        ),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(
+            AssertionError("input should not be called")
+        ),
+    )
+
+    result = acl_tool.main(["config.yml", "--dry-run"])
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "+ bucket bucket-a" in captured.out
+    assert "Applying" not in captured.out
+
+
+def test_print_diff_verbose(capsys) -> None:
+    diff = acl.AclDiff(
+        policies_to_create=[
+            acl.PolicyUpdate(
+                title="my-policy",
+                permissions=[acl.Permission.read("bucket-a")],
+            )
+        ],
+        roles_to_create=[
+            acl.RoleUpdate(name="my-role", policy_titles=["my-policy"]),
+        ],
+        sso_config_text="version: '1.0'\nmappings: []\n",
+        sso_is_create=True,
+        sso_needs_update=True,
+    )
+    acl.print_diff(diff, verbose=True)
+    out = capsys.readouterr().out
+    assert "bucket-a" in out
+    assert "policies: my-policy" in out
+    assert "version:" in out
+
+
 def test_acl_tool_missing_file(capsys) -> None:
     result = acl_tool.main(["/tmp/does-not-exist.yml"])
     assert result == 1
@@ -408,7 +527,7 @@ def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
     )
     monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
     monkeypatch.setattr(acl_tool.acl_lib, "compute_diff", lambda desired, state: diff)
-    monkeypatch.setattr(acl_tool.acl_lib, "print_diff", lambda computed: None)
+    monkeypatch.setattr(acl_tool.acl_lib, "print_diff", lambda computed, **kw: None)
 
     def _apply_acl(computed, state):
         applied.append("applied")
