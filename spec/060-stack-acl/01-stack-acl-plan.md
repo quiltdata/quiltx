@@ -4,36 +4,6 @@
 
 Branch `060-stack-acl`. The goal is a new CLI command `quiltx stack acl <file.yml>` that declaratively reconciles a Quilt stack's access control (buckets, policies, roles, SSO) from a YAML file. `quilt3.admin` now exposes the necessary APIs (policies, roles, sso_config, buckets).
 
-## YAML format (spec/060-stack-acl/demo-stack-acl.yml)
-
-```yaml
-bucket_policies:
-  public:
-    read:
-      - quilt-example
-  internal:
-    read_write:
-      - quilt-bake
-      - quilt-dev
-    read:
-      - quilt-leadership
-
-roles:
-  visitor:
-    bucket_policies: [public]
-  member:
-    bucket_policies: [public, internal]
-
-sso:
-  - match:
-      groups: Everyone
-    roles: [visitor]
-  - match:
-      groups: Employees
-    roles: [member]
-    admin: true
-```
-
 ## Mapping to quilt3.admin API
 
 | YAML | Quilt API | Notes |

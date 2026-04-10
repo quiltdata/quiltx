@@ -19,6 +19,9 @@ uvx quiltx bucket add s3://my-data-bucket
 # Discover the Quilt CloudFormation stack
 uvx quiltx stack cfn
 
+# Apply declarative ACL configuration from YAML
+uvx quiltx stack acl config.yml
+
 # Open an interactive shell in a running ECS task
 uvx quiltx ecs
 
@@ -35,10 +38,63 @@ uvx quiltx <tool> --help
 - **ecs** — Interactive shell access to running ECS tasks via Session Manager
 - **logs** — Display and tail CloudWatch logs for the configured catalog
 - **stack** — Manage Quilt stack
+  - **stack acl** — Declarative ACL reconciliation (buckets, policies, roles, SSO) from YAML
   - **stack catalog** — Configure and display Quilt catalog settings
   - **stack cfn** — Discover the Quilt CloudFormation stack and cache metadata
 
-## Python API
+## Stack ACL
+
+Declaratively manage a Quilt stack's access control — buckets, policies, roles,
+and SSO — from a single YAML file.
+See [demo-stack-acl.yml](spec/060-stack-acl/demo-stack-acl.yml) for a sample
+configuration.
+
+### CLI
+
+```bash
+# Show current server ACL state
+uvx quiltx stack acl
+
+# Preview changes (dry run)
+uvx quiltx stack acl config.yml --dry-run
+
+# Preview with full detail
+uvx quiltx stack acl config.yml --dry-run --verbose
+
+# Apply changes (with confirmation prompt)
+uvx quiltx stack acl config.yml
+
+# Apply without prompting
+uvx quiltx stack acl config.yml --yes
+```
+
+### Python API
+
+```python
+from quiltx import (
+    parse_acl_config,
+    fetch_current_state,
+    compute_diff,
+    print_diff,
+    apply_acl,
+)
+
+# Parse a YAML config file
+config = parse_acl_config("config.yml")
+
+# Fetch live state from the Quilt stack
+current = fetch_current_state()
+
+# Compute and display the diff
+diff = compute_diff(config, current)
+print_diff(diff, verbose=True, desired=config, current=current)
+
+# Apply changes
+if diff.has_changes():
+    warnings = apply_acl(diff, current)
+```
+
+## Python API — Config & Stack
 
 ```python
 from quiltx import get_catalog_url, get_catalog_region, get_catalog_config, set_catalog_url

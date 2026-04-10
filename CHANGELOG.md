@@ -6,16 +6,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-04-09
 
 ### Added
 
-- `quiltx stack acl` for declarative reconciliation of Quilt buckets, managed policies, managed roles, and SSO mappings from YAML
+- `quiltx stack acl <config.yml>` for declarative reconciliation of Quilt buckets, managed policies, managed roles, and SSO mappings from YAML
+- `quiltx stack acl` (no args) dumps the current server ACL state for inspection
+- `--dry-run` flag to preview ACL changes without applying them
+- `--verbose` flag for detailed diff output including SSO and default-role details
+- Progress output during ACL apply (bucket, policy, role, SSO steps)
+- SSO create-vs-update detection: creates new SSO config or updates existing one as needed
+- Default role configuration moved into SSO config for cleaner YAML semantics
+- `auto_login` decorator in `quiltx.config` for automatic session refresh on auth failure
+- `normalize_catalog_url()` helper in `quiltx.config`
+- Public Python API: `AclConfig`, `AclDiff`, `CurrentState`, `all_buckets`, `apply_acl`, `build_sso_config`, `compute_diff`, `fetch_current_state`, `parse_acl_config`, `print_diff` exported from `quiltx`
 
 ### Changed
 
 - Add `pyyaml` as a runtime dependency for YAML-backed ACL configuration
 - Require `quilt3>=7.3.0` so `quiltx stack acl` can use the new admin policies API
+- `set_catalog_url()` now normalizes the URL (adds `https://`, strips trailing slash)
 
 ## [0.5.0] - 2026-04-09
 

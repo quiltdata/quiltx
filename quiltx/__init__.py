@@ -3,6 +3,18 @@
 from __future__ import annotations
 
 from quiltx._version import __version__ as __version__
+from quiltx.acl import (
+    AclConfig as AclConfig,
+    AclDiff as AclDiff,
+    CurrentState as CurrentState,
+    all_buckets as all_buckets,
+    apply_acl as apply_acl,
+    build_sso_config as build_sso_config,
+    compute_diff as compute_diff,
+    fetch_current_state as fetch_current_state,
+    parse_acl_config as parse_acl_config,
+    print_diff as print_diff,
+)
 from quiltx.config import (
     auto_login as auto_login,
     get_catalog_config as get_catalog_config,
@@ -13,9 +25,19 @@ from quiltx.config import (
 
 __all__ = [
     "__version__",
+    "AclConfig",
+    "AclDiff",
+    "CurrentState",
+    "all_buckets",
+    "apply_acl",
     "auto_login",
+    "build_sso_config",
+    "compute_diff",
+    "fetch_current_state",
     "get_catalog_config",
     "get_catalog_region",
     "get_catalog_url",
+    "parse_acl_config",
+    "print_diff",
     "set_catalog_url",
 ]

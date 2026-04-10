@@ -21,6 +21,7 @@ roles:
 
   member:
     bucket_policies: [public, internal]
+    default: true
 
 sso:
   - match:
