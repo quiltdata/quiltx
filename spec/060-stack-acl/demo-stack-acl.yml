@@ -1,0 +1,34 @@
+# Quilt Stack Configuration as Code
+# demo-stack example
+
+bucket_policies:
+
+  public:
+    read:
+      - quilt-example
+
+  internal:
+    read_write:
+      - quilt-bake
+      - quilt-dev
+    read:
+      - quilt-leadership
+
+roles:
+
+  visitor:
+    bucket_policies: [public]
+
+  member:
+    bucket_policies: [public, internal]
+    default: true
+
+sso:
+  - match:
+      groups: Employees
+    roles: [member]
+    admin: true
+
+  - match:
+      groups: Everyone
+    roles: [visitor]

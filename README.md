@@ -4,7 +4,7 @@
 
 Quilt extension toolkit for working with [Quilt](https://quiltdata.com) catalogs.
 
-## Usage
+## Quick start
 
 ```bash
 # See available tools
@@ -13,55 +13,110 @@ uvx quiltx
 # Configure a Quilt catalog
 uvx quiltx stack catalog https://open.quiltdata.com
 
-# Register a cross-account S3 bucket
-uvx quiltx bucket add s3://my-data-bucket
-
-# Discover the Quilt CloudFormation stack
-uvx quiltx stack cfn
-
-# Open an interactive shell in a running ECS task
-uvx quiltx ecs
-
-# Tail CloudWatch logs
-uvx quiltx logs --minutes 30 --filter "ERROR"
-
-# Get help for a specific tool
+# Get help for any tool
 uvx quiltx <tool> --help
 ```
 
 ## Tools
 
-- **bucket** — Register S3 buckets with Quilt (policy, SNS, notifications)
+- **bucket** — Register cross-account S3 buckets with Quilt (policy, SNS, notifications)
 - **ecs** — Interactive shell access to running ECS tasks via Session Manager
 - **logs** — Display and tail CloudWatch logs for the configured catalog
-- **stack** — Manage Quilt stack
+- **stack** — Manage Quilt stack:
+  - **stack acl** — Declarative access-control-list (ACL) reconciliation from YAML
   - **stack catalog** — Configure and display Quilt catalog settings
   - **stack cfn** — Discover the Quilt CloudFormation stack and cache metadata
 
-## Python API
+## Stack ACL
+
+`quiltx stack acl` declaratively manages a Quilt stack's access control lists
+(ACLs) — buckets, policies, roles, and SSO mappings — from a single YAML file.
+Instead of clicking through the catalog admin UI, you define the desired state
+in version-controlled YAML and let the tool reconcile it against the server.
+
+### YAML example
+
+```yaml
+# Access control lists for a Quilt stack
+bucket_policies:
+  public:
+    read:
+      - quilt-example
+  internal:
+    read_write:
+      - quilt-bake
+      - quilt-dev
+    read:
+      - quilt-leadership
+
+roles:
+  visitor:
+    bucket_policies: [public]
+  member:
+    bucket_policies: [public, internal]
+    default: true          # assigned to new users
+
+sso:
+  - match:
+      groups: Employees
+    roles: [member]
+    admin: true
+  - match:
+      groups: Everyone
+    roles: [visitor]
+```
+
+### CLI usage
+
+```bash
+# Show current server ACL state
+uvx quiltx stack acl
+
+# Preview changes (dry run)
+uvx quiltx stack acl config.yml --dry-run
+
+# Preview with full detail
+uvx quiltx stack acl config.yml --dry-run --verbose
+
+# Apply changes (with confirmation prompt)
+uvx quiltx stack acl config.yml
+
+# Apply without prompting
+uvx quiltx stack acl config.yml --yes
+```
+
+### Python API
 
 ```python
-from quiltx import get_catalog_url, get_catalog_region, get_catalog_config, set_catalog_url
+from quiltx import (
+    parse_acl_config,
+    fetch_current_state,
+    compute_diff,
+    print_diff,
+    apply_acl,
+)
+
+config = parse_acl_config("config.yml")
+current = fetch_current_state()
+diff = compute_diff(config, current)
+print_diff(diff, verbose=True, desired=config, current=current)
+
+if diff.has_changes():
+    apply_acl(diff, current)
+```
+
+## Config and stack API
+
+```python
+from quiltx import get_catalog_url, get_catalog_region, set_catalog_url
 from quiltx.stack import find_matching_stack
 
-# Configure a catalog
 set_catalog_url("https://open.quiltdata.com")
+print(get_catalog_url())     # https://open.quiltdata.com
+print(get_catalog_region())  # us-east-1
 
-# Read catalog configuration
-print(get_catalog_url())    # https://open.quiltdata.com
-print(get_catalog_region()) # us-east-1
-print(get_catalog_config()) # full config dict
-
-# Discover stack
 stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
-
-# Register an S3 bucket (policy, SNS, notifications, catalog)
-from quiltx.bucket import add_bucket
-
-result = add_bucket("my-data-bucket", title="My Data")
-print(result.sns_topic_arn)
-print(result.already_registered)
 ```
 
 ## Persistent install (optional)

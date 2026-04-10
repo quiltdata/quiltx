@@ -7,6 +7,7 @@ import sys
 from importlib import import_module
 
 SUBCOMMANDS = {
+    "acl": "quiltx.tools.stack.acl",
     "catalog": "quiltx.tools.stack.catalog",
     "cfn": "quiltx.tools.stack.cfn",
 }
@@ -24,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SUBCOMMAND",
     )
 
+    subparsers.add_parser(
+        "acl",
+        help="Reconcile Quilt bucket, role, policy, and SSO ACLs from YAML.",
+        add_help=False,
+    )
     subparsers.add_parser(
         "catalog",
         help="Show or set the Quilt catalog configured by quilt3.",

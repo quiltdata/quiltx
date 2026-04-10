@@ -62,8 +62,16 @@ def test_stack_no_subcommand(capsys) -> None:
     assert result == 1
 
     captured = capsys.readouterr()
+    assert "acl" in captured.out
     assert "catalog" in captured.out
     assert "cfn" in captured.out
+
+
+def test_stack_acl_help() -> None:
+    """Test that 'quiltx stack acl --help' works."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["stack", "acl", "--help"])
+    assert exc_info.value.code == 0
 
 
 def test_stack_catalog_help() -> None:
