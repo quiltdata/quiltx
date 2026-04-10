@@ -571,8 +571,7 @@ def _print_permissions(permissions: list[Permission]) -> None:
 
 
 def _print_apply_step(message: str, *, verbose: bool) -> None:
-    if verbose:
-        print(f"-> {message}")
+    print(f"-> {message}")
 
 
 def _print_verbose_state(

@@ -484,7 +484,7 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
     assert any("bucket-bad" in warning for warning in warnings)
 
 
-def test_apply_acl_verbose_shows_operation_steps(monkeypatch, capsys) -> None:
+def test_apply_acl_always_shows_operation_steps(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         acl,
         "admin_roles",
