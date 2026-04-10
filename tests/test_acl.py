@@ -569,6 +569,85 @@ def test_apply_acl_policy_create_failure_continues_and_warns(
     assert "my-policy" in err
 
 
+def test_apply_acl_role_and_sso_failures_reported_immediately(
+    monkeypatch, capsys
+) -> None:
+    """Role create/update and SSO failures are caught and reported to stderr."""
+    calls: list[tuple] = []
+
+    def role_create(name: str, policies):
+        calls.append(("role_create", name))
+        raise RuntimeError("role server error")
+
+    def role_update(id_or_name: str, *, name: str, policies):
+        calls.append(("role_update", name))
+        raise RuntimeError("role update error")
+
+    def sso_set(text: str):
+        calls.append(("sso_set",))
+        raise RuntimeError("sso server error")
+
+    monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=lambda n, t: None))
+    monkeypatch.setattr(
+        acl,
+        "admin_policies",
+        SimpleNamespace(
+            create_managed=lambda title, **kw: SimpleNamespace(id="pid"),
+            update_managed=lambda *a, **kw: None,
+            delete=lambda title: None,
+        ),
+    )
+    monkeypatch.setattr(
+        acl,
+        "admin_roles",
+        SimpleNamespace(
+            create_managed=role_create,
+            update_managed=role_update,
+            delete=lambda name: calls.append(("role_delete", name)),
+        ),
+    )
+    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=sso_set))
+
+    diff = acl.AclDiff(
+        roles_to_create=[acl.RoleUpdate(name="new-role", policy_titles=["p1"])],
+        roles_to_update=[acl.RoleUpdate(name="old-role", policy_titles=["p1"])],
+        roles_to_delete=["gone-role"],
+        sso_config_text="version: '1.0'\ndefault_role: new-role\nmappings: []\n",
+        sso_needs_update=True,
+    )
+    current = acl.CurrentState(
+        buckets={},
+        managed_policies={},
+        unmanaged_policies={},
+        all_policies={"p1": SimpleNamespace(id="id-p1")},
+        managed_roles={"old-role": SimpleNamespace(id="id-old-role")},
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
+    )
+
+    warnings = acl.apply_acl(diff, current)
+
+    # All operations were attempted
+    assert ("role_create", "new-role") in calls
+    assert ("role_update", "old-role") in calls
+    assert ("sso_set",) in calls
+    # Deletes still ran despite earlier failures
+    assert ("role_delete", "gone-role") in calls
+
+    # Warnings capture all three failures
+    assert any("new-role" in w for w in warnings)
+    assert any("old-role" in w for w in warnings)
+    assert any("SSO" in w for w in warnings)
+
+    # Failures printed to stderr immediately
+    err = capsys.readouterr().err
+    assert "new-role" in err
+    assert "old-role" in err
+    assert "sso config" in err
+
+
 def test_apply_acl_always_shows_operation_steps(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         acl,

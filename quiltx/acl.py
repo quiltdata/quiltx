@@ -546,34 +546,51 @@ def apply_acl(
         print(f"  ~ policy {policy.title}")
 
     for role in diff.roles_to_create:
+        _print_apply_step(f"create role {role.name}", verbose=verbose)
         try:
-            _print_apply_step(f"create role {role.name}", verbose=verbose)
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
+            admin_roles.create_managed(role.name, policies=policy_ids)
         except KeyError as exc:
-            warnings.append(
-                f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}."
+            msg = f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}"
+            warnings.append(msg)
+            print(
+                f"  ! role {role.name}: unknown policy {exc.args[0]!r}", file=sys.stderr
             )
             continue
-        admin_roles.create_managed(role.name, policies=policy_ids)
+        except Exception as exc:
+            warnings.append(f"Role '{role.name}' could not be created: {exc}")
+            print(f"  ! role {role.name}: {exc}", file=sys.stderr)
+            continue
         print(f"  + role {role.name}")
 
     for role in diff.roles_to_update:
+        _print_apply_step(f"update role {role.name}", verbose=verbose)
         try:
-            _print_apply_step(f"update role {role.name}", verbose=verbose)
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
+            admin_roles.update_managed(role.name, name=role.name, policies=policy_ids)
         except KeyError as exc:
-            warnings.append(
-                f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}."
+            msg = f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}"
+            warnings.append(msg)
+            print(
+                f"  ! role {role.name}: unknown policy {exc.args[0]!r}", file=sys.stderr
             )
             continue
-        admin_roles.update_managed(role.name, name=role.name, policies=policy_ids)
+        except Exception as exc:
+            warnings.append(f"Role '{role.name}' could not be updated: {exc}")
+            print(f"  ! role {role.name}: {exc}", file=sys.stderr)
+            continue
         print(f"  ~ role {role.name}")
 
     if diff.sso_needs_update and diff.sso_config_text is not None:
         _print_apply_step("update sso config", verbose=verbose)
-        admin_sso_config.set(diff.sso_config_text)
-        prefix = "+" if diff.sso_is_create else "~"
-        print(f"  {prefix} sso config")
+        try:
+            admin_sso_config.set(diff.sso_config_text)
+        except Exception as exc:
+            warnings.append(f"SSO config could not be updated: {exc}")
+            print(f"  ! sso config: {exc}", file=sys.stderr)
+        else:
+            prefix = "+" if diff.sso_is_create else "~"
+            print(f"  {prefix} sso config")
 
     for role_name in diff.roles_to_delete:
         try:
