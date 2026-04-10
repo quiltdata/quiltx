@@ -79,8 +79,6 @@ class AclDiff:
     roles_to_create: list[RoleUpdate] = field(default_factory=list)
     roles_to_update: list[RoleUpdate] = field(default_factory=list)
     roles_to_delete: list[str] = field(default_factory=list)
-    default_role_name: str | None = None
-    default_role_needs_update: bool = False
     sso_config_text: str | None = None
     sso_is_create: bool = False
     sso_needs_update: bool = False
@@ -96,7 +94,6 @@ class AclDiff:
                 self.roles_to_create,
                 self.roles_to_update,
                 self.roles_to_delete,
-                self.default_role_needs_update,
                 self.sso_needs_update,
             )
         )
@@ -327,15 +324,11 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
                 f"Role '{name}' is the current default role; skipping delete."
             )
 
-    if (
-        desired.default_role_name is not None
-        and desired.default_role_name in desired.roles
-        and desired.default_role_name != current.default_role_name
-    ):
-        diff.default_role_name = desired.default_role_name
-        diff.default_role_needs_update = True
-
-    desired_sso_text = build_sso_config(desired.sso) if desired.sso else None
+    desired_sso_text = (
+        build_sso_config(desired.sso, default_role_name=desired.default_role_name)
+        if desired.sso
+        else None
+    )
     if desired_sso_text is not None and not _same_yaml(
         current.sso_config_text, desired_sso_text
     ):
@@ -346,12 +339,16 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     return diff
 
 
-def build_sso_config(mappings: list[AclSsoMapping]) -> str:
+def build_sso_config(
+    mappings: list[AclSsoMapping], *, default_role_name: str | None = None
+) -> str:
     """Translate simplified SSO mappings to Quilt's schema-based YAML."""
     payload: dict[str, Any] = {
         "version": "1.0",
         "mappings": [],
     }
+    if default_role_name is not None:
+        payload["default_role"] = default_role_name
     for mapping in mappings:
         properties: dict[str, Any] = {}
         required: list[str] = []
@@ -420,9 +417,6 @@ def print_diff(
     for name in diff.roles_to_delete:
         print(f"- role {name}")
 
-    if diff.default_role_needs_update and diff.default_role_name is not None:
-        print(f"~ default role {diff.default_role_name}")
-
     if diff.sso_needs_update:
         prefix = "+" if diff.sso_is_create else "~"
         print(f"{prefix} sso config")
@@ -437,12 +431,15 @@ def print_diff(
         print("Stack ACL is up to date")
 
 
-def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
+def apply_acl(
+    diff: AclDiff, current: CurrentState, *, verbose: bool = False
+) -> list[str]:
     """Apply ACL changes. Returns any runtime warnings."""
     warnings = list(diff.warnings)
 
     for bucket in diff.buckets_to_add:
         try:
+            _print_apply_step(f"add bucket {bucket}", verbose=verbose)
             admin_buckets.add(bucket, bucket)
             print(f"  + bucket {bucket}")
         except Exception as exc:  # pragma: no cover - external API surface
@@ -450,12 +447,14 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
 
     known_policies = dict(current.all_policies)
     for policy in diff.policies_to_create:
+        _print_apply_step(f"create policy {policy.title}", verbose=verbose)
         created = admin_policies.create_managed(
             policy.title, permissions=policy.permissions
         )
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
     for policy in diff.policies_to_update:
+        _print_apply_step(f"update policy {policy.title}", verbose=verbose)
         updated = admin_policies.update_managed(
             policy.title,
             title=policy.title,
@@ -467,6 +466,7 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
 
     for role in diff.roles_to_create:
         try:
+            _print_apply_step(f"create role {role.name}", verbose=verbose)
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
         except KeyError as exc:
             warnings.append(
@@ -478,6 +478,7 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
 
     for role in diff.roles_to_update:
         try:
+            _print_apply_step(f"update role {role.name}", verbose=verbose)
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
         except KeyError as exc:
             warnings.append(
@@ -487,17 +488,15 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
         admin_roles.update_managed(role.name, name=role.name, policies=policy_ids)
         print(f"  ~ role {role.name}")
 
-    if diff.default_role_needs_update and diff.default_role_name is not None:
-        admin_roles.set_default(diff.default_role_name)
-        print(f"  ~ default role {diff.default_role_name}")
-
     if diff.sso_needs_update and diff.sso_config_text is not None:
+        _print_apply_step("update sso config", verbose=verbose)
         admin_sso_config.set(diff.sso_config_text)
         prefix = "+" if diff.sso_is_create else "~"
         print(f"  {prefix} sso config")
 
     for role_name in diff.roles_to_delete:
         try:
+            _print_apply_step(f"delete role {role_name}", verbose=verbose)
             admin_roles.delete(role_name)
             print(f"  - role {role_name}")
         except Exception as exc:  # pragma: no cover - external API surface
@@ -505,6 +504,7 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
 
     for policy_title in diff.policies_to_delete:
         try:
+            _print_apply_step(f"delete policy {policy_title}", verbose=verbose)
             admin_policies.delete(policy_title)
             print(f"  - policy {policy_title}")
         except Exception as exc:  # pragma: no cover - external API surface
@@ -516,6 +516,11 @@ def apply_acl(diff: AclDiff, current: CurrentState) -> list[str]:
 def _print_permissions(permissions: list[Permission]) -> None:
     for perm in permissions:
         print(f"    {perm.level}: {perm.bucket}")
+
+
+def _print_apply_step(message: str, *, verbose: bool) -> None:
+    if verbose:
+        print(f"-> {message}")
 
 
 def _print_verbose_state(
@@ -554,10 +559,6 @@ def _print_verbose_state(
         if role.default:
             print("    default: true")
 
-    if desired.default_role_name is not None:
-        prefix = "~" if diff.default_role_needs_update else "="
-        print(f"{prefix} default role {desired.default_role_name}")
-
     if desired.sso:
         prefix = (
             "+"
@@ -568,7 +569,9 @@ def _print_verbose_state(
         sso_text = (
             diff.sso_config_text
             if diff.sso_config_text is not None
-            else build_sso_config(desired.sso)
+            else build_sso_config(
+                desired.sso, default_role_name=desired.default_role_name
+            )
         )
         for line in sso_text.rstrip().splitlines():
             print(f"    {line}")

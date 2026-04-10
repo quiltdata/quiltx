@@ -60,12 +60,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print("Applying...")
-        warnings = acl_lib.apply_acl(diff, current)
+        warnings = acl_lib.apply_acl(diff, current, verbose=args.verbose)
         for warning in warnings:
             print(f"Warning: {warning}", file=sys.stderr)
         print("Done.")
         return 0
     except Exception as exc:
+        if args.verbose:
+            print(f"Failure type: {type(exc).__name__}", file=sys.stderr)
+            for detail in _format_exception_details(exc):
+                print(detail, file=sys.stderr)
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -110,6 +114,25 @@ def _resolve_default_role_name(
         raise ValueError(f"Default role selection out of range: {selected}")
 
     return role_names[selected - 1]
+
+
+def _format_exception_details(exc: Exception) -> list[str]:
+    details: list[str] = []
+    errors = getattr(exc, "errors", None)
+    if not isinstance(errors, list):
+        return details
+
+    for index, error in enumerate(errors, start=1):
+        message = getattr(error, "message", None)
+        if message:
+            details.append(f"GraphQL error {index}: {message}")
+        path = getattr(error, "path", None)
+        if path:
+            details.append(f"GraphQL path {index}: {path}")
+        locations = getattr(error, "locations", None)
+        if locations:
+            details.append(f"GraphQL locations {index}: {locations}")
+    return details
 
 
 if __name__ == "__main__":

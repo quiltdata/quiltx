@@ -132,6 +132,15 @@ def test_build_sso_config_omits_default_role() -> None:
     )
 
 
+def test_build_sso_config_includes_default_role() -> None:
+    text = acl.build_sso_config(
+        [acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["visitor"])],
+        default_role_name="visitor",
+    )
+    payload = yaml.safe_load(text)
+    assert payload["default_role"] == "visitor"
+
+
 def test_compute_diff_handles_updates_deletes_and_unmanaged_collisions() -> None:
     desired = acl.AclConfig(
         bucket_policies={
@@ -236,13 +245,12 @@ mappings:
     assert [role.name for role in diff.roles_to_update] == ["visitor"]
     assert diff.roles_to_create == []
     assert diff.roles_to_delete == []
-    assert diff.default_role_name == "visitor"
-    assert diff.default_role_needs_update is True
     assert diff.sso_needs_update is True
     assert diff.sso_is_create is False
     assert any("unmanaged" in warning for warning in diff.warnings)
     assert any("protected" in warning for warning in diff.warnings)
     assert any("current default role" in warning for warning in diff.warnings)
+    assert "default_role: visitor" in (diff.sso_config_text or "")
 
 
 def test_compute_diff_sso_create_when_no_existing_config() -> None:
@@ -288,7 +296,6 @@ def test_compute_diff_sso_create_when_no_existing_config() -> None:
     diff = acl.compute_diff(desired, current)
     assert diff.sso_needs_update is True
     assert diff.sso_is_create is True
-    assert diff.default_role_needs_update is True
 
 
 def test_with_default_role_returns_updated_copy() -> None:
@@ -310,13 +317,6 @@ def test_print_diff_sso_create_vs_update(capsys) -> None:
     )
     acl.print_diff(update_diff)
     assert "~ sso config" in capsys.readouterr().out
-
-
-def test_print_diff_shows_default_role(capsys) -> None:
-    acl.print_diff(
-        acl.AclDiff(default_role_name="visitor", default_role_needs_update=True)
-    )
-    assert "~ default role visitor" in capsys.readouterr().out
 
 
 def test_compute_diff_does_not_remove_existing_sso_when_desired_is_empty() -> None:
@@ -398,7 +398,6 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
         SimpleNamespace(
             create_managed=role_create,
             update_managed=role_update,
-            set_default=lambda name: calls.append(("set_default", name)),
             delete=lambda name: calls.append(("role_delete", name)),
         ),
     )
@@ -423,10 +422,9 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
             acl.RoleUpdate(name="old-role", policy_titles=["existing-policy"])
         ],
         roles_to_delete=["gone-role"],
-        default_role_name="new-role",
-        default_role_needs_update=True,
         sso_config_text=acl.build_sso_config(
-            [acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["new-role"])]
+            [acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["new-role"])],
+            default_role_name="new-role",
         ),
         sso_needs_update=True,
     )
@@ -457,11 +455,11 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
         ("policy_update", "old-policy", "old-policy", []),
         ("role_create", "new-role", ["id-new-policy"]),
         ("role_update", "old-role", "old-role", ["id-existing-policy"]),
-        ("set_default", "new-role"),
         (
             "sso_set",
             {
                 "version": "1.0",
+                "default_role": "new-role",
                 "mappings": [
                     {
                         "schema": {
@@ -484,6 +482,53 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
         ("policy_delete", "gone-policy"),
     ]
     assert any("bucket-bad" in warning for warning in warnings)
+
+
+def test_apply_acl_verbose_shows_operation_steps(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        acl,
+        "admin_roles",
+        SimpleNamespace(
+            create_managed=lambda name, policies: None,
+            update_managed=lambda id_or_name, *, name, policies: None,
+            delete=lambda name: None,
+        ),
+    )
+    monkeypatch.setattr(
+        acl,
+        "admin_policies",
+        SimpleNamespace(
+            create_managed=lambda title, *, permissions: SimpleNamespace(
+                id="policy-id"
+            ),
+            update_managed=lambda id_or_title, *, title, permissions, roles: None,
+            delete=lambda title: None,
+        ),
+    )
+    monkeypatch.setattr(
+        acl, "admin_buckets", SimpleNamespace(add=lambda name, title: None)
+    )
+    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=lambda text: None))
+
+    diff = acl.AclDiff(
+        sso_config_text="version: '1.0'\ndefault_role: visitor\nmappings: []\n",
+        sso_needs_update=True,
+    )
+    current = acl.CurrentState(
+        buckets={},
+        managed_policies={},
+        unmanaged_policies={},
+        all_policies={},
+        managed_roles={},
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
+    )
+
+    acl.apply_acl(diff, current, verbose=True)
+    out = capsys.readouterr().out
+    assert "-> update sso config" in out
 
 
 def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:
@@ -555,7 +600,7 @@ def test_print_diff_verbose(capsys) -> None:
         roles_to_create=[
             acl.RoleUpdate(name="my-role", policy_titles=["my-policy"]),
         ],
-        sso_config_text="version: '1.0'\nmappings: []\n",
+        sso_config_text="version: '1.0'\ndefault_role: my-role\nmappings: []\n",
         sso_is_create=True,
         sso_needs_update=True,
     )
@@ -564,7 +609,7 @@ def test_print_diff_verbose(capsys) -> None:
     assert "Desired ACL:" in out
     assert "bucket-a" in out
     assert "policies: my-policy" in out
-    assert "default role my-role" in out
+    assert "default_role: my-role" in out
     assert "version:" in out
 
 
@@ -610,7 +655,7 @@ def test_print_diff_verbose_shows_unchanged_entries(capsys) -> None:
     assert "= bucket bucket-a" in out
     assert "= policy public" in out
     assert "= role visitor" in out
-    assert "= default role visitor" in out
+    assert "Stack ACL is up to date" in out
 
 
 def test_acl_tool_missing_file(capsys) -> None:
@@ -651,7 +696,7 @@ def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
     monkeypatch.setattr(acl_tool.acl_lib, "compute_diff", lambda desired, state: diff)
     monkeypatch.setattr(acl_tool.acl_lib, "print_diff", lambda computed, **kw: None)
 
-    def _apply_acl(computed, state):
+    def _apply_acl(computed, state, *, verbose=False):
         applied.append("applied")
         return []
 
