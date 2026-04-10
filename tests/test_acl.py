@@ -32,7 +32,7 @@ class FakePolicy:
 class FakeRole:
     id: str
     name: str
-    policies: list
+    policies: list | None
     permissions: list
     typename__: str = "ManagedRole"
 
@@ -656,6 +656,98 @@ def test_print_diff_verbose_shows_unchanged_entries(capsys) -> None:
     assert "= policy public" in out
     assert "= role visitor" in out
     assert "Stack ACL is up to date" in out
+
+
+def test_print_current_state(capsys) -> None:
+    current = acl.CurrentState(
+        buckets={
+            "bucket-a": FakeBucket("bucket-a", "bucket-a"),
+            "bucket-b": FakeBucket("bucket-b", "bucket-b"),
+        },
+        managed_policies={
+            "my-policy": FakePolicy(
+                id="p1",
+                title="my-policy",
+                managed=True,
+                permissions=[
+                    acl.Permission.read("bucket-a"),
+                    acl.Permission.read_write("bucket-b"),
+                ],
+                roles=[],
+            ),
+        },
+        unmanaged_policies={},
+        all_policies={},
+        managed_roles={
+            "viewer": FakeRole(
+                id="r1",
+                name="viewer",
+                policies=[FakePolicySummary(id="p1", title="my-policy")],
+                permissions=[],
+            ),
+        },
+        unmanaged_roles={
+            "admin": FakeRole(
+                id="r2",
+                name="admin",
+                policies=None,
+                permissions=[],
+                typename__="UnmanagedRole",
+            ),
+        },
+        all_roles={},
+        sso_config_text=(
+            "version: '1.0'\n"
+            "default_role: viewer\n"
+            "mappings:\n"
+            "- schema:\n"
+            "    type: object\n"
+            "    properties:\n"
+            "      groups:\n"
+            "        type: array\n"
+            "        contains:\n"
+            "          const: Everyone\n"
+            "    required: [groups]\n"
+            "  roles: [viewer]\n"
+            "  admin: false\n"
+        ),
+        default_role_name="admin",
+    )
+
+    acl.print_current_state(current)
+    out = capsys.readouterr().out
+    assert "bucket bucket-a" in out
+    assert "bucket bucket-b" in out
+    assert "policy my-policy (managed)" in out
+    assert "READ: bucket-a" in out
+    assert "READ_WRITE: bucket-b" in out
+    assert "role viewer (managed)" in out
+    assert "policies: my-policy" in out
+    assert "role admin (default) (unmanaged)" in out
+    assert "policies: (n/a)" in out
+    assert "sso config" in out
+    assert "default_role: viewer" in out
+    assert "groups=Everyone -> [viewer]" in out
+
+
+def test_acl_tool_no_config_shows_state(monkeypatch, capsys) -> None:
+    current = acl.CurrentState(
+        buckets={"b1": FakeBucket("b1", "b1")},
+        managed_policies={},
+        unmanaged_policies={},
+        all_policies={},
+        managed_roles={},
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
+
+    result = acl_tool.main([])
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "bucket b1" in out
 
 
 def test_acl_tool_missing_file(capsys) -> None:

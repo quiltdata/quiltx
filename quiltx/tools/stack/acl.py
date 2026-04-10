@@ -13,7 +13,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx stack acl",
         description="Reconcile Quilt bucket, role, policy, and SSO ACLs from YAML.",
     )
-    parser.add_argument("config_file", help="Path to the ACL YAML file.")
+    parser.add_argument(
+        "config_file",
+        nargs="?",
+        default=None,
+        help="Path to the ACL YAML file. If omitted, shows current server state.",
+    )
     parser.add_argument(
         "--yes",
         action="store_true",
@@ -37,6 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.config_file is None:
+            current = acl_lib.fetch_current_state()
+            acl_lib.print_current_state(current)
+            return 0
+
         desired = acl_lib.parse_acl_config(args.config_file)
         desired = acl_lib.with_default_role(
             desired,

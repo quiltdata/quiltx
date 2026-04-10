@@ -431,6 +431,57 @@ def print_diff(
         print("Stack ACL is up to date")
 
 
+def print_current_state(current: CurrentState) -> None:
+    """Print a human-readable dump of the current server ACL state."""
+    for name in sorted(current.buckets):
+        print(f"  bucket {name}")
+
+    for title, policy in sorted(current.managed_policies.items()):
+        print(f"  policy {title} (managed)")
+        _print_permissions(policy.permissions)
+    for title, policy in sorted(current.unmanaged_policies.items()):
+        print(f"  policy {title} (unmanaged)")
+        _print_permissions(policy.permissions)
+
+    for name, role in sorted(current.managed_roles.items()):
+        default_tag = " (default)" if name == current.default_role_name else ""
+        policy_names = ", ".join(p.title for p in role.policies) or "(none)"
+        print(f"  role {name}{default_tag} (managed)")
+        print(f"    policies: {policy_names}")
+    for name, role in sorted(current.unmanaged_roles.items()):
+        default_tag = " (default)" if name == current.default_role_name else ""
+        policies = getattr(role, "policies", None)
+        policy_names = ", ".join(p.title for p in policies) if policies else "(n/a)"
+        print(f"  role {name}{default_tag} (unmanaged)")
+        print(f"    policies: {policy_names}")
+
+    if current.sso_config_text:
+        print("  sso config")
+        _print_sso_summary(current.sso_config_text)
+    else:
+        print("  sso config: (none)")
+
+
+def _print_sso_summary(sso_text: str) -> None:
+    """Print a human-friendly summary of SSO mappings."""
+    loaded = yaml.safe_load(sso_text) or {}
+    default_role = loaded.get("default_role")
+    if default_role:
+        print(f"    default_role: {default_role}")
+    for mapping in loaded.get("mappings") or []:
+        match_parts = []
+        props = mapping.get("schema", {}).get("properties", {})
+        for key, schema in props.items():
+            if "contains" in schema:
+                match_parts.append(f"{key}={schema['contains'].get('const', '?')}")
+            elif "const" in schema:
+                match_parts.append(f"{key}={schema['const']}")
+        match_str = ", ".join(match_parts) or "?"
+        roles = mapping.get("roles", [])
+        admin = " (admin)" if mapping.get("admin") else ""
+        print(f"    {match_str} -> [{', '.join(roles)}]{admin}")
+
+
 def apply_acl(
     diff: AclDiff, current: CurrentState, *, verbose: bool = False
 ) -> list[str]:
@@ -515,7 +566,8 @@ def apply_acl(
 
 def _print_permissions(permissions: list[Permission]) -> None:
     for perm in permissions:
-        print(f"    {perm.level}: {perm.bucket}")
+        level = perm.level.name if hasattr(perm.level, "name") else str(perm.level)
+        print(f"    {level}: {perm.bucket}")
 
 
 def _print_apply_step(message: str, *, verbose: bool) -> None:

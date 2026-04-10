@@ -24,10 +24,10 @@ roles:
 
 sso:
   - match:
-      groups: Everyone
-    roles: [visitor]
-
-  - match:
       groups: Employees
     roles: [member]
     admin: true
+
+  - match:
+      groups: Everyone
+    roles: [visitor]
