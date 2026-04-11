@@ -20,12 +20,37 @@ uvx quiltx <tool> --help
 ## Tools
 
 - **bucket** — Register cross-account S3 buckets with Quilt (policy, SNS, notifications)
-- **ecs** — Interactive shell access to running ECS tasks via Session Manager
+- **ecs** — ECS task tools:
+  - **ecs shell** — Interactive shell access to running ECS tasks via Session Manager
+  - **ecs run-migration** — Re-run the registry migration task for a stack
 - **logs** — Display and tail CloudWatch logs for the configured catalog
 - **stack** — Manage Quilt stack:
   - **stack acl** — Declarative access-control-list (ACL) reconciliation from YAML
   - **stack catalog** — Configure and display Quilt catalog settings
   - **stack cfn** — Discover the Quilt CloudFormation stack and cache metadata
+
+## ECS CLI
+
+```bash
+# Open an interactive shell inside the registry service task
+uvx quiltx ecs shell
+
+# Dry-run the registry migration relaunch using cached stack metadata
+uvx quiltx ecs run-migration --dry-run
+
+# Start the migration task and wait for completion
+uvx quiltx ecs run-migration
+```
+
+## ECS Python API
+
+```python
+from quiltx.ecs import run_migration_for_catalog
+
+result = run_migration_for_catalog("https://open.quiltdata.com", wait=True)
+print(result.task_arn)
+print(result.exit_code)
+```
 
 ## Stack ACL
 

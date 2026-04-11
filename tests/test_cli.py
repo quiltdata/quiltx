@@ -67,10 +67,34 @@ def test_stack_no_subcommand(capsys) -> None:
     assert "cfn" in captured.out
 
 
+def test_ecs_no_subcommand(capsys) -> None:
+    """Test that 'quiltx ecs' with no subcommand shows help."""
+    result = cli.main(["ecs"])
+    assert result == 1
+
+    captured = capsys.readouterr()
+    assert "shell" in captured.out
+    assert "run-migration" in captured.out
+
+
 def test_stack_acl_help() -> None:
     """Test that 'quiltx stack acl --help' works."""
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["stack", "acl", "--help"])
+    assert exc_info.value.code == 0
+
+
+def test_ecs_shell_help() -> None:
+    """Test that 'quiltx ecs shell --help' works."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["ecs", "shell", "--help"])
+    assert exc_info.value.code == 0
+
+
+def test_ecs_run_migration_help() -> None:
+    """Test that 'quiltx ecs run-migration --help' works."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["ecs", "run-migration", "--help"])
     assert exc_info.value.code == 0
 
 
