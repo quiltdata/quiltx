@@ -17,15 +17,31 @@ uvx quiltx stack catalog https://open.quiltdata.com
 uvx quiltx <tool> --help
 ```
 
-## Tools
+### Tools
 
 - **bucket** — Register cross-account S3 buckets with Quilt (policy, SNS, notifications)
-- **ecs** — Interactive shell access to running ECS tasks via Session Manager
+- **ecs** — ECS task tools:
+  - **ecs shell** — Interactive shell access to running ECS tasks via Session Manager
+  - **ecs run-migration** — Re-run the registry migration task for a stack
 - **logs** — Display and tail CloudWatch logs for the configured catalog
 - **stack** — Manage Quilt stack:
   - **stack acl** — Declarative access-control-list (ACL) reconciliation from YAML
   - **stack catalog** — Configure and display Quilt catalog settings
   - **stack cfn** — Discover the Quilt CloudFormation stack and cache metadata
+
+### Python API
+
+See [README_DEV.md](README_DEV.md) for programmatic usage of ECS, ACL, config,
+and stack APIs.
+
+### Persistent install (optional)
+
+```bash
+uv tool install -U quiltx
+# Now use without the uvx prefix:
+quiltx --list
+```
+
 
 ## Stack ACL
 
@@ -66,7 +82,7 @@ sso:
     roles: [visitor]
 ```
 
-### CLI usage
+### Usage
 
 ```bash
 # Show current server ACL state
@@ -85,46 +101,17 @@ uvx quiltx stack acl config.yml
 uvx quiltx stack acl config.yml --yes
 ```
 
-### Python API
-
-```python
-from quiltx import (
-    parse_acl_config,
-    fetch_current_state,
-    compute_diff,
-    print_diff,
-    apply_acl,
-)
-
-config = parse_acl_config("config.yml")
-current = fetch_current_state()
-diff = compute_diff(config, current)
-print_diff(diff, verbose=True, desired=config, current=current)
-
-if diff.has_changes():
-    apply_acl(diff, current)
-```
-
-## Config and stack API
-
-```python
-from quiltx import get_catalog_url, get_catalog_region, set_catalog_url
-from quiltx.stack import find_matching_stack
-
-set_catalog_url("https://open.quiltdata.com")
-print(get_catalog_url())     # https://open.quiltdata.com
-print(get_catalog_region())  # us-east-1
-
-stack = find_matching_stack(get_catalog_url())
-print(stack["StackName"])
-```
-
-## Persistent install (optional)
+## ECS
 
 ```bash
-uv tool install -U quiltx
-# Now use without the uvx prefix:
-quiltx --list
+# Open an interactive shell inside the registry service task
+uvx quiltx ecs shell
+
+# Dry-run the registry migration relaunch using cached stack metadata
+uvx quiltx ecs run-migration --dry-run
+
+# Start the migration task and wait for completion
+uvx quiltx ecs run-migration
 ```
 
 ## License

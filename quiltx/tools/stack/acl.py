@@ -76,10 +76,12 @@ def main(argv: list[str] | None = None) -> int:
         print("Done.")
         return 0
     except Exception as exc:
+        details = _format_exception_details(exc)
+        if details:
+            for detail in details:
+                print(detail, file=sys.stderr)
         if args.verbose:
             print(f"Failure type: {type(exc).__name__}", file=sys.stderr)
-            for detail in _format_exception_details(exc):
-                print(detail, file=sys.stderr)
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

@@ -17,13 +17,14 @@ from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.table import Table
 
-from quiltx import __version__, stack as stack_lib
+from quiltx import stack as stack_lib
 from quiltx.utils import get_hostname
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Open an interactive shell inside a running ECS task. Requires AWS Session Manager plugin."
+        prog="quiltx ecs shell",
+        description="Open an interactive shell inside a running ECS task. Requires AWS Session Manager plugin.",
     )
     parser.add_argument(
         "service",
@@ -108,7 +109,7 @@ def _print_plugin_installation_help(console: Console) -> None:
     message = """
 # AWS Session Manager Plugin Required
 
-The `quiltx ecs` command requires the AWS Session Manager plugin.
+The `quiltx ecs shell` command requires the AWS Session Manager plugin.
 
 ## Installation Instructions
 
@@ -242,6 +243,19 @@ def _default_service_from_resources(
             return service.get("physical_id")
     if len(services) == 1:
         return services[0].get("physical_id")
+    return None
+
+
+def _default_cluster_from_resources(
+    clusters: Sequence[Mapping[str, str]],
+    stack_name: str | None = None,
+) -> str | None:
+    if len(clusters) == 1:
+        return clusters[0].get("physical_id")
+    if stack_name:
+        for cluster in clusters:
+            if cluster.get("physical_id") == stack_name:
+                return cluster.get("physical_id")
     return None
 
 
@@ -471,7 +485,7 @@ def _print_execute_command_not_enabled_error(
                     "[dim]Note: A new task deployment has started. Wait ~30-60 seconds for the new task to be ready.[/dim]"
                 )
                 console.print(
-                    "[dim]Then run 'quiltx ecs' again to connect to the new task.[/dim]\n"
+                    "[dim]Then run 'quiltx ecs shell' again to connect to the new task.[/dim]\n"
                 )
                 return 0
             else:
@@ -633,8 +647,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "No cluster provided and no stack payload found. Run 'quiltx stack' or pass --cluster."
                 )
-            if len(clusters) == 1:
-                cluster = clusters[0].get("physical_id")
+            default_cluster = _default_cluster_from_resources(clusters)
+            if default_cluster:
+                cluster = default_cluster
             elif clusters:
                 cluster = _prompt_resource(
                     console,

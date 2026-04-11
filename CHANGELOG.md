@@ -6,6 +6,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-04-11
+
+### Added
+
+- `quiltx ecs run-migration` to re-run the registry migration ECS task for a stack using cached CloudFormation metadata
+- Public `quiltx.ecs` helpers for finding the migration task definition, resolving registry service networking, launching the task, and waiting for completion
+- Explicit ECS launch-failure reporting for migration reruns, including surfaced `run_task()` failure reasons
+- Lake Formation troubleshooting docs for the stack ACL rollout, including the post-mortem, migration rerun spec, status tabulation, and a datasets ACL example
+
+### Changed
+
+- **BREAKING**: `quiltx ecs` is now a subcommand namespace; use `quiltx ecs shell` for interactive task access instead of bare `quiltx ecs`
+- README now documents the split ECS CLI (`ecs shell`, `ecs run-migration`) and the `quiltx.ecs` Python API
+
+### Fixed
+
+- `quiltx stack acl` now always shows each apply step (`-> add bucket`, `-> create policy`, etc.) regardless of `--verbose`, so users can see which operation failed
+- GraphQL error details (path, message, locations) are always shown on failure, not just in `--verbose` mode
+- Bucket and policy creation failures are caught and reported immediately with context (e.g. which failed buckets a policy references), then apply continues with remaining operations
+- Role creation, SSO config, and delete failures are similarly caught and reported without aborting
+
 ## [0.6.0] - 2026-04-09
 
 ### Added

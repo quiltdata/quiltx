@@ -5,6 +5,7 @@ from __future__ import annotations
 import boto3
 from botocore.stub import Stubber
 
+from quiltx import ecs as ecs_lib
 from quiltx.tools import ecs
 
 
@@ -148,3 +149,155 @@ def test_default_service_from_resources_singleton() -> None:
         }
     ]
     assert ecs._default_service_from_resources(services) == "only"
+
+
+def test_default_cluster_from_resources_singleton() -> None:
+    clusters = [
+        {
+            "logical_id": "Cluster",
+            "physical_id": "cluster-a",
+            "resource_type": "AWS::ECS::Cluster",
+        }
+    ]
+    assert ecs._default_cluster_from_resources(clusters) == "cluster-a"
+
+
+def test_find_migration_task_def() -> None:
+    class FakeEcsClient:
+        def list_task_definitions(self, *, familyPrefix: str, sort: str):
+            assert familyPrefix == "tf-dev-bench-registry-migration"
+            assert sort == "DESC"
+            return {
+                "taskDefinitionArns": [
+                    "arn:aws:ecs:us-east-1:123:task-definition/tf-dev-bench-registry-migration:9"
+                ]
+            }
+
+    task_def = ecs_lib.find_migration_task_def(FakeEcsClient(), "tf-dev-bench")
+    assert task_def.endswith(":9")
+
+
+def test_find_migration_task_def_not_found() -> None:
+    class FakeEcsClient:
+        def list_task_definitions(self, *, familyPrefix: str, sort: str):
+            return {"taskDefinitionArns": []}
+
+    try:
+        ecs_lib.find_migration_task_def(FakeEcsClient(), "tf-dev-bench")
+    except ValueError as exc:
+        assert "No migration task definition" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_get_network_config_prefers_registry() -> None:
+    class FakeEcsClient:
+        def describe_services(self, *, cluster: str, services: list[str]):
+            assert cluster == "tf-dev-bench"
+            assert services == ["registry-service"]
+            return {
+                "services": [
+                    {
+                        "networkConfiguration": {
+                            "awsvpcConfiguration": {
+                                "subnets": ["subnet-123"],
+                                "securityGroups": ["sg-123"],
+                            }
+                        }
+                    }
+                ]
+            }
+
+    payload = {
+        "ecs_resources": [
+            {
+                "logical_id": "BenchlingService",
+                "physical_id": "benchling-service",
+                "resource_type": "AWS::ECS::Service",
+            },
+            {
+                "logical_id": "RegistryService",
+                "physical_id": "registry-service",
+                "resource_type": "AWS::ECS::Service",
+            },
+        ]
+    }
+
+    network_config = ecs_lib.get_network_config(
+        FakeEcsClient(), "tf-dev-bench", payload
+    )
+    awsvpc_config = network_config.get("awsvpcConfiguration")
+    assert isinstance(awsvpc_config, dict)
+    subnets = awsvpc_config.get("subnets")
+    assert subnets == ["subnet-123"]
+
+
+def test_get_network_config_no_registry() -> None:
+    class FakeEcsClient:
+        pass
+
+    payload = {
+        "ecs_resources": [
+            {
+                "logical_id": "BenchlingService",
+                "physical_id": "benchling-service",
+                "resource_type": "AWS::ECS::Service",
+            }
+        ]
+    }
+
+    try:
+        ecs_lib.get_network_config(FakeEcsClient(), "tf-dev-bench", payload)
+    except ValueError as exc:
+        assert "RegistryService" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_run_migration_launch_failure() -> None:
+    class FakeEcsClient:
+        def run_task(self, **kwargs):
+            assert kwargs["cluster"] == "tf-dev-bench"
+            return {
+                "tasks": [],
+                "failures": [
+                    {
+                        "arn": "arn:aws:ecs:us-east-1:123:service/registry",
+                        "reason": "ACCESS_DENIED",
+                        "detail": "iam denied",
+                    }
+                ],
+            }
+
+    try:
+        ecs_lib.run_migration(
+            FakeEcsClient(),
+            "tf-dev-bench",
+            "task-def-arn",
+            {"awsvpcConfiguration": {"subnets": ["subnet-123"]}},
+        )
+    except ecs_lib.MigrationLaunchError as exc:
+        assert exc.failures[0]["reason"] == "ACCESS_DENIED"
+    else:
+        raise AssertionError("Expected MigrationLaunchError")
+
+
+def test_run_migration_success() -> None:
+    class FakeEcsClient:
+        def run_task(self, **kwargs):
+            assert kwargs["taskDefinition"] == "task-def-arn"
+            assert kwargs["launchType"] == "FARGATE"
+            return {
+                "tasks": [{"taskArn": "arn:aws:ecs:us-east-1:123:task/abc"}],
+                "failures": [],
+            }
+
+    task = ecs_lib.run_migration(
+        FakeEcsClient(),
+        "tf-dev-bench",
+        "task-def-arn",
+        {"awsvpcConfiguration": {"subnets": ["subnet-123"]}},
+    )
+    task_arn = task.get("taskArn")
+    assert isinstance(task_arn, str)
+    assert task_arn.endswith("/abc")

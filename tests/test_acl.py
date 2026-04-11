@@ -484,7 +484,171 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
     assert any("bucket-bad" in warning for warning in warnings)
 
 
-def test_apply_acl_verbose_shows_operation_steps(monkeypatch, capsys) -> None:
+def test_apply_acl_policy_create_failure_continues_and_warns(
+    monkeypatch, capsys
+) -> None:
+    """When a bucket add fails and the policy referencing it also fails,
+    the error is reported immediately and remaining operations continue."""
+    calls: list[tuple] = []
+
+    def bucket_add(name: str, title: str):
+        calls.append(("bucket_add", name))
+        raise RuntimeError("access denied")
+
+    def policy_create(title: str, *, permissions):
+        calls.append(("policy_create", title))
+        raise RuntimeError("Internal Server Error")
+
+    def role_create(name: str, policies):
+        calls.append(("role_create", name))
+
+    monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=bucket_add))
+    monkeypatch.setattr(
+        acl,
+        "admin_policies",
+        SimpleNamespace(
+            create_managed=policy_create,
+            update_managed=lambda *a, **kw: None,
+            delete=lambda title: None,
+        ),
+    )
+    monkeypatch.setattr(
+        acl,
+        "admin_roles",
+        SimpleNamespace(
+            create_managed=role_create,
+            update_managed=lambda *a, **kw: None,
+            delete=lambda name: None,
+        ),
+    )
+    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=lambda t: None))
+
+    diff = acl.AclDiff(
+        buckets_to_add=["my-bucket"],
+        policies_to_create=[
+            acl.PolicyUpdate(
+                title="my-policy",
+                permissions=[acl.Permission.read("my-bucket")],
+            )
+        ],
+        roles_to_create=[
+            acl.RoleUpdate(name="my-role", policy_titles=["other-policy"])
+        ],
+    )
+    current = acl.CurrentState(
+        buckets={},
+        managed_policies={},
+        unmanaged_policies={},
+        all_policies={
+            "other-policy": FakePolicy("id-other", "other-policy", True, [], [])
+        },
+        managed_roles={},
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
+    )
+
+    warnings = acl.apply_acl(diff, current)
+
+    # Both bucket add and policy create were attempted
+    assert ("bucket_add", "my-bucket") in calls
+    assert ("policy_create", "my-policy") in calls
+    # Role creation still proceeded despite earlier failures
+    assert ("role_create", "my-role") in calls
+
+    # Warnings mention the failed bucket and the failed policy
+    assert any("my-bucket" in w for w in warnings)
+    policy_warning = [w for w in warnings if "my-policy" in w][0]
+    assert "failed buckets" in policy_warning
+    assert "my-bucket" in policy_warning
+
+    # Failures were printed to stderr immediately
+    err = capsys.readouterr().err
+    assert "my-bucket" in err
+    assert "my-policy" in err
+
+
+def test_apply_acl_role_and_sso_failures_reported_immediately(
+    monkeypatch, capsys
+) -> None:
+    """Role create/update and SSO failures are caught and reported to stderr."""
+    calls: list[tuple] = []
+
+    def role_create(name: str, policies):
+        calls.append(("role_create", name))
+        raise RuntimeError("role server error")
+
+    def role_update(id_or_name: str, *, name: str, policies):
+        calls.append(("role_update", name))
+        raise RuntimeError("role update error")
+
+    def sso_set(text: str):
+        calls.append(("sso_set",))
+        raise RuntimeError("sso server error")
+
+    monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=lambda n, t: None))
+    monkeypatch.setattr(
+        acl,
+        "admin_policies",
+        SimpleNamespace(
+            create_managed=lambda title, **kw: SimpleNamespace(id="pid"),
+            update_managed=lambda *a, **kw: None,
+            delete=lambda title: None,
+        ),
+    )
+    monkeypatch.setattr(
+        acl,
+        "admin_roles",
+        SimpleNamespace(
+            create_managed=role_create,
+            update_managed=role_update,
+            delete=lambda name: calls.append(("role_delete", name)),
+        ),
+    )
+    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=sso_set))
+
+    diff = acl.AclDiff(
+        roles_to_create=[acl.RoleUpdate(name="new-role", policy_titles=["p1"])],
+        roles_to_update=[acl.RoleUpdate(name="old-role", policy_titles=["p1"])],
+        roles_to_delete=["gone-role"],
+        sso_config_text="version: '1.0'\ndefault_role: new-role\nmappings: []\n",
+        sso_needs_update=True,
+    )
+    current = acl.CurrentState(
+        buckets={},
+        managed_policies={},
+        unmanaged_policies={},
+        all_policies={"p1": SimpleNamespace(id="id-p1")},
+        managed_roles={"old-role": SimpleNamespace(id="id-old-role")},
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
+    )
+
+    warnings = acl.apply_acl(diff, current)
+
+    # All operations were attempted
+    assert ("role_create", "new-role") in calls
+    assert ("role_update", "old-role") in calls
+    assert ("sso_set",) in calls
+    # Deletes still ran despite earlier failures
+    assert ("role_delete", "gone-role") in calls
+
+    # Warnings capture all three failures
+    assert any("new-role" in w for w in warnings)
+    assert any("old-role" in w for w in warnings)
+    assert any("SSO" in w for w in warnings)
+
+    # Failures printed to stderr immediately
+    err = capsys.readouterr().err
+    assert "new-role" in err
+    assert "old-role" in err
+    assert "sso config" in err
+
+
+def test_apply_acl_always_shows_operation_steps(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         acl,
         "admin_roles",
