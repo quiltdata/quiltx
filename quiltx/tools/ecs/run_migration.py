@@ -26,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="AWS region override (defaults to stack payload).",
     )
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Run migration without prompting for confirmation.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print run_task parameters as JSON without starting the task.",
@@ -95,6 +100,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
+
+        print(f"Stack:           {stack_name}")
+        print(f"Cluster:         {cluster}")
+        print(f"Task definition: {task_def}")
+        if region:
+            print(f"Region:          {region}")
+        if not args.yes:
+            response = input("\nRun migration? [y/N]: ").strip().lower()
+            if response not in {"y", "yes"}:
+                print("Aborted.")
+                return 1
 
         task = ecs_lib.run_migration(ecs_client, cluster, task_def, network_config)
         task_arn = task.get("taskArn")
