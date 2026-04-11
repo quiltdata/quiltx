@@ -42,7 +42,6 @@ uv tool install -U quiltx
 quiltx --list
 ```
 
-
 ## Stack ACL
 
 `quiltx stack acl` declaratively manages a Quilt stack's access control lists
