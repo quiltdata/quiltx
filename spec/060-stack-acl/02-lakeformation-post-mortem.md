@@ -64,9 +64,21 @@ Lambda also failed due to LF.
 
 ## Open Questions
 
-- [ ] Was the migration Lambda also blocked by LF? (check `MigrationLambdaFunctionLogGroup`)
+- [x] Was the migration Lambda also blocked by LF? **Yes.** The migration ECS
+      task (`registry_migration/29d0ec39d920`) ran all alembic DB migrations
+      successfully but crashed in `update_bucket_resources` →
+      `rebuild_named_packages_partitions()` with:
+      `AccessDeniedException: Insufficient Lake Formation permission(s): Required Describe on named_packages`
+      (CloudWatch log group: `tf-dev-bench`, stream:
+      `registry/registry_migration/29d0ec39d9204bd689a081522d4dced5`)
+- [x] Should the Quilt stack template grant LF permissions to its own roles?
+      **Yes.** Database-level `IAM_ALLOWED_PRINCIPALS` grants were added in
+      `a933417` but are insufficient — table-level `TableWildcard` grants are
+      also required because the account-level `CreateTableDefaultPermissions`
+      is empty. Fix applied: `lakeformation.py` now creates both database and
+      table-wildcard grants. `MigrationCallout.DependsOn` updated to include
+      all LF resources so the migration cannot race ahead of the grants.
 - [ ] Can we re-run the migration to create the `package_revision` table?
-- [ ] Should the Quilt stack template grant LF permissions to its own roles?
 - [ ] Should the `sus-test` LF changes be scoped to only `sus-test` databases
       rather than changing account-wide defaults?
 - [ ] Are other stacks in this account (`tf-dev-unstable`, `tf-dev-mcp-server`)
