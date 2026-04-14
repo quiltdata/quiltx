@@ -29,14 +29,10 @@ print(result.exit_code)
 ## Stack ACL
 
 ```python
-from quiltx import (
-    parse_acl_config,
-    fetch_current_state,
-    compute_diff,
-    print_diff,
-    apply_acl,
-)
+from quiltx import apply_acl, compute_diff, fetch_current_state, parse_acl_config, print_diff
 
+# config.yml now uses the flat stack ACL format:
+#   top-level policies: and roles:
 config = parse_acl_config("config.yml")
 current = fetch_current_state()
 diff = compute_diff(config, current)

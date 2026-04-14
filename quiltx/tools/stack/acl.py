@@ -11,13 +11,20 @@ from quiltx import acl as acl_lib
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="quiltx stack acl",
-        description="Reconcile Quilt bucket, role, policy, and SSO ACLs from YAML.",
+        description=(
+            "Reconcile Quilt ACLs from flat YAML with top-level "
+            "'policies:' and 'roles:' blocks."
+        ),
     )
     parser.add_argument(
         "config_file",
         nargs="?",
         default=None,
-        help="Path to the ACL YAML file. If omitted, shows current server state.",
+        help=(
+            "Path to the ACL YAML file. Use the flat policies/roles format "
+            "from spec/060-stack-acl/simpler-stack-acl.yml. If omitted, "
+            "shows current server state."
+        ),
     )
     parser.add_argument(
         "--yes",
@@ -48,13 +55,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         desired = acl_lib.parse_acl_config(args.config_file)
-        desired = acl_lib.with_default_role(
-            desired,
-            _resolve_default_role_name(
-                desired,
-                prompt_for_choice=not args.yes,
-            ),
-        )
         current = acl_lib.fetch_current_state()
         diff = acl_lib.compute_diff(desired, current)
         acl_lib.print_diff(diff, verbose=args.verbose, desired=desired, current=current)
@@ -88,44 +88,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def _confirm_apply() -> bool:
     return input("Apply ACL changes? [y/N]: ").strip().lower() in {"y", "yes"}
-
-
-def _resolve_default_role_name(
-    config: acl_lib.AclConfig, *, prompt_for_choice: bool
-) -> str | None:
-    if config.default_role_name is not None:
-        return config.default_role_name
-
-    role_names = list(config.roles)
-    if not role_names:
-        return None
-
-    if not prompt_for_choice:
-        return role_names[0]
-
-    if not sys.stdin.isatty():
-        return role_names[0]
-
-    print("Select the default role:")
-    for index, role_name in enumerate(role_names, start=1):
-        print(f"  {index}. {role_name}")
-
-    try:
-        response = input(f"Default role [1-{len(role_names)}] (default 1): ").strip()
-    except EOFError:
-        return role_names[0]
-    if response == "":
-        return role_names[0]
-
-    try:
-        selected = int(response)
-    except ValueError as exc:
-        raise ValueError(f"Invalid default role selection: {response!r}") from exc
-
-    if not 1 <= selected <= len(role_names):
-        raise ValueError(f"Default role selection out of range: {selected}")
-
-    return role_names[selected - 1]
 
 
 def _format_exception_details(exc: Exception) -> list[str]:

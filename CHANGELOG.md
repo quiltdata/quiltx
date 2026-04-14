@@ -6,11 +6,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - Unreleased
+
+### Changed
+
+- **BREAKING**: `quiltx stack acl` now only accepts the flat `policies:` / `roles:` format; the old `bucket_policies:` / `roles:` / `sso:` schema is rejected
+- `quiltx stack acl` now synthesizes cumulative managed roles from policy order, generates inline managed policies for static-role bucket grants, and derives SSO mappings directly from policy and role audiences
+- `quiltx stack acl` no longer prompts for a default role; `config.default_role: true` on a policy controls the emitted SSO default role
+- Stack ACL docs now use `spec/060-stack-acl/simpler-stack-acl.yml` as the canonical example and explain the order-sensitive synthetic role model
 
 ### Fixed
 
 - Reject ACL config names that would collide with reserved generated inline-policy titles ending in `__inline`
+- Delete stale synthesized roles in the same reconciliation pass after policy rename/reorder by deriving role deletions from the desired role set instead of the current SSO snapshot
 
 ## [0.7.1] - 2026-04-11
 

@@ -45,7 +45,9 @@ quiltx --list
 ## Stack ACL
 
 `quiltx stack acl` declaratively manages a Quilt stack's access control lists
-(ACLs) — buckets, policies, roles, and SSO mappings — from a single YAML file.
+(ACLs) from a single YAML file with exactly two top-level blocks:
+`policies:` and `roles:`. Policy audiences synthesize cumulative managed roles,
+while static roles compose named policies and optional inline bucket grants.
 Instead of clicking through the catalog admin UI, you define the desired state
 in version-controlled YAML and let the tool reconcile it against the server.
 
@@ -53,33 +55,28 @@ in version-controlled YAML and let the tool reconcile it against the server.
 
 ```yaml
 # Access control lists for a Quilt stack
-bucket_policies:
+policies:
   public:
-    read:
-      - quilt-example
+    sso.groups: [Everyone]
+    buckets.read: [quilt-example]
+    config.default_role: true
   internal:
-    read_write:
-      - quilt-bake
-      - quilt-dev
-    read:
-      - quilt-leadership
+    sso.groups: [Employees]
+    buckets.read_write: [quilt-bake, quilt-dev]
+    buckets.read: [quilt-leadership]
 
 roles:
-  visitor:
-    bucket_policies: [public]
-  member:
-    bucket_policies: [public, internal]
-    default: true          # assigned to new users
-
-sso:
-  - match:
-      groups: Employees
-    roles: [member]
-    admin: true
-  - match:
-      groups: Everyone
-    roles: [visitor]
+  exec:
+    sso.groups: [Executives]
+    config.policies: [public, internal]
+    buckets.read_write: [quilt-leadership]
+    config.is_admin: true
 ```
+
+Policy order matters. In this example `public` synthesizes the `public` role,
+and `internal` synthesizes `internal_public`, which cumulatively includes both
+`public` and `internal`. Reordering the policies changes those synthesized role
+names and who receives which cumulative grants.
 
 ### Usage
 

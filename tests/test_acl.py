@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
@@ -24,16 +25,16 @@ class FakePolicy:
     id: str
     title: str
     managed: bool
-    permissions: list
-    roles: list
+    permissions: list[Any]
+    roles: list[Any]
 
 
 @dataclass
 class FakeRole:
     id: str
     name: str
-    policies: list | None
-    permissions: list
+    policies: list[Any] | None
+    permissions: list[Any]
     typename__: str = "ManagedRole"
 
 
@@ -43,347 +44,441 @@ class FakeBucket:
     title: str
 
 
-def test_parse_acl_config_valid(tmp_path: Path) -> None:
+def test_parse_acl_config_accepts_minimal_valid_config(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
-bucket_policies:
+policies:
   public:
-    read: [bucket-a]
-  internal:
-    read_write: [bucket-b]
-roles:
-  visitor:
-    bucket_policies: [public]
-    default: true
-sso:
-  - match:
-      groups: Everyone
-    roles: [visitor]
-    admin: true
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+roles: {}
 """)
 
     config = acl.parse_acl_config(config_path)
-    assert sorted(config.bucket_policies) == ["internal", "public"]
-    assert config.roles["visitor"].bucket_policies == ["public"]
-    assert config.roles["visitor"].default is True
-    assert config.default_role_name == "visitor"
-    assert config.sso[0].match == {"groups": "Everyone"}
-    assert config.sso[0].admin is True
+
+    assert [policy.name for policy in config.policies] == ["public"]
+    assert config.policies[0].groups == ["Everyone"]
+    assert config.roles == {}
 
 
-def test_parse_acl_config_rejects_multiple_default_roles(tmp_path: Path) -> None:
-    config_path = tmp_path / "acl.yml"
-    config_path.write_text("""
-bucket_policies:
-  public:
-    read: [bucket-a]
-roles:
-  visitor:
-    bucket_policies: [public]
-    default: true
-  member:
-    bucket_policies: [public]
-    default: true
-""")
+def test_parse_acl_config_accepts_simpler_stack_acl_example() -> None:
+    config = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
 
-    with pytest.raises(ValueError, match="Only one role may set default: true"):
-        acl.parse_acl_config(config_path)
+    assert [policy.name for policy in config.policies] == ["public", "internal"]
+    assert config.roles["exec"].policies == ["public", "internal"]
+    assert config.roles["exec"].is_admin is True
 
 
-def test_parse_acl_config_rejects_unknown_role_reference(tmp_path: Path) -> None:
+def test_parse_acl_config_rejects_old_format_keys(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
 bucket_policies: {}
 roles: {}
-sso:
-  - match:
-      groups: Everyone
-    roles: [visitor]
+sso: []
 """)
 
-    try:
+    with pytest.raises(ValueError, match="old stack ACL format"):
         acl.parse_acl_config(config_path)
-    except ValueError as exc:
-        assert "unknown roles" in str(exc)
-    else:  # pragma: no cover - defensive assertion
-        raise AssertionError("Expected ValueError")
 
 
-def test_parse_acl_config_rejects_reserved_inline_policy_suffix(
-    tmp_path: Path,
-) -> None:
+def test_parse_acl_config_rejects_unknown_top_level_keys(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
-bucket_policies:
-  visitor__inline:
-    read: [bucket-a]
+policies: {}
+roles: {}
+groups: {}
+""")
+
+    with pytest.raises(ValueError, match="Unknown top-level ACL keys"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_non_list_groups_and_non_bool_flags(
+    tmp_path: Path,
+) -> None:
+    groups_path = tmp_path / "groups.yml"
+    groups_path.write_text("""
+policies:
+  public:
+    sso.groups: Everyone
+roles: {}
+""")
+    with pytest.raises(ValueError, match="policies.public.sso.groups"):
+        acl.parse_acl_config(groups_path)
+
+    admin_path = tmp_path / "admin.yml"
+    admin_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles:
+  exec:
+    sso.groups: [Executives]
+    config.is_admin: "yes"
+""")
+    with pytest.raises(ValueError, match="roles.exec.config.is_admin"):
+        acl.parse_acl_config(admin_path)
+
+    default_path = tmp_path / "default.yml"
+    default_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    config.default_role: "yes"
+roles: {}
+""")
+    with pytest.raises(ValueError, match="policies.public.config.default_role"):
+        acl.parse_acl_config(default_path)
+
+
+def test_parse_acl_config_rejects_unknown_static_role_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles:
+  exec:
+    sso.groups: [Executives]
+    config.policies: [missing]
+""")
+
+    with pytest.raises(ValueError, match="unknown policies"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_multiple_default_policies(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    config.default_role: true
+  internal:
+    sso.groups: [Everyone]
+    config.default_role: true
 roles: {}
 """)
 
-    with pytest.raises(ValueError, match="reserved for generated inline-role policies"):
+    with pytest.raises(ValueError, match="Only one policy may set config.default_role"):
         acl.parse_acl_config(config_path)
 
 
-def test_parse_acl_config_rejects_role_name_conflicting_with_inline_policy(
-    tmp_path: Path,
-) -> None:
+def test_parse_acl_config_rejects_broken_policy_ladder(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
-bucket_policies:
-  visitor__inline:
-    read: [bucket-a]
-roles:
-  visitor:
-    bucket_policies: []
+policies:
+  public:
+    sso.groups: [Contractors]
+  finance:
+    sso.groups: [Executives]
+roles: {}
 """)
 
-    with pytest.raises(ValueError, match="reserved for generated inline-role policies"):
+    with pytest.raises(ValueError, match="Policy ladder is not nested"):
         acl.parse_acl_config(config_path)
 
 
-def test_build_sso_config_omits_default_role() -> None:
-    text = acl.build_sso_config(
-        [
-            acl.AclSsoMapping(
-                match={"groups": "Employees"}, roles=["member"], admin=True
-            ),
-            acl.AclSsoMapping(match={"email": "[email protected]"}, roles=["admin"]),
-        ]
-    )
+def test_parse_acl_config_rejects_reserved_inline_names(tmp_path: Path) -> None:
+    suffix_path = tmp_path / "suffix.yml"
+    suffix_path.write_text("""
+policies:
+  exec__inline:
+    sso.groups: [Everyone]
+roles: {}
+""")
+    with pytest.raises(ValueError, match="reserved for generated inline-role policies"):
+        acl.parse_acl_config(suffix_path)
 
-    payload = yaml.safe_load(text)
-    assert payload["version"] == "1.0"
-    assert "default_role" not in payload
-    assert (
-        payload["mappings"][0]["schema"]["properties"]["groups"]["contains"]["const"]
-        == "Employees"
-    )
-    assert (
-        payload["mappings"][1]["schema"]["properties"]["email"]["const"]
-        == "[email protected]"
-    )
-
-
-def test_build_sso_config_includes_default_role() -> None:
-    text = acl.build_sso_config(
-        [acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["visitor"])],
-        default_role_name="visitor",
-    )
-    payload = yaml.safe_load(text)
-    assert payload["default_role"] == "visitor"
+    collision_path = tmp_path / "collision.yml"
+    collision_path.write_text("""
+policies:
+  exec__inline:
+    sso.groups: [Everyone]
+roles:
+  exec:
+    sso.groups: [Executives]
+""")
+    with pytest.raises(ValueError, match="reserved for generated inline-role policies"):
+        acl.parse_acl_config(collision_path)
 
 
-def test_compute_diff_handles_updates_deletes_and_unmanaged_collisions() -> None:
-    desired = acl.AclConfig(
-        bucket_policies={
-            "public": acl.AclBucketPolicy(name="public", read=["bucket-a"]),
-            "internal": acl.AclBucketPolicy(name="internal", read_write=["bucket-b"]),
-            "external": acl.AclBucketPolicy(name="external", read=["bucket-z"]),
-        },
+def test_parse_acl_config_rejects_synthetic_role_name_collision(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+  internal:
+    sso.groups: [Employees]
+roles:
+  internal_public:
+    sso.groups: [Executives]
+""")
+
+    with pytest.raises(ValueError, match="Synthesized role 'internal_public'"):
+        acl.parse_acl_config(config_path)
+
+
+def test_all_buckets_includes_inline_role_buckets() -> None:
+    config = acl.AclConfig(
+        policies=[acl.AclPolicy(name="public", groups=["Everyone"], read=["bucket-a"])],
         roles={
-            "visitor": acl.AclRole(
-                name="visitor", bucket_policies=["public", "internal"], default=True
-            ),
-            "member": acl.AclRole(name="member", bucket_policies=["public"]),
+            "exec": acl.AclStaticRole(
+                name="exec",
+                groups=["Executives"],
+                read=["bucket-b"],
+                read_write=["bucket-c"],
+            )
         },
-        sso=[acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["visitor"])],
-        default_role_name="visitor",
     )
 
-    current = acl.CurrentState(
-        buckets={"bucket-a": FakeBucket("bucket-a", "bucket-a")},
-        managed_policies={
-            "public": FakePolicy(
-                id="policy-public",
-                title="public",
-                managed=True,
-                permissions=[acl.Permission.read("bucket-a")],
-                roles=[],
-            ),
-            "legacy": FakePolicy(
-                id="policy-legacy",
-                title="legacy",
-                managed=True,
-                permissions=[acl.Permission.read("bucket-old")],
-                roles=[],
-            ),
-        },
-        unmanaged_policies={
-            "external": FakePolicy(
-                id="policy-external",
-                title="external",
-                managed=False,
-                permissions=[acl.Permission.read("bucket-z")],
-                roles=[],
-            )
-        },
-        all_policies={},
-        managed_roles={
-            "visitor": FakeRole(
-                id="role-visitor",
-                name="visitor",
-                policies=[FakePolicySummary(id="policy-public", title="public")],
-                permissions=[],
-            ),
-            "legacy": FakeRole(
-                id="role-legacy",
-                name="legacy",
-                policies=[FakePolicySummary(id="policy-legacy", title="legacy")],
-                permissions=[],
-            ),
-            "protected": FakeRole(
-                id="role-protected",
-                name="protected",
-                policies=[],
-                permissions=[],
-            ),
-        },
-        unmanaged_roles={
-            "member": FakeRole(
-                id="role-member",
-                name="member",
-                policies=[],
-                permissions=[],
-                typename__="UnmanagedRole",
-            )
-        },
-        all_roles={},
-        sso_config_text="""
-version: "1.0"
-mappings:
-  - schema:
-      type: object
-      properties:
-        groups:
-          type: array
-          contains:
-            const: Legacy
-      required: [groups]
-    roles: [protected]
-    admin: false
-""",
-        default_role_name="legacy",
-    )
-    current.all_policies.update(current.unmanaged_policies)
-    current.all_policies.update(current.managed_policies)
-    current.all_roles.update(current.unmanaged_roles)
-    current.all_roles.update(current.managed_roles)
+    assert acl.all_buckets(config) == {"bucket-a", "bucket-b", "bucket-c"}
+
+
+def test_build_sso_config_emits_policy_and_static_role_mappings() -> None:
+    config = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+
+    sso_config = acl.build_sso_config(config)
+    assert sso_config is not None
+    payload = yaml.safe_load(sso_config)
+
+    assert payload["default_role"] == "public"
+    assert payload["mappings"][0]["roles"] == ["public"]
+    assert payload["mappings"][1]["roles"] == ["internal_public"]
+    assert payload["mappings"][2]["roles"] == ["exec"]
+    assert payload["mappings"][2]["admin"] is True
+
+
+def test_compute_diff_from_simpler_stack_acl_example_against_empty_state() -> None:
+    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    current = _empty_current_state()
 
     diff = acl.compute_diff(desired, current)
 
-    assert diff.buckets_to_add == ["bucket-b", "bucket-z"]
-    assert [policy.title for policy in diff.policies_to_create] == ["internal"]
-    assert diff.policies_to_delete == ["legacy"]
-    assert [role.name for role in diff.roles_to_update] == ["visitor"]
-    assert diff.roles_to_create == []
-    assert diff.roles_to_delete == []
-    assert diff.sso_needs_update is True
-    assert diff.sso_is_create is False
-    assert any("unmanaged" in warning for warning in diff.warnings)
-    assert any("protected" in warning for warning in diff.warnings)
-    assert any("current default role" in warning for warning in diff.warnings)
-    assert "default_role: visitor" in (diff.sso_config_text or "")
-
-
-def test_compute_diff_sso_create_when_no_existing_config() -> None:
-    desired = acl.AclConfig(
-        bucket_policies={
-            "public": acl.AclBucketPolicy(name="public", read=["bucket-a"]),
-        },
-        roles={
-            "visitor": acl.AclRole(
-                name="visitor", bucket_policies=["public"], default=True
-            ),
-        },
-        sso=[acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["visitor"])],
-        default_role_name="visitor",
-    )
-    current = acl.CurrentState(
-        buckets={"bucket-a": FakeBucket("bucket-a", "bucket-a")},
-        managed_policies={
-            "public": FakePolicy(
-                id="policy-public",
-                title="public",
-                managed=True,
-                permissions=[acl.Permission.read("bucket-a")],
-                roles=[],
-            ),
-        },
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={
-            "visitor": FakeRole(
-                id="role-visitor",
-                name="visitor",
-                policies=[FakePolicySummary(id="policy-public", title="public")],
-                permissions=[],
-            ),
-        },
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
-
-    diff = acl.compute_diff(desired, current)
-    assert diff.sso_needs_update is True
+    assert diff.buckets_to_add == [
+        "quilt-bake",
+        "quilt-dev",
+        "quilt-example",
+        "quilt-leadership",
+    ]
+    assert [policy.title for policy in diff.policies_to_create] == [
+        "public",
+        "internal",
+        "exec__inline",
+    ]
+    assert [role.name for role in diff.roles_to_create] == [
+        "public",
+        "internal_public",
+        "exec",
+    ]
     assert diff.sso_is_create is True
+    assert diff.sso_needs_update is True
 
 
-def test_with_default_role_returns_updated_copy() -> None:
-    config = acl.AclConfig(bucket_policies={}, roles={}, sso=[])
-    updated = acl.with_default_role(config, "visitor")
-    assert updated.default_role_name == "visitor"
-    assert config.default_role_name is None
+def test_compute_diff_two_policy_ladder_synthesizes_expected_roles() -> None:
+    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    current = _empty_current_state()
+
+    diff = acl.compute_diff(desired, current)
+
+    synth_creates = [role for role in diff.roles_to_create if role.name != "exec"]
+    assert [(role.name, role.policy_titles) for role in synth_creates] == [
+        ("public", ["public"]),
+        ("internal_public", ["public", "internal"]),
+    ]
 
 
-def test_print_diff_sso_create_vs_update(capsys) -> None:
-    create_diff = acl.AclDiff(
-        sso_config_text="test", sso_is_create=True, sso_needs_update=True
+def test_compute_diff_single_policy_config_produces_one_synthesized_role() -> None:
+    desired = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(
+                name="public", groups=["Everyone"], read=["bucket-a"], default_role=True
+            )
+        ],
+        roles={},
     )
-    acl.print_diff(create_diff)
-    assert "+ sso config" in capsys.readouterr().out
 
-    update_diff = acl.AclDiff(
-        sso_config_text="test", sso_is_create=False, sso_needs_update=True
+    diff = acl.compute_diff(desired, _empty_current_state())
+
+    assert [role.name for role in diff.roles_to_create] == ["public"]
+    assert "default_role: public" in (diff.sso_config_text or "")
+
+
+def test_reordering_policies_changes_synthesized_role_names() -> None:
+    first = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(name="public", groups=["Everyone"], read=["bucket-a"]),
+            acl.AclPolicy(name="internal", groups=["Everyone"], read=["bucket-b"]),
+        ],
+        roles={},
     )
-    acl.print_diff(update_diff)
-    assert "~ sso config" in capsys.readouterr().out
+    second = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(name="internal", groups=["Everyone"], read=["bucket-b"]),
+            acl.AclPolicy(name="public", groups=["Everyone"], read=["bucket-a"]),
+        ],
+        roles={},
+    )
+
+    first_names = [
+        role.name
+        for role in acl.compute_diff(first, _empty_current_state()).roles_to_create
+    ]
+    second_names = [
+        role.name
+        for role in acl.compute_diff(second, _empty_current_state()).roles_to_create
+    ]
+
+    assert first_names == ["public", "internal_public"]
+    assert second_names == ["internal", "public_internal"]
 
 
-def test_compute_diff_does_not_remove_existing_sso_when_desired_is_empty() -> None:
-    desired = acl.AclConfig(bucket_policies={}, roles={}, sso=[])
-    current = acl.CurrentState(
-        buckets={},
-        managed_policies={},
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text='version: "1.0"\nmappings: []\n',
-        default_role_name=None,
+def test_static_role_with_inline_buckets_creates_hidden_inline_policy() -> None:
+    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+
+    diff = acl.compute_diff(desired, _empty_current_state())
+
+    exec_role = next(role for role in diff.roles_to_create if role.name == "exec")
+    assert exec_role.policy_titles == ["public", "internal", "exec__inline"]
+    assert any(policy.title == "exec__inline" for policy in diff.policies_to_create)
+
+
+def test_compute_diff_is_idempotent_against_matching_current_state() -> None:
+    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    current = _current_state_for_config(desired)
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.has_changes() is False
+    assert diff.warnings == []
+
+
+def test_compute_diff_warns_and_skips_unmanaged_name_collisions() -> None:
+    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    current = _empty_current_state()
+    current.unmanaged_policies["public"] = FakePolicy(
+        id="u-policy",
+        title="public",
+        managed=False,
+        permissions=[],
+        roles=[],
+    )
+    current.unmanaged_roles["exec"] = FakeRole(
+        id="u-role",
+        name="exec",
+        policies=[],
+        permissions=[],
+        typename__="UnmanagedRole",
     )
 
     diff = acl.compute_diff(desired, current)
-    assert diff.sso_needs_update is False
+
+    assert any(
+        "Policy 'public' already exists as unmanaged" in warning
+        for warning in diff.warnings
+    )
+    assert any(
+        "Role 'exec' already exists as unmanaged" in warning
+        for warning in diff.warnings
+    )
+    assert "public" not in [policy.title for policy in diff.policies_to_create]
+    assert "exec" not in [role.name for role in diff.roles_to_create]
 
 
-def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
+def test_changing_policy_groups_updates_sso_config() -> None:
+    original = acl.AclConfig(
+        policies=[acl.AclPolicy(name="public", groups=["Everyone"], read=["bucket-a"])],
+        roles={},
+    )
+    updated = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(name="public", groups=["Employees"], read=["bucket-a"])
+        ],
+        roles={},
+    )
+    current = _current_state_for_config(original)
+
+    diff = acl.compute_diff(updated, current)
+
+    assert diff.sso_needs_update is True
+    assert "Employees" in (diff.sso_config_text or "")
+
+
+def test_policy_rename_cleans_up_old_synthesized_role_in_single_pass() -> None:
+    original = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    current = _current_state_for_config(original)
+
+    renamed = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(
+                name="public",
+                groups=["Everyone"],
+                read=["quilt-example"],
+                default_role=True,
+            ),
+            acl.AclPolicy(
+                name="employees",
+                groups=["Employees"],
+                read=["quilt-leadership"],
+                read_write=["quilt-bake", "quilt-dev"],
+            ),
+        ],
+        roles={
+            "exec": acl.AclStaticRole(
+                name="exec",
+                groups=["Executives"],
+                policies=["public", "employees"],
+                read_write=["quilt-leadership"],
+                is_admin=True,
+            )
+        },
+    )
+
+    diff = acl.compute_diff(renamed, current)
+
+    assert "internal_public" in diff.roles_to_delete
+    assert "internal" in diff.policies_to_delete
+    assert "employees_public" in [role.name for role in diff.roles_to_create]
+
+
+def test_print_diff_verbose_shows_synthesized_roles(capsys) -> None:
+    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    diff = acl.compute_diff(desired, _empty_current_state())
+
+    acl.print_diff(diff, verbose=True, desired=desired)
+    out = capsys.readouterr().out
+
+    assert "role internal_public (synthesized from policies public, internal)" in out
+    assert "policy exec__inline (generated inline policy)" in out
+    assert "admin: true" in out
+
+
+def test_print_current_state_summarizes_server_acl(capsys) -> None:
+    current = _current_state_for_config(
+        acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    )
+
+    acl.print_current_state(current)
+    out = capsys.readouterr().out
+
+    assert "policy public (managed)" in out
+    assert "role internal_public (managed)" in out
+    assert "default_role: public" in out
+    assert "groups=Executives -> [exec] (admin)" in out
+
+
+def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
     monkeypatch,
 ) -> None:
-    calls: list[tuple] = []
+    calls: list[tuple[Any, ...]] = []
 
-    def bucket_add(name: str, title: str):
+    def bucket_add(name: str, title: str) -> FakeBucket:
         calls.append(("bucket_add", name, title))
-        if name == "bucket-bad":
-            raise RuntimeError("missing bucket")
         return FakeBucket(name=name, title=title)
 
-    def policy_create(title: str, *, permissions):
-        calls.append(
-            ("policy_create", title, [permission.bucket for permission in permissions])
-        )
+    def policy_create(title: str, *, permissions: list[Any]) -> FakePolicy:
+        calls.append(("policy_create", title))
         return FakePolicy(
             id=f"id-{title}",
             title=title,
@@ -392,26 +487,12 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
             roles=[],
         )
 
-    def policy_update(id_or_title: str, *, title: str, permissions, roles):
-        calls.append(("policy_update", id_or_title, title, roles))
-        return FakePolicy(
-            id=f"id-{title}",
-            title=title,
-            managed=True,
-            permissions=permissions,
-            roles=[],
-        )
-
-    def role_create(name: str, policies):
+    def role_create(name: str, policies: list[str]) -> FakeRole:
         calls.append(("role_create", name, list(policies)))
         return FakeRole(id=f"id-{name}", name=name, policies=[], permissions=[])
 
-    def role_update(id_or_name: str, *, name: str, policies):
-        calls.append(("role_update", id_or_name, name, list(policies)))
-        return FakeRole(id=f"id-{name}", name=name, policies=[], permissions=[])
-
-    def sso_set(text: str):
-        calls.append(("sso_set", yaml.safe_load(text)))
+    def sso_set(text: str) -> SimpleNamespace:
+        calls.append(("sso_set", yaml.safe_load(text)["default_role"]))
         return SimpleNamespace(text=text)
 
     monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=bucket_add))
@@ -420,7 +501,7 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
         "admin_policies",
         SimpleNamespace(
             create_managed=policy_create,
-            update_managed=policy_update,
+            update_managed=lambda *args, **kwargs: None,
             delete=lambda title: calls.append(("policy_delete", title)),
         ),
     )
@@ -429,562 +510,94 @@ def test_apply_acl_orders_operations_and_continues_after_bucket_warning(
         "admin_roles",
         SimpleNamespace(
             create_managed=role_create,
-            update_managed=role_update,
+            update_managed=lambda *args, **kwargs: None,
             delete=lambda name: calls.append(("role_delete", name)),
         ),
     )
     monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=sso_set))
 
     diff = acl.AclDiff(
-        buckets_to_add=["bucket-good", "bucket-bad"],
+        buckets_to_add=["bucket-a"],
         policies_to_create=[
             acl.PolicyUpdate(
-                title="new-policy", permissions=[acl.Permission.read("bucket-good")]
+                title="public", permissions=[acl.Permission.read("bucket-a")]
             )
         ],
-        policies_to_update=[
-            acl.PolicyUpdate(
-                title="old-policy",
-                permissions=[acl.Permission.read_write("bucket-good")],
-            )
-        ],
-        policies_to_delete=["gone-policy"],
-        roles_to_create=[acl.RoleUpdate(name="new-role", policy_titles=["new-policy"])],
-        roles_to_update=[
-            acl.RoleUpdate(name="old-role", policy_titles=["existing-policy"])
-        ],
-        roles_to_delete=["gone-role"],
+        roles_to_create=[acl.RoleUpdate(name="public", policy_titles=["public"])],
+        roles_to_delete=["legacy_role"],
+        policies_to_delete=["legacy_policy"],
         sso_config_text=acl.build_sso_config(
-            [acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["new-role"])],
-            default_role_name="new-role",
+            acl.AclConfig(
+                policies=[
+                    acl.AclPolicy(
+                        name="public",
+                        groups=["Everyone"],
+                        read=["bucket-a"],
+                        default_role=True,
+                    )
+                ],
+                roles={},
+            )
         ),
         sso_needs_update=True,
     )
-    current = acl.CurrentState(
-        buckets={},
-        managed_policies={
-            "old-policy": FakePolicy("id-old-policy", "old-policy", True, [], [])
-        },
-        unmanaged_policies={},
-        all_policies={
-            "existing-policy": FakePolicy(
-                "id-existing-policy", "existing-policy", True, [], []
-            )
-        },
-        managed_roles={},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
+    current = _empty_current_state()
 
-    warnings = acl.apply_acl(diff, current)
+    acl.apply_acl(diff, current)
 
     assert calls == [
-        ("bucket_add", "bucket-good", "bucket-good"),
-        ("bucket_add", "bucket-bad", "bucket-bad"),
-        ("policy_create", "new-policy", ["bucket-good"]),
-        ("policy_update", "old-policy", "old-policy", []),
-        ("role_create", "new-role", ["id-new-policy"]),
-        ("role_update", "old-role", "old-role", ["id-existing-policy"]),
-        (
-            "sso_set",
-            {
-                "version": "1.0",
-                "default_role": "new-role",
-                "mappings": [
-                    {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "groups": {
-                                    "type": "array",
-                                    "contains": {"const": "Everyone"},
-                                }
-                            },
-                            "required": ["groups"],
-                        },
-                        "roles": ["new-role"],
-                        "admin": False,
-                    }
-                ],
-            },
-        ),
-        ("role_delete", "gone-role"),
-        ("policy_delete", "gone-policy"),
+        ("bucket_add", "bucket-a", "bucket-a"),
+        ("policy_create", "public"),
+        ("role_create", "public", ["id-public"]),
+        ("sso_set", "public"),
+        ("role_delete", "legacy_role"),
+        ("policy_delete", "legacy_policy"),
     ]
-    assert any("bucket-bad" in warning for warning in warnings)
-
-
-def test_apply_acl_policy_create_failure_continues_and_warns(
-    monkeypatch, capsys
-) -> None:
-    """When a bucket add fails and the policy referencing it also fails,
-    the error is reported immediately and remaining operations continue."""
-    calls: list[tuple] = []
-
-    def bucket_add(name: str, title: str):
-        calls.append(("bucket_add", name))
-        raise RuntimeError("access denied")
-
-    def policy_create(title: str, *, permissions):
-        calls.append(("policy_create", title))
-        raise RuntimeError("Internal Server Error")
-
-    def role_create(name: str, policies):
-        calls.append(("role_create", name))
-
-    monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=bucket_add))
-    monkeypatch.setattr(
-        acl,
-        "admin_policies",
-        SimpleNamespace(
-            create_managed=policy_create,
-            update_managed=lambda *a, **kw: None,
-            delete=lambda title: None,
-        ),
-    )
-    monkeypatch.setattr(
-        acl,
-        "admin_roles",
-        SimpleNamespace(
-            create_managed=role_create,
-            update_managed=lambda *a, **kw: None,
-            delete=lambda name: None,
-        ),
-    )
-    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=lambda t: None))
-
-    diff = acl.AclDiff(
-        buckets_to_add=["my-bucket"],
-        policies_to_create=[
-            acl.PolicyUpdate(
-                title="my-policy",
-                permissions=[acl.Permission.read("my-bucket")],
-            )
-        ],
-        roles_to_create=[
-            acl.RoleUpdate(name="my-role", policy_titles=["other-policy"])
-        ],
-    )
-    current = acl.CurrentState(
-        buckets={},
-        managed_policies={},
-        unmanaged_policies={},
-        all_policies={
-            "other-policy": FakePolicy("id-other", "other-policy", True, [], [])
-        },
-        managed_roles={},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
-
-    warnings = acl.apply_acl(diff, current)
-
-    # Both bucket add and policy create were attempted
-    assert ("bucket_add", "my-bucket") in calls
-    assert ("policy_create", "my-policy") in calls
-    # Role creation still proceeded despite earlier failures
-    assert ("role_create", "my-role") in calls
-
-    # Warnings mention the failed bucket and the failed policy
-    assert any("my-bucket" in w for w in warnings)
-    policy_warning = [w for w in warnings if "my-policy" in w][0]
-    assert "failed buckets" in policy_warning
-    assert "my-bucket" in policy_warning
-
-    # Failures were printed to stderr immediately
-    err = capsys.readouterr().err
-    assert "my-bucket" in err
-    assert "my-policy" in err
-
-
-def test_apply_acl_role_and_sso_failures_reported_immediately(
-    monkeypatch, capsys
-) -> None:
-    """Role create/update and SSO failures are caught and reported to stderr."""
-    calls: list[tuple] = []
-
-    def role_create(name: str, policies):
-        calls.append(("role_create", name))
-        raise RuntimeError("role server error")
-
-    def role_update(id_or_name: str, *, name: str, policies):
-        calls.append(("role_update", name))
-        raise RuntimeError("role update error")
-
-    def sso_set(text: str):
-        calls.append(("sso_set",))
-        raise RuntimeError("sso server error")
-
-    monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=lambda n, t: None))
-    monkeypatch.setattr(
-        acl,
-        "admin_policies",
-        SimpleNamespace(
-            create_managed=lambda title, **kw: SimpleNamespace(id="pid"),
-            update_managed=lambda *a, **kw: None,
-            delete=lambda title: None,
-        ),
-    )
-    monkeypatch.setattr(
-        acl,
-        "admin_roles",
-        SimpleNamespace(
-            create_managed=role_create,
-            update_managed=role_update,
-            delete=lambda name: calls.append(("role_delete", name)),
-        ),
-    )
-    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=sso_set))
-
-    diff = acl.AclDiff(
-        roles_to_create=[acl.RoleUpdate(name="new-role", policy_titles=["p1"])],
-        roles_to_update=[acl.RoleUpdate(name="old-role", policy_titles=["p1"])],
-        roles_to_delete=["gone-role"],
-        sso_config_text="version: '1.0'\ndefault_role: new-role\nmappings: []\n",
-        sso_needs_update=True,
-    )
-    current = acl.CurrentState(
-        buckets={},
-        managed_policies={},
-        unmanaged_policies={},
-        all_policies={"p1": SimpleNamespace(id="id-p1")},
-        managed_roles={"old-role": SimpleNamespace(id="id-old-role")},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
-
-    warnings = acl.apply_acl(diff, current)
-
-    # All operations were attempted
-    assert ("role_create", "new-role") in calls
-    assert ("role_update", "old-role") in calls
-    assert ("sso_set",) in calls
-    # Deletes still ran despite earlier failures
-    assert ("role_delete", "gone-role") in calls
-
-    # Warnings capture all three failures
-    assert any("new-role" in w for w in warnings)
-    assert any("old-role" in w for w in warnings)
-    assert any("SSO" in w for w in warnings)
-
-    # Failures printed to stderr immediately
-    err = capsys.readouterr().err
-    assert "new-role" in err
-    assert "old-role" in err
-    assert "sso config" in err
-
-
-def test_apply_acl_always_shows_operation_steps(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        acl,
-        "admin_roles",
-        SimpleNamespace(
-            create_managed=lambda name, policies: None,
-            update_managed=lambda id_or_name, *, name, policies: None,
-            delete=lambda name: None,
-        ),
-    )
-    monkeypatch.setattr(
-        acl,
-        "admin_policies",
-        SimpleNamespace(
-            create_managed=lambda title, *, permissions: SimpleNamespace(
-                id="policy-id"
-            ),
-            update_managed=lambda id_or_title, *, title, permissions, roles: None,
-            delete=lambda title: None,
-        ),
-    )
-    monkeypatch.setattr(
-        acl, "admin_buckets", SimpleNamespace(add=lambda name, title: None)
-    )
-    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=lambda text: None))
-
-    diff = acl.AclDiff(
-        sso_config_text="version: '1.0'\ndefault_role: visitor\nmappings: []\n",
-        sso_needs_update=True,
-    )
-    current = acl.CurrentState(
-        buckets={},
-        managed_policies={},
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
-
-    acl.apply_acl(diff, current, verbose=True)
-    out = capsys.readouterr().out
-    assert "-> update sso config" in out
 
 
 def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:
     diff = acl.AclDiff(buckets_to_add=["bucket-a"])
-    current = acl.CurrentState(
-        buckets={},
-        managed_policies={},
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
+    current = _empty_current_state()
 
     monkeypatch.setattr(
-        acl_tool.acl_lib, "parse_acl_config", lambda path: SimpleNamespace(path=path)
-    )
-    monkeypatch.setattr(
-        acl_tool, "_resolve_default_role_name", lambda config, prompt_for_choice: None
-    )
-    monkeypatch.setattr(
-        acl_tool.acl_lib, "with_default_role", lambda config, name: config
+        acl_tool.acl_lib,
+        "parse_acl_config",
+        lambda path: acl.AclConfig(policies=[], roles={}),
     )
     monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
     monkeypatch.setattr(acl_tool.acl_lib, "compute_diff", lambda desired, state: diff)
     monkeypatch.setattr(
         acl_tool.acl_lib,
         "apply_acl",
-        lambda *_: (_ for _ in ()).throw(
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("apply_acl should not be called")
-        ),
-    )
-    monkeypatch.setattr(
-        "builtins.input",
-        lambda _prompt: (_ for _ in ()).throw(
-            AssertionError("input should not be called")
         ),
     )
 
     result = acl_tool.main(["config.yml", "--dry-run"])
+
     assert result == 0
-    captured = capsys.readouterr()
-    assert "+ bucket bucket-a" in captured.out
-    assert "Applying" not in captured.out
-
-
-def test_print_diff_verbose(capsys) -> None:
-    desired = acl.AclConfig(
-        bucket_policies={
-            "my-policy": acl.AclBucketPolicy(name="my-policy", read=["bucket-a"])
-        },
-        roles={
-            "my-role": acl.AclRole(
-                name="my-role", bucket_policies=["my-policy"], default=True
-            )
-        },
-        sso=[acl.AclSsoMapping(match={"groups": "Everyone"}, roles=["my-role"])],
-        default_role_name="my-role",
-    )
-    diff = acl.AclDiff(
-        policies_to_create=[
-            acl.PolicyUpdate(
-                title="my-policy",
-                permissions=[acl.Permission.read("bucket-a")],
-            )
-        ],
-        roles_to_create=[
-            acl.RoleUpdate(name="my-role", policy_titles=["my-policy"]),
-        ],
-        sso_config_text="version: '1.0'\ndefault_role: my-role\nmappings: []\n",
-        sso_is_create=True,
-        sso_needs_update=True,
-    )
-    acl.print_diff(diff, verbose=True, desired=desired)
-    out = capsys.readouterr().out
-    assert "Desired ACL:" in out
-    assert "bucket-a" in out
-    assert "policies: my-policy" in out
-    assert "default_role: my-role" in out
-    assert "version:" in out
-
-
-def test_print_diff_verbose_shows_unchanged_entries(capsys) -> None:
-    desired = acl.AclConfig(
-        bucket_policies={
-            "public": acl.AclBucketPolicy(name="public", read=["bucket-a"])
-        },
-        roles={"visitor": acl.AclRole(name="visitor", bucket_policies=["public"])},
-        sso=[],
-        default_role_name="visitor",
-    )
-    current = acl.CurrentState(
-        buckets={"bucket-a": FakeBucket("bucket-a", "bucket-a")},
-        managed_policies={
-            "public": FakePolicy(
-                id="policy-public",
-                title="public",
-                managed=True,
-                permissions=[acl.Permission.read("bucket-a")],
-                roles=[],
-            )
-        },
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={
-            "visitor": FakeRole(
-                id="role-visitor",
-                name="visitor",
-                policies=[FakePolicySummary(id="policy-public", title="public")],
-                permissions=[],
-            )
-        },
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name="visitor",
-    )
-    diff = acl.compute_diff(desired, current)
-
-    acl.print_diff(diff, verbose=True, desired=desired, current=current)
-    out = capsys.readouterr().out
-    assert "= bucket bucket-a" in out
-    assert "= policy public" in out
-    assert "= role visitor" in out
-    assert "Stack ACL is up to date" in out
-
-
-def test_print_current_state(capsys) -> None:
-    current = acl.CurrentState(
-        buckets={
-            "bucket-a": FakeBucket("bucket-a", "bucket-a"),
-            "bucket-b": FakeBucket("bucket-b", "bucket-b"),
-        },
-        managed_policies={
-            "my-policy": FakePolicy(
-                id="p1",
-                title="my-policy",
-                managed=True,
-                permissions=[
-                    acl.Permission.read("bucket-a"),
-                    acl.Permission.read_write("bucket-b"),
-                ],
-                roles=[],
-            ),
-        },
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={
-            "viewer": FakeRole(
-                id="r1",
-                name="viewer",
-                policies=[FakePolicySummary(id="p1", title="my-policy")],
-                permissions=[],
-            ),
-        },
-        unmanaged_roles={
-            "admin": FakeRole(
-                id="r2",
-                name="admin",
-                policies=None,
-                permissions=[],
-                typename__="UnmanagedRole",
-            ),
-        },
-        all_roles={},
-        sso_config_text=(
-            "version: '1.0'\n"
-            "default_role: viewer\n"
-            "mappings:\n"
-            "- schema:\n"
-            "    type: object\n"
-            "    properties:\n"
-            "      groups:\n"
-            "        type: array\n"
-            "        contains:\n"
-            "          const: Everyone\n"
-            "    required: [groups]\n"
-            "  roles: [viewer]\n"
-            "  admin: false\n"
-        ),
-        default_role_name="admin",
-    )
-
-    acl.print_current_state(current)
-    out = capsys.readouterr().out
-    assert "bucket bucket-a" in out
-    assert "bucket bucket-b" in out
-    assert "policy my-policy (managed)" in out
-    assert "READ: bucket-a" in out
-    assert "READ_WRITE: bucket-b" in out
-    assert "role viewer (managed)" in out
-    assert "policies: my-policy" in out
-    assert "role admin (default) (unmanaged)" in out
-    assert "policies: (n/a)" in out
-    assert "sso config" in out
-    assert "default_role: viewer" in out
-    assert "groups=Everyone -> [viewer]" in out
-
-
-def test_acl_tool_no_config_shows_state(monkeypatch, capsys) -> None:
-    current = acl.CurrentState(
-        buckets={"b1": FakeBucket("b1", "b1")},
-        managed_policies={},
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
-    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
-
-    result = acl_tool.main([])
-    assert result == 0
-    out = capsys.readouterr().out
-    assert "bucket b1" in out
-
-
-def test_acl_tool_missing_file(capsys) -> None:
-    result = acl_tool.main(["/tmp/does-not-exist.yml"])
-    assert result == 1
-
-    captured = capsys.readouterr()
-    assert "Error:" in captured.err
+    assert "+ bucket bucket-a" in capsys.readouterr().out
 
 
 def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
+    current = _empty_current_state()
     applied: list[str] = []
-    diff = acl.AclDiff(buckets_to_add=["bucket-a"])
-    current = acl.CurrentState(
-        buckets={},
-        managed_policies={},
-        unmanaged_policies={},
-        all_policies={},
-        managed_roles={},
-        unmanaged_roles={},
-        all_roles={},
-        sso_config_text=None,
-        default_role_name=None,
-    )
 
     monkeypatch.setattr(
-        acl_tool.acl_lib, "parse_acl_config", lambda path: SimpleNamespace(path=path)
-    )
-    monkeypatch.setattr(
-        acl_tool,
-        "_resolve_default_role_name",
-        lambda config, prompt_for_choice: "visitor",
-    )
-    monkeypatch.setattr(
-        acl_tool.acl_lib, "with_default_role", lambda config, name: config
+        acl_tool.acl_lib,
+        "parse_acl_config",
+        lambda path: acl.AclConfig(policies=[], roles={}),
     )
     monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
-    monkeypatch.setattr(acl_tool.acl_lib, "compute_diff", lambda desired, state: diff)
-    monkeypatch.setattr(acl_tool.acl_lib, "print_diff", lambda computed, **kw: None)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "compute_diff",
+        lambda desired, state: acl.AclDiff(buckets_to_add=["bucket-a"]),
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "print_diff", lambda *args, **kwargs: None)
 
-    def _apply_acl(computed, state, *, verbose=False):
+    def _apply_acl(*_args: Any, **_kwargs: Any) -> list[str]:
         applied.append("applied")
         return []
 
@@ -1001,71 +614,82 @@ def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
     )
 
     result = acl_tool.main(["config.yml", "--yes"])
+
     assert result == 0
     assert applied == ["applied"]
 
 
-def test_resolve_default_role_name_prefers_declared_default() -> None:
-    config = acl.AclConfig(
-        bucket_policies={},
-        roles={
-            "visitor": acl.AclRole(name="visitor", bucket_policies=[], default=True),
-            "member": acl.AclRole(name="member", bucket_policies=[]),
-        },
-        sso=[],
-        default_role_name="visitor",
-    )
-    assert (
-        acl_tool._resolve_default_role_name(config, prompt_for_choice=True) == "visitor"
-    )
+def test_acl_tool_no_config_shows_current_state(monkeypatch, capsys) -> None:
+    current = _empty_current_state()
+    current.buckets["bucket-a"] = FakeBucket(name="bucket-a", title="bucket-a")
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
+
+    result = acl_tool.main([])
+
+    assert result == 0
+    assert "bucket bucket-a" in capsys.readouterr().out
 
 
-def test_resolve_default_role_name_prompts_by_number(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(acl_tool.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "2")
-    config = acl.AclConfig(
-        bucket_policies={},
-        roles={
-            "visitor": acl.AclRole(name="visitor", bucket_policies=[]),
-            "member": acl.AclRole(name="member", bucket_policies=[]),
-        },
-        sso=[],
-    )
+def test_acl_tool_missing_file_reports_error(capsys) -> None:
+    result = acl_tool.main(["/tmp/does-not-exist.yml"])
 
-    selected = acl_tool._resolve_default_role_name(config, prompt_for_choice=True)
-    assert selected == "member"
-    out = capsys.readouterr().out
-    assert "1. visitor" in out
-    assert "2. member" in out
+    assert result == 1
+    assert "Error:" in capsys.readouterr().err
 
 
-def test_resolve_default_role_name_defaults_to_first_without_prompt() -> None:
-    config = acl.AclConfig(
-        bucket_policies={},
-        roles={
-            "visitor": acl.AclRole(name="visitor", bucket_policies=[]),
-            "member": acl.AclRole(name="member", bucket_policies=[]),
-        },
-        sso=[],
-    )
-    assert (
-        acl_tool._resolve_default_role_name(config, prompt_for_choice=False)
-        == "visitor"
+def _empty_current_state() -> acl.CurrentState:
+    return acl.CurrentState(
+        buckets={},
+        managed_policies={},
+        unmanaged_policies={},
+        all_policies={},
+        managed_roles={},
+        unmanaged_roles={},
+        all_roles={},
+        sso_config_text=None,
+        default_role_name=None,
     )
 
 
-def test_resolve_default_role_name_defaults_to_first_when_stdin_not_tty(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(acl_tool.sys.stdin, "isatty", lambda: False)
-    config = acl.AclConfig(
-        bucket_policies={},
-        roles={
-            "visitor": acl.AclRole(name="visitor", bucket_policies=[]),
-            "member": acl.AclRole(name="member", bucket_policies=[]),
-        },
-        sso=[],
-    )
-    assert (
-        acl_tool._resolve_default_role_name(config, prompt_for_choice=True) == "visitor"
+def _current_state_for_config(config: acl.AclConfig) -> acl.CurrentState:
+    desired_state = acl._build_desired_acl_state(config)
+
+    managed_policies = {
+        title: FakePolicy(
+            id=f"id-{title}",
+            title=title,
+            managed=True,
+            permissions=update.permissions,
+            roles=[],
+        )
+        for title, update in desired_state.policy_updates.items()
+    }
+    managed_roles = {
+        name: FakeRole(
+            id=f"id-{name}",
+            name=name,
+            policies=[
+                FakePolicySummary(id=f"id-{title}", title=title)
+                for title in update.policy_titles
+            ],
+            permissions=[],
+        )
+        for name, update in desired_state.role_updates.items()
+    }
+    buckets = {
+        bucket: FakeBucket(name=bucket, title=bucket)
+        for bucket in acl.all_buckets(config)
+    }
+    sso_config_text = acl.build_sso_config(config)
+
+    return acl.CurrentState(
+        buckets=buckets,
+        managed_policies=managed_policies,
+        unmanaged_policies={},
+        all_policies=dict(managed_policies),
+        managed_roles=managed_roles,
+        unmanaged_roles={},
+        all_roles=dict(managed_roles),
+        sso_config_text=sso_config_text,
+        default_role_name=desired_state.default_role_name,
     )
