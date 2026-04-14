@@ -1,0 +1,44 @@
+# Quilt Stack ACL: Licensed Datasets
+#
+# Each named policy declares:
+#   - the SSO groups that confer it
+#   - the permissions it grants (e.g. read access to specific buckets)
+#
+# A user qualifies for a policy if they belong to any of its listed groups.
+# Their effective role is the union of all policies they qualify for.
+
+policies:
+
+  public:
+    sso.groups:   [Everyone]
+    buckets.read: [shared-public]
+
+  alpha:
+    sso.groups:   [License-Alpha]
+    buckets.read: [licensed-alpha]
+
+  beta:
+    sso.groups:   [License-Beta]
+    buckets.read: [licensed-beta]
+
+  admin:
+    sso.groups:   [Staff]
+    buckets.read: ['*']
+    config.admin: true
+
+roles:
+
+  visitor:
+    policies: [public]
+
+  licensed:
+    policies: [public, alpha, beta]
+    default:  true
+
+  # Static exec role: composes policies AND grants buckets directly.
+  # Use direct bucket grants for role-specific access that doesn't
+  # warrant its own reusable policy.
+  exec:
+    policies:           [public, alpha, beta]
+    buckets.read:       [exec-reports]
+    buckets.read_write: [exec-workspace]

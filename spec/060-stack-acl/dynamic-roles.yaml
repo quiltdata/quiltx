@@ -1,0 +1,58 @@
+# Quilt Stack ACL: Licensed Datasets Example
+
+bucket_policies:
+  alpha:
+    read:
+      - licensed-alpha
+  beta:
+    read:
+      - licensed-beta
+  public:
+    read:
+      - shared-public
+
+# Conditions are a flat map. Each condition evaluates to true/false
+# against the authenticated user's SSO claims at runtime.
+conditions:
+  can_read_alpha:
+    match:
+      groups: License-Alpha
+  can_read_beta:
+    match:
+      groups: License-Beta
+
+roles:
+  visitor:
+    bucket_policies: [public]
+
+  licensed_all:
+    bucket_policies: [public, alpha, beta]
+
+  staff:
+    bucket_policies: [public, alpha, beta]
+    default: true
+
+  # Dynamic role: bucket_policies resolved at runtime per-user.
+  # An !if whose condition is false produces nothing (item is omitted).
+  licensed_variable:
+    bucket_policies:
+      - public
+      - !if [can_read_alpha, alpha]
+      - !if [can_read_beta, beta]
+
+sso:
+  - match:
+      groups: Staff
+    roles: [staff]
+    admin: true
+
+  # !nonempty-subset derives its list from the conditions block,
+  # so there's one source of truth for which groups matter.
+  # "at least one condition must be true" to match this rule.
+  - match:
+      conditions: !nonempty-subset [can_read_alpha, can_read_beta]
+    roles: [licensed_variable]
+
+  - match:
+      groups: Everyone
+    roles: [visitor]

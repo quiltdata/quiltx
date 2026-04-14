@@ -1,0 +1,42 @@
+# Quilt Stack ACL: simpler-stack
+
+## Policies
+
+# Each named policy declares:
+#   - the SSO groups that confer it
+#   - the permissions it grants
+#
+# A user qualifies for a policy if they belong to any of its listed groups.
+# Their dynamic role is the union of all policies they qualify for.
+
+policies:
+
+  # Since all users are members of Everyone,
+  # the two dynamic roles created by these policies are:
+  #   - public           (non-Employees)
+  #   - internal_public  (Employees)
+
+  public:
+    sso.groups:          [Everyone]
+    buckets.read:        [quilt-example]
+    config.default_role: true
+
+  internal:
+    sso.groups:         [Employees]
+    buckets.read_write: [quilt-bake, quilt-dev]
+    buckets.read:       [quilt-leadership]
+
+## Roles
+
+# Each static role composes only the explicitly specified policies and/or grants.
+# Users can match (and have) multiple static and dynamic roles.
+# The last-matching role is selected at first login,
+# the last-used role is selected thereafter.
+
+roles:
+
+  exec:
+    sso.groups:         [Executives]
+    config.policies:    [public, internal]
+    buckets.read_write: [quilt-leadership]
+    config.is_admin:    true
