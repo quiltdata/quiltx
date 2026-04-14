@@ -7,12 +7,12 @@
 #   - the permissions it grants
 #
 # A user qualifies for a policy if they belong to any of its listed groups.
-# Their dynamic role is the union of all policies they qualify for.
+# Their synthetic role is the union of all policies they qualify for.
 
 policies:
 
   # Since all users are members of Everyone,
-  # the two dynamic roles created by these policies are:
+  # the two synthetic roles created by these policies are:
   #   - public           (non-Employees)
   #   - internal_public  (Employees)
 
@@ -29,7 +29,7 @@ policies:
 ## Roles
 
 # Each static role composes only the explicitly specified policies and/or grants.
-# Users can match (and have) multiple static and dynamic roles.
+# Users can match (and have) multiple static and synthetic roles.
 # The last-matching role is selected at first login,
 # the last-used role is selected thereafter.
 
