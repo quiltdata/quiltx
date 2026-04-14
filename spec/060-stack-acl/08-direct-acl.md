@@ -37,22 +37,43 @@ A config has exactly two top-level keys: `policies:` and `roles:`.
 | `roles.Y.config.is_admin: true` | `admin: true` on the corresponding SSO mapping |
 | `sso.groups` anywhere | Emitted as a Quilt SSO mapping: `groups contains <group> → [<role>]` |
 
-### Dynamic-role synthesis (the one non-trivial rule)
+### Synthetic-role synthesis (the one non-trivial rule)
 
-The order of entries under `policies:` declares a cumulative audience ladder:
-each subsequent policy targets a subset of the audience of the prior ones.
-For each policy P (index i), synthesize one managed role whose policies are
-the union `{policies[0], policies[1], …, policies[i]}`. The role name is the
-underscore-joined policy names in reverse index order (e.g. `internal_public`
-for the second entry in the demo file), matching the comment convention.
+The order of entries under `policies:` declares a cumulative audience
+**ladder**: each subsequent policy's audience must be a subset of every
+prior policy's audience. For each policy P (index i), synthesize one
+managed role whose policies are the union
+`{policies[0], policies[1], …, policies[i]}`. The role name is the
+underscore-joined policy names in reverse index order (e.g.
+`internal_public` for the second entry in the demo file), matching the
+comment convention.
 
 Each policy emits **one SSO mapping per listed group**, pointing at *its own*
 synthesized role. Quilt's last-matching-wins rule gives users in more
 privileged groups the wider role automatically — no per-subset enumeration
 needed.
 
-This semantics is a contract: document it explicitly. Any reordering of
-`policies:` changes who gets what.
+**Safety: the subset property is load-bearing and must be validated, not
+assumed.** If policy i's groups are not a subset of policy j's groups (for
+every j < i), the cumulative-union rule silently overgrants: e.g.
+`public: [Contractors]` followed by `finance: [Executives]` would produce
+`finance_public` and grant `public` bucket access to Executives who were
+never in the `public` audience. The parser MUST reject any config that
+violates this nesting. Two enforcement options:
+
+- **Declarative (preferred):** require the author to spell out group
+  containment in a top-level `groups:` section (e.g.
+  `Employees: { subset_of: [Everyone] }`), and reject a ladder whose
+  i-th policy is not a subset of every prior policy under that declared
+  hierarchy.
+- **Syntactic-only fallback:** require that each policy's `sso.groups`
+  is a (non-strict) subset of the immediately prior policy's `sso.groups`
+  as written. This is weaker — it cannot express "Employees ⊂ Everyone"
+  unless both groups are listed — but it is unambiguous from the YAML
+  alone.
+
+Pick one and document it in user-facing errors. The order-matters contract
+only becomes safe once this check exists.
 
 ## Tasks
 
@@ -75,6 +96,17 @@ This semantics is a contract: document it explicitly. Any reordering of
   - Validate `config.policies` in a static role refer to known `policies:`
     entries.
   - Enforce at most one `config.default_role: true` across all policies.
+  - **Enforce the ladder subset property** (see "Synthetic-role synthesis"
+    above) and reject a violating config with an error that names the two
+    offending policies and the groups that break the chain.
+  - **Reserve the `__inline` suffix** on policy titles: reject any
+    top-level `policies.X` whose name ends in `__inline`, and reject any
+    static role named `Y` where the user has also declared a top-level
+    policy called `Y__inline`. Synthetic role names (the underscore-joined
+    cumulative names) must also not collide with any user-declared
+    `policies.*` or `roles.*` entry; if they do, reject with a clear error
+    naming the collision. Reserving these name shapes up front avoids the
+    unmanaged-collision warn-and-skip path for generator-owned artifacts.
 - Rewrite `all_buckets()` to walk the new shape.
 
 ### 2. Rewrite the diff/apply core (`quiltx/acl.py`)
@@ -85,8 +117,24 @@ This semantics is a contract: document it explicitly. Any reordering of
   - Managed-role set = one synthetic role per policy index + one
     per static role.
   - Keep the same unmanaged-collision → warn-and-skip behaviour.
-  - Keep the same "don't delete roles referenced by SSO or marked default"
-    rules.
+  - **Delete-protection must use the desired-state SSO and default role,
+    not the server's current SSO/default.** The existing code protects any
+    role still referenced by `current.sso_config_text` or equal to
+    `current.default_role_name`. That rule is correct when role names are
+    author-controlled and stable, but synthetic role names change on
+    policy rename/reorder or default-role change. If we kept the
+    current-state protection, the first apply would install new SSO and
+    new synthetic roles while the old synthetic roles would survive
+    because they are still referenced by the *pre-apply* SSO snapshot —
+    forcing a second `stack acl` run to clean them up. Instead:
+    - Compute the protection set from the **desired** SSO + desired
+      default role, so roles that the new config no longer references
+      are queued for deletion in the same pass.
+    - Still never delete unmanaged roles; still warn on any protected
+      role that the author has explicitly removed.
+  - **Apply order must place SSO update before role deletes** (it
+    already does in the current `apply_acl()` — preserve that). Otherwise
+    the server would briefly reference a deleted role.
 - `build_sso_config()`:
   - Emit one mapping per policy-group pair → synthetic role.
   - Emit one mapping per static-role-group pair → static role, with
@@ -170,9 +218,16 @@ Update / rewrite `tests/test_acl.py`:
   - One mapping per `(group, role)` pair.
   - `default_role` populated iff a policy has `config.default_role: true`.
 - **Diff / apply**
-  - Re-running against the already-applied state prints "up to date".
+  - Re-running an unchanged config against the already-applied state
+    prints "up to date" (true idempotency — no second pass needed).
   - Unmanaged-name collisions warn and skip (preserve existing behaviour).
   - Changing a policy's groups moves the corresponding SSO mapping.
+  - **Rename / reorder cleanup in a single pass**: starting from a stack
+    already reconciled to config A, a single run of `stack acl B` where
+    B renames a policy, reorders `policies:`, or moves
+    `config.default_role` must produce an empty diff on the *second*
+    run. Assert this explicitly — it is the regression test for the
+    desired-state-protection fix in `compute_diff()`.
 
 Keep the Quilt `admin.*` modules mocked as today; do not add network tests.
 
@@ -225,4 +280,16 @@ parser.
 3. Manual: `./poe run stack acl spec/060-stack-acl/demo-stack-acl.yml` —
    must fail with a message pointing at the new format.
 4. Manual: apply with `--yes`, verify in the Quilt admin UI, then re-run —
-   must print "Stack ACL is up to date".
+   must print "Stack ACL is up to date". **This promise depends on the
+   desired-state-protection rule in `compute_diff()`**: if the second run
+   still shows stale synthetic roles queued for deletion, the delete-
+   protection set is being computed from the current SSO snapshot instead
+   of the desired one — fix `compute_diff()` before shipping.
+5. Manual: starting from a stack reconciled to `simpler-stack-acl.yml`,
+   rename `internal` → `employees` in the same file and apply — the
+   second re-run must still print "up to date" with no leftover
+   `internal_public` managed role.
+6. Manual: feed a deliberately-broken ladder (e.g. `public:
+   [Contractors]` then `finance: [Executives]`) — the parser must
+   refuse it with an error that names both policies and the groups
+   that violate the subset requirement.
