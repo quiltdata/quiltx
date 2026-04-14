@@ -109,6 +109,38 @@ sso:
         raise AssertionError("Expected ValueError")
 
 
+def test_parse_acl_config_rejects_reserved_inline_policy_suffix(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+bucket_policies:
+  visitor__inline:
+    read: [bucket-a]
+roles: {}
+""")
+
+    with pytest.raises(ValueError, match="reserved for generated inline-role policies"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_role_name_conflicting_with_inline_policy(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+bucket_policies:
+  visitor__inline:
+    read: [bucket-a]
+roles:
+  visitor:
+    bucket_policies: []
+""")
+
+    with pytest.raises(ValueError, match="reserved for generated inline-role policies"):
+        acl.parse_acl_config(config_path)
+
+
 def test_build_sso_config_omits_default_role() -> None:
     text = acl.build_sso_config(
         [

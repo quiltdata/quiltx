@@ -16,6 +16,8 @@ from quilt3.admin import roles as admin_roles
 from quilt3.admin import sso_config as admin_sso_config
 from quilt3.admin.types import Permission
 
+INLINE_POLICY_SUFFIX = "__inline"
+
 
 @dataclass(frozen=True)
 class AclBucketPolicy:
@@ -121,6 +123,12 @@ def parse_acl_config(path: str | Path) -> AclConfig:
     for name, value in raw_bucket_policies.items():
         if not isinstance(name, str):
             raise ValueError("Bucket policy names must be strings")
+        if name.endswith(INLINE_POLICY_SUFFIX):
+            raise ValueError(
+                "Bucket policy names may not end with "
+                f"'{INLINE_POLICY_SUFFIX}'; that suffix is reserved for generated "
+                "inline-role policies"
+            )
         if not isinstance(value, dict):
             raise ValueError(f"Bucket policy '{name}' must be a mapping")
         read = _coerce_string_list(
@@ -142,6 +150,12 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError("Role names must be strings")
         if not isinstance(value, dict):
             raise ValueError(f"Role '{name}' must be a mapping")
+        reserved_policy_name = f"{name}{INLINE_POLICY_SUFFIX}"
+        if reserved_policy_name in raw_bucket_policies:
+            raise ValueError(
+                f"Role '{name}' conflicts with reserved inline policy name "
+                f"'{reserved_policy_name}'"
+            )
         policy_names = _coerce_string_list(
             value.get("bucket_policies", []), f"roles.{name}.bucket_policies"
         )
