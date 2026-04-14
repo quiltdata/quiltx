@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.0] - Unreleased
 
+### Added
+
+- `quiltx bucket add --stack-only` flag to restrict the bucket policy principal to the stack's RegistryRoleARN instead of the entire control account
+- Direct-ACL specification (`spec/060-stack-acl/08-direct-acl.md`) and example YAML files (`dynamic-roles.yaml`, `static-policies.yaml`)
+
 ### Changed
 
 - **BREAKING**: `quiltx stack acl` now only accepts the flat `policies:` / `roles:` format; the old `bucket_policies:` / `roles:` / `sso:` schema is rejected

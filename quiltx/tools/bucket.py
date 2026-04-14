@@ -58,6 +58,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the post-add registration/read verification.",
     )
+    add_parser.add_argument(
+        "--stack-only",
+        action="store_true",
+        help=(
+            "Restrict the bucket policy principal to the stack's RegistryRoleARN "
+            "instead of the entire control account."
+        ),
+    )
 
     subparsers.add_parser(
         "list",
@@ -130,6 +138,16 @@ def _cmd_add(args: argparse.Namespace) -> int:
         control_principal_arn = _load_control_principal_arn(
             stack_payload, control_account_id
         )
+        if (
+            args.stack_only
+            and control_principal_arn == f"arn:aws:iam::{control_account_id}:root"
+        ):
+            print(
+                "Error: --stack-only requires a RegistryRoleARN in stack outputs, "
+                "but none was found.",
+                file=sys.stderr,
+            )
+            return 1
         stack_name = _stack_payload_value(stack_payload, "stack_name", "unknown")
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
         catalog_url = str(config.get("navigator_url") or catalog_name)
@@ -151,8 +169,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
         )
+        bucket_principal_arn = control_principal_arn if args.stack_only else None
         quilt_statement = bucket_lib.build_quilt_policy_statement(
-            args.bucket_name, control_account_id
+            args.bucket_name, control_account_id, principal_arn=bucket_principal_arn
         )
         merged_policy = bucket_lib.merge_bucket_policy(bucket_policy, quilt_statement)
 

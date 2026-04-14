@@ -1259,3 +1259,133 @@ def test_add_bucket_defaults_title_to_bucket_name(monkeypatch) -> None:
     result = add_bucket("my-data")
     assert result.title == "my-data"
     assert result.already_registered is True
+
+
+# -- Tests for --stack-only / principal_arn --
+
+
+def test_build_quilt_policy_statement_with_principal_arn() -> None:
+    """When principal_arn is given, the statement uses it instead of account root."""
+    role_arn = "arn:aws:iam::123456789012:role/quilt-registry"
+    statement = bucket_lib.build_quilt_policy_statement(
+        "demo-bucket", "123456789012", principal_arn=role_arn
+    )
+    assert statement["Principal"] == {"AWS": role_arn}
+    assert statement["Resource"] == [
+        "arn:aws:s3:::demo-bucket",
+        "arn:aws:s3:::demo-bucket/*",
+    ]
+
+
+def test_build_quilt_policy_statement_without_principal_arn_uses_root() -> None:
+    """Without principal_arn, falls back to account root (existing behavior)."""
+    statement = bucket_lib.build_quilt_policy_statement("demo-bucket", "123456789012")
+    assert statement["Principal"] == {"AWS": "arn:aws:iam::123456789012:root"}
+
+
+def test_add_bucket_stack_only_no_registry_role(monkeypatch) -> None:
+    """stack_only=True errors when stack has no RegistryRoleARN."""
+    _stub_stack_and_config(
+        monkeypatch, payload={"account_id": "123456789012", "outputs": []}
+    )
+    _install_fake_quilt3(monkeypatch)
+
+    try:
+        add_bucket("bucket", stack_only=True)
+    except ValueError as exc:
+        assert "RegistryRoleARN" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for missing RegistryRoleARN")
+
+
+def test_cmd_add_stack_only_no_registry_role(monkeypatch, capsys) -> None:
+    """CLI --stack-only exits 1 when stack has no RegistryRoleARN."""
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+
+    session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
+    monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
+    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: {"account_id": "123456789012", "outputs": []},
+    )
+    _install_fake_quilt3(monkeypatch, get_result=None)
+
+    assert bucket_tool.main(["add", "bucket", "--stack-only", "--yes"]) == 1
+    captured = capsys.readouterr()
+    assert "RegistryRoleARN" in captured.err
+
+    s3_stubber.deactivate()
+
+
+def test_cmd_add_stack_only_dry_run(monkeypatch, capsys) -> None:
+    """--stack-only --dry-run shows the role ARN as the bucket policy principal."""
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        service_message="No bucket policy",
+        expected_params={"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+
+    sts_client = _client("sts", region_name="us-west-2")
+    sts_stubber = Stubber(sts_client)
+    sts_stubber.add_response(
+        "get_caller_identity",
+        {
+            "Account": "111122223333",
+            "Arn": "arn:aws:iam::111122223333:user/test",
+            "UserId": "test",
+        },
+        {},
+    )
+    sts_stubber.activate()
+
+    session = FakeSession(s3_client, _client("sns", "us-west-2"), sts_client)
+    monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
+    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: {
+            "account_id": "123456789012",
+            "stack_name": "quilt-demo-stack",
+            "region": "us-east-1",
+            "outputs": [
+                {
+                    "OutputKey": "RegistryRoleARN",
+                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+                }
+            ],
+        },
+    )
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+
+    assert bucket_tool.main(["add", "bucket", "--stack-only", "--dry-run"]) == 0
+    captured = capsys.readouterr()
+    # The bucket policy principal should be the role, NOT account root
+    assert "arn:aws:iam::123456789012:role/quilt-registry" in captured.out
+    assert "arn:aws:iam::123456789012:root" not in captured.out
+
+    s3_stubber.deactivate()
+    sts_stubber.deactivate()
