@@ -14,7 +14,7 @@ from rich.table import Table
 
 from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
-from quiltx.config import get_catalog_config
+from quiltx.config import auto_login, get_catalog_config
 from quiltx.utils import get_bucket_region
 
 
@@ -129,6 +129,7 @@ def _ensure_stack_payload(
     return payload
 
 
+@auto_login
 def _cmd_add(args: argparse.Namespace) -> int:
     try:
         config = get_catalog_config()
@@ -257,10 +258,13 @@ def _cmd_add(args: argparse.Namespace) -> int:
         print()
         return _verify_bucket_registration_and_access(args.bucket_name)
     except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
 
+@auto_login
 def _cmd_list() -> int:
     try:
         from quilt3.admin import buckets as admin_buckets
@@ -282,6 +286,8 @@ def _cmd_list() -> int:
         console.print(table)
         return 0
     except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -290,6 +296,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
     return _verify_bucket_registration_and_access(args.bucket_name)
 
 
+@auto_login
 def _verify_bucket_registration_and_access(bucket_name: str) -> int:
     import quilt3
     from quilt3.admin import buckets as admin_buckets
@@ -311,6 +318,8 @@ def _verify_bucket_registration_and_access(bucket_name: str) -> int:
         print(f"OK: control account can read {bucket_uri}")
         return 0
     except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
         print(
             f"Control account cannot read {bucket_uri}: {exc}",
             file=sys.stderr,
