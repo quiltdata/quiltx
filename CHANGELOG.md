@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `quiltx bucket add --stack-only` flag to restrict the bucket policy principal to the stack's RegistryRoleARN instead of the entire control account
 - Direct-ACL specification (`spec/060-stack-acl/08-direct-acl.md`) and example YAML files (`dynamic-roles.yaml`, `static-policies.yaml`)
+- `quiltx stack catalog --ca-bundle PATH` and `--insecure` flags for catalogs behind corporate TLS-inspection proxies or with self-signed certificates
 
 ### Changed
 

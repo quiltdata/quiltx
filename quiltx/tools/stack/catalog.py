@@ -7,6 +7,7 @@ import sys
 
 import quiltx
 from quiltx import stack as stack_lib
+from quiltx.tls import apply_tls_overrides
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,12 +24,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--token",
         help="API token for authentication",
     )
+    parser.add_argument(
+        "--ca-bundle",
+        metavar="PATH",
+        help=(
+            "Path to a PEM file of trusted CA certificates (e.g. a corporate root). "
+            "Also exported as SSL_CERT_FILE/REQUESTS_CA_BUNDLE for this process."
+        ),
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS certificate verification. Use only on trusted networks.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    try:
+        apply_tls_overrides(ca_bundle=args.ca_bundle, insecure=args.insecure)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     try:
         if not args.catalog_url:

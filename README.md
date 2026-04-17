@@ -97,6 +97,24 @@ uvx quiltx stack acl config.yml
 uvx quiltx stack acl config.yml --yes
 ```
 
+## Catalogs behind corporate TLS proxies
+
+If `quiltx stack catalog <url>` fails with `CERTIFICATE_VERIFY_FAILED` (common
+on networks with TLS-inspection proxies or self-signed catalog certs), point
+Python at your organization's CA bundle:
+
+```bash
+# Preferred: trust your corporate root CA
+uvx quiltx stack catalog https://quilt.example.com --ca-bundle /path/to/corp-root.pem
+
+# Escape hatch: skip TLS verification (trusted networks only)
+uvx quiltx stack catalog https://quilt.example.com --insecure
+```
+
+`--ca-bundle` also exports `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` for the
+current process. To make the override stick across other `quiltx` subcommands,
+export `SSL_CERT_FILE=/path/to/corp-root.pem` in your shell profile.
+
 ## ECS
 
 ```bash
