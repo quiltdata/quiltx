@@ -39,7 +39,7 @@ def apply_tls_overrides(ca_bundle: str | None = None, insecure: bool = False) ->
             pass
 
         try:
-            import requests  # type: ignore
+            import requests  # type: ignore[import-untyped,unused-ignore]
 
             _orig = requests.Session.merge_environment_settings
 

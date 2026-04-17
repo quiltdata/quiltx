@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
 def _ensure_stack_payload(
     config: Mapping[str, Any], catalog_name: str
 ) -> Mapping[str, Any]:
-    """Load cached stack payload, discovering and caching it if missing."""
+    """Load cached stack payload, or derive a lightweight one from the Quilt session."""
     payload = stack_lib.load_stack_payload(catalog_name)
     if payload is not None:
         return payload
@@ -111,22 +111,58 @@ def _ensure_stack_payload(
     region = stack_lib.resolve_region(config, catalog_config)
 
     print(f"Discovering stack for {catalog_name}...")
-    stack_info = stack_lib.find_matching_stack(catalog_url, region=region)
-    log_groups = stack_lib.list_log_group_resources(
-        stack_info["StackName"], region=region
-    )
-    stack_lib.write_stack_payload(
-        catalog_name,
-        catalog_url,
-        region,
-        stack_info,
-        log_groups,
-        catalog_config=catalog_config,
-    )
-    payload = stack_lib.load_stack_payload(catalog_name)
-    if payload is None:
-        raise ValueError("Failed to cache stack metadata.")
-    return payload
+    try:
+        stack_info = stack_lib.find_matching_stack(catalog_url, region=region)
+        log_groups = stack_lib.list_log_group_resources(
+            stack_info["StackName"], region=region
+        )
+        stack_lib.write_stack_payload(
+            catalog_name,
+            catalog_url,
+            region,
+            stack_info,
+            log_groups,
+            catalog_config=catalog_config,
+        )
+        cached = stack_lib.load_stack_payload(catalog_name)
+        if cached is not None:
+            return cached
+    except Exception as exc:
+        print(
+            f"CloudFormation discovery unavailable ({exc}); "
+            "using Quilt session identity for account/region.",
+            file=sys.stderr,
+        )
+
+    return _lightweight_stack_payload(catalog_name, catalog_url, region, catalog_config)
+
+
+def _lightweight_stack_payload(
+    catalog_name: str,
+    catalog_url: str,
+    region: str,
+    catalog_config: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Build an in-memory stack payload from the Quilt session (no CFN calls)."""
+    from quilt3.session import get_boto3_session
+
+    session = get_boto3_session()
+    account_id = session.client("sts").get_caller_identity()["Account"]
+
+    return {
+        "catalog_name": catalog_name,
+        "catalog_url": catalog_url,
+        "web_url": catalog_url,
+        "region": region,
+        "account_id": account_id,
+        "stack_name": None,
+        "stack_id": None,
+        "outputs": [],
+        "parameters": [],
+        "log_groups": [],
+        "ecs_resources": [],
+        "catalog_config": dict(catalog_config),
+    }
 
 
 @auto_login
@@ -144,8 +180,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
             and control_principal_arn == f"arn:aws:iam::{control_account_id}:root"
         ):
             print(
-                "Error: --stack-only requires a RegistryRoleARN in stack outputs, "
-                "but none was found.",
+                "Error: --stack-only requires a RegistryRoleARN from stack outputs, "
+                "which needs CloudFormation access. Run 'quiltx stack' from a shell "
+                "with cloudformation:DescribeStacks in the catalog account first.",
                 file=sys.stderr,
             )
             return 1
