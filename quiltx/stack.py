@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import ssl
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -30,11 +32,36 @@ def extract_catalog_name(config: Mapping[str, Any]) -> str:
     return parsed.hostname
 
 
+def _quilt_cfn_client(region: str | None) -> Any:
+    """Return a CloudFormation client using Quilt-issued stack credentials.
+
+    Falls back to the default boto3 session if quilt3 is not logged in.
+    """
+    try:
+        from quilt3.session import get_boto3_session
+
+        return get_boto3_session().client("cloudformation", region_name=region)
+    except Exception:
+        import boto3
+
+        return boto3.client("cloudformation", region_name=region)
+
+
+def _default_ssl_context() -> ssl.SSLContext | None:
+    """Build an SSL context honoring SSL_CERT_FILE/REQUESTS_CA_BUNDLE if set."""
+    ca_bundle = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE")
+    if ca_bundle and os.path.isfile(ca_bundle):
+        return ssl.create_default_context(cafile=ca_bundle)
+    return None
+
+
 def fetch_catalog_config(
-    catalog_url: str, opener: Callable[[str], Any] = urllib.request.urlopen
+    catalog_url: str, opener: Callable[..., Any] = urllib.request.urlopen
 ) -> Mapping[str, Any]:
     config_url = catalog_url.rstrip("/") + "/config.json"
-    with opener(config_url) as response:
+    context = _default_ssl_context()
+    kwargs = {"context": context} if context is not None else {}
+    with opener(config_url, **kwargs) as response:
         return json.load(response)
 
 
@@ -89,9 +116,7 @@ def find_matching_stack(
 
     # Create CloudFormation client if not provided
     if cfn_client is None:
-        import boto3
-
-        cfn_client = boto3.client("cloudformation", region_name=region)
+        cfn_client = _quilt_cfn_client(region)
 
     expected_host = get_hostname(catalog_url)
     paginator = cfn_client.get_paginator("describe_stacks")
@@ -133,9 +158,7 @@ def list_log_group_resources(
     if cfn_client is None:
         if region is None:
             raise ValueError("Either region or cfn_client must be provided")
-        import boto3
-
-        cfn_client = boto3.client("cloudformation", region_name=region)
+        cfn_client = _quilt_cfn_client(region)
 
     paginator = cfn_client.get_paginator("list_stack_resources")
     log_groups = []
@@ -172,9 +195,7 @@ def list_ecs_resources(
     if cfn_client is None:
         if region is None:
             raise ValueError("Either region or cfn_client must be provided")
-        import boto3
-
-        cfn_client = boto3.client("cloudformation", region_name=region)
+        cfn_client = _quilt_cfn_client(region)
 
     paginator = cfn_client.get_paginator("list_stack_resources")
     ecs_resources: list[dict[str, str]] = []

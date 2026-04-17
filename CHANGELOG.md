@@ -6,12 +6,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.0] - Unreleased
+## [0.9.0] - 2026-04-17
 
 ### Added
 
 - `quiltx bucket add --stack-only` flag to restrict the bucket policy principal to the stack's RegistryRoleARN instead of the entire control account
 - Direct-ACL specification (`spec/060-stack-acl/08-direct-acl.md`) and example YAML files (`dynamic-roles.yaml`, `static-policies.yaml`)
+- `quiltx stack catalog --ca-bundle PATH` and `--insecure` flags for catalogs behind corporate TLS-inspection proxies or with self-signed certificates
 
 ### Changed
 
@@ -19,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `quiltx stack acl` now synthesizes cumulative managed roles from policy order, generates inline managed policies for static-role bucket grants, and derives SSO mappings directly from policy and role audiences
 - `quiltx stack acl` no longer prompts for a default role; `config.default_role: true` on a policy controls the emitted SSO default role
 - Stack ACL docs now use `spec/060-stack-acl/simpler-stack-acl.yml` as the canonical example and explain the order-sensitive synthetic role model
+- CloudFormation discovery now uses `quilt3.session.get_boto3_session()` when available, so `quiltx bucket` and stack discovery work for users who have run `quilt3 login` without needing CFN permissions on their own AWS identity
+- `quiltx bucket` commands are wrapped with `@auto_login`, re-prompting for `quilt3 login` on auth errors
 
 ### Fixed
 
