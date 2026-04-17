@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-04-17
+
 ### Added
 
 - `quiltx bucket add --principal ARN` flag to set the IAM principal(s) granted cross-account access in the bucket policy. Repeatable or comma-separated. Bare `--principal` prints guidance on choosing Quilt service role ARNs.
