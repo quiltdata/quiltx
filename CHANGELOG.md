@@ -8,9 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `quiltx bucket add --principal ARN` flag to set the IAM principal(s) granted cross-account access in the bucket policy. Repeatable or comma-separated. Bare `--principal` prints guidance on choosing Quilt service role ARNs.
+
+### Removed
+
+- `quiltx bucket add --stack-only` flag. It restricted the bucket policy to the stack's `RegistryRoleARN`, which is the ECS task execution role — not a role Quilt uses to access data buckets. Quilt does not publish an official list of roles for the bucket policy; the documented principal is the control account root. Use `--principal ARN` if you want to narrow access yourself.
+
 ### Changed
 
-- `quiltx bucket add` no longer requires CloudFormation access in any account: when the Quilt stack role lacks `cloudformation:DescribeStacks`, it derives `account_id` from `sts:GetCallerIdentity` on the Quilt session and reads `region` from the catalog `config.json`. `--stack-only` still needs CFN to read `RegistryRoleARN`.
+- `quiltx bucket add` no longer requires CloudFormation access in any account: when the Quilt stack role lacks `cloudformation:DescribeStacks`, it derives `account_id` from `sts:GetCallerIdentity` on the Quilt session and reads `region` from the catalog `config.json`.
 
 ## [0.9.0] - 2026-04-17
 
