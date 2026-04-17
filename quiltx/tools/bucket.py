@@ -59,11 +59,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the post-add registration/read verification.",
     )
     add_parser.add_argument(
-        "--stack-only",
-        action="store_true",
+        "--principal",
+        metavar="ARN",
+        action="append",
+        nargs="?",
+        const="",
         help=(
-            "Restrict the bucket policy principal to the stack's RegistryRoleARN "
-            "instead of the entire control account."
+            "IAM role ARN(s) granted cross-account access in the bucket policy. "
+            "Repeatable or comma-separated. Defaults to the control account root. "
+            "Use the bare flag (no value) to print guidance on choosing principals."
         ),
     )
 
@@ -168,25 +172,25 @@ def _lightweight_stack_payload(
 @auto_login
 def _cmd_add(args: argparse.Namespace) -> int:
     try:
+        principals, show_guidance = _resolve_principals_arg(args.principal)
+        if show_guidance:
+            _print_principal_guidance()
+            return 0
+        for principal in principals:
+            if not principal.startswith("arn:aws:iam::"):
+                print(
+                    f"Error: --principal must be an IAM role ARN, got {principal!r}",
+                    file=sys.stderr,
+                )
+                return 1
+
         config = get_catalog_config()
         catalog_name = stack_lib.extract_catalog_name(config)
         stack_payload = _ensure_stack_payload(config, catalog_name)
         control_account_id = _load_control_account_id(stack_payload)
-        control_principal_arn = _load_control_principal_arn(
-            stack_payload, control_account_id
-        )
-        if (
-            args.stack_only
-            and control_principal_arn == f"arn:aws:iam::{control_account_id}:root"
-        ):
-            print(
-                "Error: --stack-only requires a RegistryRoleARN from stack outputs, "
-                "which needs CloudFormation access. Run 'quiltx stack' from a shell "
-                "with cloudformation:DescribeStacks in the catalog account first.",
-                file=sys.stderr,
-            )
-            return 1
-        stack_name = _stack_payload_value(stack_payload, "stack_name", "unknown")
+        effective_principals = principals or [f"arn:aws:iam::{control_account_id}:root"]
+        principal_source = "--principal" if principals else "account root (default)"
+        stack_name = _stack_payload_value(stack_payload, "stack_name", "") or None
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
         catalog_url = str(config.get("navigator_url") or catalog_name)
 
@@ -207,9 +211,10 @@ def _cmd_add(args: argparse.Namespace) -> int:
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
         )
-        bucket_principal_arn = control_principal_arn if args.stack_only else None
         quilt_statement = bucket_lib.build_quilt_policy_statement(
-            args.bucket_name, control_account_id, principal_arn=bucket_principal_arn
+            args.bucket_name,
+            control_account_id,
+            principals=principals or None,
         )
         merged_policy = bucket_lib.merge_bucket_policy(bucket_policy, quilt_statement)
 
@@ -225,7 +230,8 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 catalog_url,
                 stack_name,
                 control_account_id,
-                control_principal_arn,
+                effective_principals,
+                principal_source,
                 control_region,
                 args.bucket_name,
                 bucket_region,
@@ -241,7 +247,8 @@ def _cmd_add(args: argparse.Namespace) -> int:
             catalog_url,
             stack_name,
             control_account_id,
-            control_principal_arn,
+            effective_principals,
+            principal_source,
             control_region,
             args.bucket_name,
             bucket_region,
@@ -263,7 +270,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
             args.bucket_name,
             sns_topic_arn,
             data_account_id,
-            control_principal_arn,
+            effective_principals,
             sns_client=sns_client,
         )
 
@@ -375,15 +382,6 @@ def _load_control_account_id(stack_payload: Mapping[str, Any] | None) -> str:
     return str(account_id)
 
 
-def _load_control_principal_arn(
-    stack_payload: Mapping[str, Any] | None, control_account_id: str
-) -> str:
-    role_arn = _stack_output_value(stack_payload, "RegistryRoleARN")
-    if role_arn:
-        return role_arn
-    return f"arn:aws:iam::{control_account_id}:root"
-
-
 def _stack_payload_value(
     stack_payload: Mapping[str, Any] | None, key: str, default: str
 ) -> str:
@@ -395,17 +393,48 @@ def _stack_payload_value(
     return str(value)
 
 
-def _stack_output_value(
-    stack_payload: Mapping[str, Any] | None, output_key: str
-) -> str | None:
-    if not stack_payload:
-        return None
-    for output in stack_payload.get("outputs") or []:
-        if not isinstance(output, Mapping):
+def _resolve_principals_arg(
+    raw: list[str] | None,
+) -> tuple[list[str], bool]:
+    """Parse --principal values into a list of ARNs.
+
+    Returns (principals, show_guidance). show_guidance is True when the user
+    passed a bare --principal with no value.
+    """
+    if not raw:
+        return [], False
+    principals: list[str] = []
+    show_guidance = False
+    for item in raw:
+        if item == "":
+            show_guidance = True
             continue
-        if output.get("OutputKey") == output_key and output.get("OutputValue"):
-            return str(output["OutputValue"])
-    return None
+        for part in item.split(","):
+            part = part.strip()
+            if part:
+                principals.append(part)
+    return principals, show_guidance
+
+
+def _print_principal_guidance() -> None:
+    print(
+        "The --principal flag sets the IAM ARN(s) granted cross-account access in "
+        "the bucket policy.\n"
+        "\n"
+        "Default (flag omitted): the entire control account root\n"
+        "  arn:aws:iam::<CONTROL-ACCOUNT-ID>:root\n"
+        "\n"
+        "To narrow access, pass one or more role ARNs (repeatable, or comma-\n"
+        "separated). Quilt does not publish an official list of roles for the\n"
+        "bucket policy; the documented principal is the control account root.\n"
+        "If you choose to restrict, inspect your Quilt CloudFormation stack's\n"
+        "IAM resources and select the roles appropriate for your use case.\n"
+        "See: https://docs.quilt.bio/quilt-platform-administrator/crossaccount\n"
+        "\n"
+        "Example:\n"
+        "  quiltx bucket add my-bucket \\\n"
+        "      --principal arn:aws:iam::123:role/<stack>-SomeRole-XXXX"
+    )
 
 
 def _get_session_account_id(session: boto3.Session) -> str:
@@ -415,9 +444,10 @@ def _get_session_account_id(session: boto3.Session) -> str:
 def _confirm_bucket_add(
     catalog_name: str,
     catalog_url: str,
-    stack_name: str,
+    stack_name: str | None,
     control_account_id: str,
-    control_principal_arn: str,
+    principals: list[str],
+    principal_source: str,
     control_region: str,
     bucket_name: str,
     bucket_region: str,
@@ -433,7 +463,8 @@ def _confirm_bucket_add(
         catalog_url,
         stack_name,
         control_account_id,
-        control_principal_arn,
+        principals,
+        principal_source,
         control_region,
         bucket_name,
         bucket_region,
@@ -441,6 +472,15 @@ def _confirm_bucket_add(
         profile,
         sns_topic_arn,
     )
+    if sns_topic_arn is None:
+        planned_topic_arn = (
+            f"arn:aws:sns:{bucket_region}:{data_account_id}:"
+            f"{bucket_lib._sns_topic_name(bucket_name)}"
+        )
+        console.print(
+            f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
+            f"a new topic will be created: {planned_topic_arn}"
+        )
     response = input("Continue? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
 
@@ -448,9 +488,10 @@ def _confirm_bucket_add(
 def _print_dry_run_plan(
     catalog_name: str,
     catalog_url: str,
-    stack_name: str,
+    stack_name: str | None,
     control_account_id: str,
-    control_principal_arn: str,
+    principals: list[str],
+    principal_source: str,
     control_region: str,
     bucket_name: str,
     bucket_region: str,
@@ -467,7 +508,8 @@ def _print_dry_run_plan(
         catalog_url,
         stack_name,
         control_account_id,
-        control_principal_arn,
+        principals,
+        principal_source,
         control_region,
         bucket_name,
         bucket_region,
@@ -483,6 +525,11 @@ def _print_dry_run_plan(
         f"arn:aws:sns:{bucket_region}:{data_account_id}:"
         f"{bucket_lib._sns_topic_name(bucket_name)}"
     )
+    if sns_topic_arn is None:
+        console.print(
+            f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
+            f"a new topic will be created: {planned_topic_arn}"
+        )
     print("\nPlanned SNS topic policy statement:")
     _print_json(
         console,
@@ -496,7 +543,7 @@ def _print_dry_run_plan(
                 ),
                 bucket_lib._build_sns_topic_subscribe_policy_statement(
                     planned_topic_arn,
-                    control_principal_arn,
+                    principals,
                 ),
             ],
         },
@@ -508,9 +555,10 @@ def _print_context_table(
     title: str,
     catalog_name: str,
     catalog_url: str,
-    stack_name: str,
+    stack_name: str | None,
     control_account_id: str,
-    control_principal_arn: str,
+    principals: list[str],
+    principal_source: str,
     control_region: str,
     bucket_name: str,
     bucket_region: str,
@@ -535,18 +583,20 @@ def _print_context_table(
         control_region,
         catalog_url,
     )
-    context_table.add_row(
-        stack_name,
-        control_account_id,
-        control_region,
-        "cached stack.json",
-    )
-    context_table.add_row(
-        control_principal_arn,
-        control_account_id,
-        control_region,
-        "RegistryRoleARN",
-    )
+    if stack_name:
+        context_table.add_row(
+            stack_name,
+            control_account_id,
+            control_region,
+            "cached stack.json",
+        )
+    for principal in principals:
+        context_table.add_row(
+            principal,
+            control_account_id,
+            control_region,
+            principal_source,
+        )
     context_table.add_row(
         f"s3://{bucket_name}",
         data_account_id,
