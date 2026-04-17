@@ -75,11 +75,15 @@ def main(argv: list[str] | None = None) -> int:
             catalog_config,
         )
 
-        stack_name = stack_info.get("StackName", "unknown")
-        account_id = stack_lib.stack_account_id(stack_info) or "unknown"
-        print(f"Found stack: {stack_name}")
-        print(f"  Region: {region}")
-        print(f"  Account: {account_id}")
+        header = stack_lib.format_stack_header(
+            catalog_name,
+            {
+                "stack_name": stack_info.get("StackName"),
+                "region": region,
+                "account_id": stack_lib.stack_account_id(stack_info),
+            },
+        )
+        print(header)
         print(f"  Log groups: {len(log_groups)}")
         print(f"  ECS resources: {len(ecs_resources)}")
         print(f"  Outputs: {len(stack_info.get('Outputs', []))}")

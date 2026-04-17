@@ -54,13 +54,22 @@ def get_bucket_policy(bucket: str, s3_client: Any = None) -> dict[str, Any] | No
 
 
 def build_quilt_policy_statement(
-    bucket: str, control_account_id: str
+    bucket: str,
+    control_account_id: str,
+    *,
+    principal_arn: str | None = None,
 ) -> dict[str, Any]:
-    """Build the cross-account bucket policy statement for Quilt infrastructure."""
+    """Build the cross-account bucket policy statement for Quilt infrastructure.
+
+    When *principal_arn* is supplied (e.g. a specific RegistryRoleARN), only that
+    principal is granted access.  Otherwise the entire control account
+    (``arn:aws:iam::{control_account_id}:root``) is used.
+    """
+    principal = principal_arn or f"arn:aws:iam::{control_account_id}:root"
     return {
         "Sid": QUILT_POLICY_SID,
         "Effect": "Allow",
-        "Principal": {"AWS": f"arn:aws:iam::{control_account_id}:root"},
+        "Principal": {"AWS": principal},
         "Action": list(QUILT_POLICY_ACTIONS),
         "Resource": [
             f"arn:aws:s3:::{bucket}",
@@ -224,6 +233,7 @@ def add_bucket(
     *,
     title: str | None = None,
     profile: str | None = None,
+    stack_only: bool = False,
 ) -> AddBucketResult:
     """Register an S3 bucket with the configured Quilt catalog.
 
@@ -237,12 +247,15 @@ def add_bucket(
         bucket: S3 bucket name.
         title: Display title in the catalog (defaults to bucket name).
         profile: AWS profile for the data account that owns the bucket.
+        stack_only: When True, restrict the bucket policy to the stack's
+            RegistryRoleARN instead of the entire control account.
 
     Returns:
         AddBucketResult with bucket details and registration status.
 
     Raises:
-        ValueError: If no catalog is configured or stack metadata is missing.
+        ValueError: If no catalog is configured or stack metadata is missing,
+            or if *stack_only* is True but the stack has no RegistryRoleARN.
     """
     import boto3
     from quilt3.admin import buckets as admin_buckets
@@ -259,14 +272,23 @@ def add_bucket(
     control_account_id = str(control_account_id)
 
     # Find RegistryRoleARN from stack outputs, fall back to account root
-    control_principal_arn = f"arn:aws:iam::{control_account_id}:root"
+    registry_role_arn: str | None = None
     for output in payload.get("outputs") or []:
         if isinstance(output, Mapping):
             if output.get("OutputKey") == "RegistryRoleARN" and output.get(
                 "OutputValue"
             ):
-                control_principal_arn = str(output["OutputValue"])
+                registry_role_arn = str(output["OutputValue"])
                 break
+
+    if stack_only and not registry_role_arn:
+        raise ValueError(
+            "--stack-only requires a RegistryRoleARN in stack outputs, but none was found."
+        )
+
+    control_principal_arn = (
+        registry_role_arn or f"arn:aws:iam::{control_account_id}:root"
+    )
 
     bucket_title = title or bucket
 
@@ -286,9 +308,12 @@ def add_bucket(
     sns_client = session.client("sns", region_name=bucket_region)
     data_account_id = str(session.client("sts").get_caller_identity()["Account"])
 
-    # Bucket policy
+    # Bucket policy — when stack_only, restrict to the specific role ARN
+    bucket_principal_arn = control_principal_arn if stack_only else None
     existing_policy = get_bucket_policy(bucket, s3_client=s3_client)
-    statement = build_quilt_policy_statement(bucket, control_account_id)
+    statement = build_quilt_policy_statement(
+        bucket, control_account_id, principal_arn=bucket_principal_arn
+    )
     merged = merge_bucket_policy(existing_policy, statement)
     apply_bucket_policy(bucket, merged, s3_client=s3_client)
 

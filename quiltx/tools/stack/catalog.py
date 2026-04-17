@@ -6,6 +6,7 @@ import argparse
 import sys
 
 import quiltx
+from quiltx import stack as stack_lib
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
             # Show the current config without modifying
             try:
                 config = quiltx.get_catalog_config()
+                header = stack_lib.current_stack_header()
+                if header:
+                    print(header)
                 for key, value in config.items():
                     print(f"{key}: {value}")
             except ValueError as e:

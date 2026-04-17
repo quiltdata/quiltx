@@ -16,6 +16,12 @@ Opens interactive shell in running ECS tasks. Requires AWS Session Manager plugi
 
 Python module for discovering CloudFormation stacks and working with cached stack data. See module docstrings for API details.
 
+### Stack ACL (`quiltx stack acl`)
+
+Uses the flat `policies:` / `roles:` YAML format documented in
+[`spec/060-stack-acl/simpler-stack-acl.yml`](spec/060-stack-acl/simpler-stack-acl.yml).
+The old `bucket_policies:` / `roles:` / `sso:` format is no longer supported.
+
 ### Config API (`quiltx.config`)
 
 Functions for catalog configuration and credentials. Use `from quiltx.config import` for programmatic access.
