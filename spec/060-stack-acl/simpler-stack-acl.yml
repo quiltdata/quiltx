@@ -13,8 +13,9 @@ policies:
 
   # Since all users are members of Everyone,
   # the two synthetic roles created by these policies are:
-  #   - public-260414           (non-Employees)
-  #   - internal-public-260414  (Employees)
+  #   - public           (non-Employees)
+  #   - internal_public  (Employees)
+  # Names are deterministic: reversed policy ladder joined by '_'.
 
   public:
     sso.groups:          [Everyone]

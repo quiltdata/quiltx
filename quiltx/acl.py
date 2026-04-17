@@ -17,7 +17,7 @@ from quilt3.admin import sso_config as admin_sso_config
 from quilt3.admin.types import Permission
 
 INLINE_POLICY_SUFFIX = "__inline"
-NEW_FORMAT_KEYS = {"policies", "roles"}
+NEW_FORMAT_KEYS = {"policies", "roles", "store_last_login_context"}
 OLD_FORMAT_KEYS = {"bucket_policies", "sso"}
 NEW_FORMAT_EXAMPLE = "spec/060-stack-acl/simpler-stack-acl.yml"
 EVERYONE_GROUP = "Everyone"
@@ -46,6 +46,7 @@ class AclStaticRole:
 class AclConfig:
     policies: list[AclPolicy]
     roles: dict[str, AclStaticRole]
+    store_last_login_context: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,10 @@ def parse_acl_config(path: str | Path) -> AclConfig:
         raise ValueError("ACL config must be a mapping at the top level")
 
     _validate_top_level_keys(raw)
+
+    store_last_login_context = raw.get("store_last_login_context", False)
+    if not isinstance(store_last_login_context, bool):
+        raise ValueError("'store_last_login_context' must be a boolean")
 
     raw_policies = raw.get("policies") or {}
     raw_roles = raw.get("roles") or {}
@@ -248,7 +253,11 @@ def parse_acl_config(path: str | Path) -> AclConfig:
     _validate_policy_ladder(policies)
     _validate_synthetic_role_names(policies, role_names)
 
-    return AclConfig(policies=policies, roles=roles)
+    return AclConfig(
+        policies=policies,
+        roles=roles,
+        store_last_login_context=store_last_login_context,
+    )
 
 
 def all_buckets(config: AclConfig) -> set[str]:
@@ -374,6 +383,7 @@ def build_sso_config(config: AclConfig) -> str | None:
         return None
 
     payload: dict[str, Any] = {"version": "1.0", "mappings": []}
+    payload["store_last_login_context"] = config.store_last_login_context
     if desired_state.default_role_name is not None:
         payload["default_role"] = desired_state.default_role_name
 
@@ -691,7 +701,9 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
         raise ValueError(
             "Unknown top-level ACL keys: "
             + ", ".join(unknown_keys)
-            + ". Only 'policies' and 'roles' are supported."
+            + ". Supported keys: "
+            + ", ".join(sorted(NEW_FORMAT_KEYS))
+            + "."
         )
 
 

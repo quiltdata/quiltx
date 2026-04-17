@@ -5,7 +5,8 @@
 #   - the permissions it grants (e.g. read access to specific buckets)
 #
 # A user qualifies for a policy if they belong to any of its listed groups.
-# Their effective role is the union of all policies they qualify for.
+# Their synthetic role is the union of all policies they qualify for.
+# Synthetic role names are deterministic (reversed policy ladder joined by '_').
 
 policies:
 
@@ -25,7 +26,8 @@ roles:
 
   # Static role: composes explicit policies AND bucket grants.
   staff:
-    policies:           [public, alpha, beta]
+    sso.groups:         [Staff]
+    config.policies:    [public, alpha, beta]
     buckets.read:       [exec-reports]
     buckets.read_write: [exec-workspace]
-    config.admin: true
+    config.is_admin:    true

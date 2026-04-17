@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 
 from quiltx import acl as acl_lib
 
@@ -41,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show detailed information about each change.",
     )
+    parser.add_argument(
+        "--store-last-login-context",
+        action="store_true",
+        default=False,
+        help="Enable store_last_login_context in SSO config for debugging.",
+    )
     return parser
 
 
@@ -55,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         desired = acl_lib.parse_acl_config(args.config_file)
+        if args.store_last_login_context:
+            desired = replace(desired, store_last_login_context=True)
         current = acl_lib.fetch_current_state()
         diff = acl_lib.compute_diff(desired, current)
         acl_lib.print_diff(diff, verbose=args.verbose, desired=desired, current=current)
