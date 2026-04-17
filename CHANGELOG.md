@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `quiltx bucket add` no longer requires CloudFormation access in any account: when the Quilt stack role lacks `cloudformation:DescribeStacks`, it derives `account_id` from `sts:GetCallerIdentity` on the Quilt session and reads `region` from the catalog `config.json`. `--stack-only` still needs CFN to read `RegistryRoleARN`.
+
 ## [0.9.0] - 2026-04-17
 
 ### Added
