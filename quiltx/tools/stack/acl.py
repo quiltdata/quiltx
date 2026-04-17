@@ -7,6 +7,7 @@ import sys
 from dataclasses import replace
 
 from quiltx import acl as acl_lib
+from quiltx import stack as stack_lib
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        header = stack_lib.current_stack_header()
+        if header:
+            print(header)
         if args.config_file is None:
             current = acl_lib.fetch_current_state()
             acl_lib.print_current_state(current)

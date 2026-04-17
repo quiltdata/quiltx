@@ -253,6 +253,34 @@ def load_stack_payload(catalog_name: str) -> Mapping[str, Any] | None:
     return json.loads(output_path.read_text())
 
 
+def format_stack_header(
+    dns: str,
+    payload: Mapping[str, Any] | None = None,
+) -> str:
+    """Format a one-line header identifying a stack and its DNS name."""
+    if payload:
+        stack_name = payload.get("stack_name") or "?"
+        region = payload.get("region") or "?"
+        account = payload.get("account_id") or "?"
+        return f"Stack: {stack_name}@{region}.{account} ({dns})"
+    return f"Stack: ({dns})"
+
+
+def current_stack_header() -> str | None:
+    """Return a header line for the currently configured catalog, or None."""
+    try:
+        import quilt3
+
+        config = quilt3.config()
+        if not config:
+            return None
+        dns = extract_catalog_name(config)
+    except Exception:
+        return None
+    payload = load_stack_payload(dns)
+    return format_stack_header(dns, payload)
+
+
 def ensure_min_version(payload: Mapping[str, Any] | None, min_version: str) -> bool:
     """Check if payload was created by a version >= min_version.
 

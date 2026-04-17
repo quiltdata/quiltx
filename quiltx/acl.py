@@ -137,6 +137,24 @@ class _DesiredAclState:
     default_role_name: str | None
 
 
+def format_exception(exc: Exception) -> str:
+    """Format an exception, surfacing GraphQL error details when present."""
+    base = str(exc) or exc.__class__.__name__
+    errors = getattr(exc, "errors", None)
+    if not isinstance(errors, list) or not errors:
+        return base
+    details: list[str] = []
+    for error in errors:
+        message = getattr(error, "message", None)
+        if not message:
+            continue
+        path = getattr(error, "path", None)
+        details.append(f"{message} (path: {path})" if path else str(message))
+    if not details:
+        return base
+    return f"{base}: {'; '.join(details)}"
+
+
 def parse_acl_config(path: str | Path) -> AclConfig:
     """Load and validate ACL configuration from YAML."""
     raw = yaml.safe_load(Path(path).read_text()) or {}
@@ -517,10 +535,11 @@ def apply_acl(
                 if affected
                 else ""
             )
+            detail = format_exception(exc)
             warnings.append(
-                f"Policy '{policy.title}' could not be created{hint}: {exc}"
+                f"Policy '{policy.title}' could not be created{hint}: {detail}"
             )
-            print(f"  ! policy {policy.title}: {exc}", file=sys.stderr)
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
@@ -540,10 +559,11 @@ def apply_acl(
                 if affected
                 else ""
             )
+            detail = format_exception(exc)
             warnings.append(
-                f"Policy '{policy.title}' could not be updated{hint}: {exc}"
+                f"Policy '{policy.title}' could not be updated{hint}: {detail}"
             )
-            print(f"  ! policy {policy.title}: {exc}", file=sys.stderr)
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
             continue
         known_policies[policy.title] = updated
         print(f"  ~ policy {policy.title}")
@@ -562,8 +582,9 @@ def apply_acl(
             )
             continue
         except Exception as exc:
-            warnings.append(f"Role '{role.name}' could not be created: {exc}")
-            print(f"  ! role {role.name}: {exc}", file=sys.stderr)
+            detail = format_exception(exc)
+            warnings.append(f"Role '{role.name}' could not be created: {detail}")
+            print(f"  ! role {role.name}: {detail}", file=sys.stderr)
             continue
         print(f"  + role {role.name}")
 
@@ -581,8 +602,9 @@ def apply_acl(
             )
             continue
         except Exception as exc:
-            warnings.append(f"Role '{role.name}' could not be updated: {exc}")
-            print(f"  ! role {role.name}: {exc}", file=sys.stderr)
+            detail = format_exception(exc)
+            warnings.append(f"Role '{role.name}' could not be updated: {detail}")
+            print(f"  ! role {role.name}: {detail}", file=sys.stderr)
             continue
         print(f"  ~ role {role.name}")
 
@@ -591,8 +613,9 @@ def apply_acl(
         try:
             admin_sso_config.set(diff.sso_config_text)
         except Exception as exc:
-            warnings.append(f"SSO config could not be updated: {exc}")
-            print(f"  ! sso config: {exc}", file=sys.stderr)
+            detail = format_exception(exc)
+            warnings.append(f"SSO config could not be updated: {detail}")
+            print(f"  ! sso config: {detail}", file=sys.stderr)
         else:
             prefix = "+" if diff.sso_is_create else "~"
             print(f"  {prefix} sso config")
@@ -603,7 +626,9 @@ def apply_acl(
             admin_roles.delete(role_name)
             print(f"  - role {role_name}")
         except Exception as exc:  # pragma: no cover - external API surface
-            warnings.append(f"Role '{role_name}' could not be deleted: {exc}")
+            warnings.append(
+                f"Role '{role_name}' could not be deleted: {format_exception(exc)}"
+            )
 
     for policy_title in diff.policies_to_delete:
         try:
@@ -611,7 +636,9 @@ def apply_acl(
             admin_policies.delete(policy_title)
             print(f"  - policy {policy_title}")
         except Exception as exc:  # pragma: no cover - external API surface
-            warnings.append(f"Policy '{policy_title}' could not be deleted: {exc}")
+            warnings.append(
+                f"Policy '{policy_title}' could not be deleted: {format_exception(exc)}"
+            )
 
     return warnings
 
