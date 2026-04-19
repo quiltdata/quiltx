@@ -1513,12 +1513,15 @@ def test_build_data_access_trust_policy_with_external_id() -> None:
 
 
 def test_ensure_data_access_role_creates(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
     class FakeIamClient:
         class exceptions:
             class NoSuchEntityException(Exception):
                 pass
 
         def get_role(self, *, RoleName):
+            calls.append(("get_role", RoleName))
             raise ClientError(
                 {
                     "Error": {
@@ -1530,6 +1533,7 @@ def test_ensure_data_access_role_creates(monkeypatch) -> None:
             )
 
         def create_role(self, **kwargs):
+            calls.append(("create_role", kwargs["RoleName"]))
             assert kwargs["RoleName"] == bucket_lib.DATA_ACCESS_ROLE_NAME
             policy = json.loads(kwargs["AssumeRolePolicyDocument"])
             assert (
@@ -1541,6 +1545,16 @@ def test_ensure_data_access_role_creates(monkeypatch) -> None:
                     "Arn": "arn:aws:iam::111122223333:role/QuiltDataAccessRole",
                 }
             }
+
+        def put_role_policy(self, **kwargs):
+            calls.append(
+                (
+                    "put_role_policy",
+                    kwargs["RoleName"],
+                    kwargs["PolicyName"],
+                    json.loads(kwargs["PolicyDocument"]),
+                )
+            )
 
     class FakeSession:
         def client(self, service_name: str, region_name: str | None = None):
@@ -1558,6 +1572,16 @@ def test_ensure_data_access_role_creates(monkeypatch) -> None:
         role_name="QuiltDataAccessRole",
         created=True,
     )
+    assert calls == [
+        ("get_role", "QuiltDataAccessRole"),
+        ("create_role", "QuiltDataAccessRole"),
+        (
+            "put_role_policy",
+            "QuiltDataAccessRole",
+            bucket_lib.DATA_ACCESS_ROLE_POLICY_NAME,
+            bucket_lib._build_data_access_role_policy(),
+        ),
+    ]
 
 
 def test_ensure_data_access_role_updates(monkeypatch) -> None:
@@ -1574,6 +1598,16 @@ def test_ensure_data_access_role_updates(monkeypatch) -> None:
 
         def update_assume_role_policy(self, **kwargs):
             calls.append(("update", json.loads(kwargs["PolicyDocument"])))
+
+        def put_role_policy(self, **kwargs):
+            calls.append(
+                (
+                    "put_role_policy",
+                    kwargs["RoleName"],
+                    kwargs["PolicyName"],
+                    json.loads(kwargs["PolicyDocument"]),
+                )
+            )
 
     class FakeSession:
         def client(self, service_name: str, region_name: str | None = None):
@@ -1600,6 +1634,12 @@ def test_ensure_data_access_role_updates(monkeypatch) -> None:
                 ["arn:aws:iam::123456789012:root"],
                 external_id="shared-external-id",
             ),
+        ),
+        (
+            "put_role_policy",
+            "QuiltDataAccessRole",
+            bucket_lib.DATA_ACCESS_ROLE_POLICY_NAME,
+            bucket_lib._build_data_access_role_policy(),
         ),
     ]
 

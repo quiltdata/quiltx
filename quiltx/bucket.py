@@ -17,6 +17,7 @@ SNS_PUBLISH_POLICY_SID = "QuiltBucketNotifications"
 SNS_SUBSCRIBE_POLICY_SID = "QuiltCrossAccountSNSAccess"
 SNS_TOPIC_CONFIG_ID = "QuiltBucketNotifications"
 DATA_ACCESS_ROLE_NAME = "QuiltDataAccessRole"
+DATA_ACCESS_ROLE_POLICY_NAME = "QuiltDataAccessPolicy"
 
 QUILT_POLICY_ACTIONS = [
     "s3:GetObject",
@@ -430,6 +431,11 @@ def ensure_data_access_role(
             AssumeRolePolicyDocument=json.dumps(assume_role_policy),
             Description="Quilt cross-account data access role",
         )["Role"]
+        iam_client.put_role_policy(
+            RoleName=role_name,
+            PolicyName=DATA_ACCESS_ROLE_POLICY_NAME,
+            PolicyDocument=json.dumps(_build_data_access_role_policy()),
+        )
         return BootstrapRoleResult(
             role_arn=str(created["Arn"]),
             role_name=role_name,
@@ -439,6 +445,11 @@ def ensure_data_access_role(
     iam_client.update_assume_role_policy(
         RoleName=role_name,
         PolicyDocument=json.dumps(assume_role_policy),
+    )
+    iam_client.put_role_policy(
+        RoleName=role_name,
+        PolicyName=DATA_ACCESS_ROLE_POLICY_NAME,
+        PolicyDocument=json.dumps(_build_data_access_role_policy()),
     )
     role = response["Role"]
     return BootstrapRoleResult(
@@ -548,6 +559,20 @@ def _build_data_access_trust_policy(
     return {
         "Version": "2012-10-17",
         "Statement": [statement],
+    }
+
+
+def _build_data_access_role_policy() -> dict[str, Any]:
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "QuiltDataAccessS3Access",
+                "Effect": "Allow",
+                "Action": list(QUILT_POLICY_ACTIONS),
+                "Resource": "*",
+            }
+        ],
     }
 
 
