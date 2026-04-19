@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-04-18
+
+### Added
+
+- `quiltx bucket bootstrap-role` to create or update a bucket-owner-side data-access role for cross-account Quilt onboarding
+- `quiltx bucket add --external-role-arn ARN` to register the bucket's assumed role with Quilt while also granting that role access in the bucket and SNS topic policies
+
+### Changed
+
+- `quiltx bucket bootstrap-role` now attaches an inline `QuiltDataAccessPolicy` so the bootstrapped role is immediately usable for S3 permission checks
+- `quiltx bucket add` and `quiltx bucket test` now support the assume-role chokepoint flow required by cross-account bucket onboarding
+
 ## [0.9.2] - 2026-04-17
 
 ### Added
