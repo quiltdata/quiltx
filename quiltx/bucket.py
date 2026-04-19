@@ -1,4 +1,4 @@
-"""Bucket policy and notification helpers for quiltx."""
+"""Bucket policy, registration, and notification helpers for quiltx."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ QUILT_POLICY_SID = "QuiltCrossAccountAccess"
 SNS_PUBLISH_POLICY_SID = "QuiltBucketNotifications"
 SNS_SUBSCRIBE_POLICY_SID = "QuiltCrossAccountSNSAccess"
 SNS_TOPIC_CONFIG_ID = "QuiltBucketNotifications"
+DATA_ACCESS_ROLE_NAME = "QuiltDataAccessRole"
 
 QUILT_POLICY_ACTIONS = [
     "s3:GetObject",
@@ -33,6 +34,44 @@ QUILT_POLICY_ACTIONS = [
 ]
 
 BUCKET_NOTIFICATION_EVENTS = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+
+_BUCKET_ADD_MUTATION = """
+mutation BucketAdd($input: BucketAddInput!) {
+  bucketAdd(input: $input) {
+    __typename
+    ... on BucketAddSuccess {
+      bucketConfig {
+        name
+        title
+        snsNotificationArn
+        externalRoleArn
+      }
+    }
+    ... on InsufficientPermissions {
+      message
+    }
+  }
+}
+"""
+
+_BUCKET_UPDATE_MUTATION = """
+mutation BucketUpdate($name: String!, $input: BucketUpdateInput!) {
+  bucketUpdate(name: $name, input: $input) {
+    __typename
+    ... on BucketUpdateSuccess {
+      bucketConfig {
+        name
+        title
+        snsNotificationArn
+        externalRoleArn
+      }
+    }
+    ... on InsufficientPermissions {
+      message
+    }
+  }
+}
+"""
 
 
 def get_bucket_policy(bucket: str, s3_client: Any = None) -> dict[str, Any] | None:
@@ -233,12 +272,22 @@ class AddBucketResult:
     already_registered: bool
 
 
+@dataclass
+class BootstrapRoleResult:
+    """Result of ensuring the shared data-account role exists."""
+
+    role_arn: str
+    role_name: str
+    created: bool
+
+
 def add_bucket(
     bucket: str,
     *,
     title: str | None = None,
     profile: str | None = None,
     principals: Sequence[str] | None = None,
+    external_role_arn: str | None = None,
 ) -> AddBucketResult:
     """Register an S3 bucket with the configured Quilt catalog.
 
@@ -253,7 +302,10 @@ def add_bucket(
         title: Display title in the catalog (defaults to bucket name).
         profile: AWS profile for the data account that owns the bucket.
         principals: IAM principal ARNs granted access in the bucket policy.
-            Defaults to the control account root.
+            Defaults to the control account root unless *external_role_arn* is
+            supplied, in which case that role ARN is granted by default.
+        external_role_arn: Optional data-account role ARN to store in Quilt as
+            the cross-account assume-role target.
 
     Returns:
         AddBucketResult with bucket details and registration status.
@@ -275,7 +327,10 @@ def add_bucket(
         raise ValueError("Stack metadata missing account_id. Run 'quiltx stack' first.")
     control_account_id = str(control_account_id)
 
-    principal_list = list(principals) if principals else []
+    principal_list = _effective_principals(
+        principals,
+        external_role_arn=external_role_arn,
+    )
     sns_principal: str | list[str] = (
         principal_list if principal_list else f"arn:aws:iam::{control_account_id}:root"
     )
@@ -285,6 +340,16 @@ def add_bucket(
     # Check if already registered
     existing = admin_buckets.get(bucket)
     if existing is not None:
+        existing_external_role_arn = getattr(existing, "external_role_arn", None)
+        if external_role_arn and existing_external_role_arn != external_role_arn:
+            existing_title = getattr(existing, "title", None) or bucket_title
+            _register_bucket_with_catalog(
+                bucket=bucket,
+                title=existing_title,
+                sns_notification_arn=getattr(existing, "sns_notification_arn", None),
+                external_role_arn=external_role_arn,
+                update=True,
+            )
         return AddBucketResult(
             bucket=bucket,
             title=getattr(existing, "title", bucket_title),
@@ -322,10 +387,11 @@ def add_bucket(
     configure_bucket_notifications(bucket, sns_topic_arn, s3_client=s3_client)
 
     # Register in Quilt catalog
-    admin_buckets.add(
-        name=bucket,
+    _register_bucket_with_catalog(
+        bucket=bucket,
         title=bucket_title,
         sns_notification_arn=sns_topic_arn,
+        external_role_arn=external_role_arn,
     )
 
     return AddBucketResult(
@@ -334,6 +400,155 @@ def add_bucket(
         sns_topic_arn=sns_topic_arn,
         already_registered=False,
     )
+
+
+def ensure_data_access_role(
+    *,
+    control_principals: Sequence[str],
+    profile: str | None = None,
+    role_name: str = DATA_ACCESS_ROLE_NAME,
+    external_id: str | None = None,
+) -> BootstrapRoleResult:
+    """Create or update the bucket-owner-side role used for assume-role access."""
+    import boto3
+
+    session = boto3.Session(profile_name=profile)
+    iam_client = session.client("iam")
+
+    assume_role_policy = _build_data_access_trust_policy(
+        control_principals,
+        external_id=external_id,
+    )
+
+    try:
+        response = iam_client.get_role(RoleName=role_name)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "NoSuchEntity":
+            raise
+        created = iam_client.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(assume_role_policy),
+            Description="Quilt cross-account data access role",
+        )["Role"]
+        return BootstrapRoleResult(
+            role_arn=str(created["Arn"]),
+            role_name=role_name,
+            created=True,
+        )
+
+    iam_client.update_assume_role_policy(
+        RoleName=role_name,
+        PolicyDocument=json.dumps(assume_role_policy),
+    )
+    role = response["Role"]
+    return BootstrapRoleResult(
+        role_arn=str(role["Arn"]),
+        role_name=role_name,
+        created=False,
+    )
+
+
+def _effective_principals(
+    principals: Sequence[str] | None,
+    *,
+    external_role_arn: str | None = None,
+) -> list[str]:
+    result = list(principals) if principals else []
+    if external_role_arn and external_role_arn not in result:
+        result.append(external_role_arn)
+    return result
+
+
+def _register_bucket_with_catalog(
+    *,
+    bucket: str,
+    title: str,
+    sns_notification_arn: str | None,
+    external_role_arn: str | None = None,
+    update: bool = False,
+) -> None:
+    if external_role_arn is None:
+        from quilt3.admin import buckets as admin_buckets
+
+        if update:
+            admin_buckets.update(
+                bucket,
+                title=title,
+                sns_notification_arn=sns_notification_arn,
+            )
+        else:
+            admin_buckets.add(
+                name=bucket,
+                title=title,
+                sns_notification_arn=sns_notification_arn,
+            )
+        return
+
+    input_payload = {
+        "title": title,
+        "snsNotificationArn": sns_notification_arn,
+        "externalRoleArn": external_role_arn,
+    }
+    if not update:
+        input_payload["name"] = bucket
+
+    data = _graphql_request(
+        _BUCKET_UPDATE_MUTATION if update else _BUCKET_ADD_MUTATION,
+        (
+            {"name": bucket, "input": input_payload}
+            if update
+            else {"input": input_payload}
+        ),
+    )
+    result_key = "bucketUpdate" if update else "bucketAdd"
+    result = data[result_key]
+    typename = result.get("__typename")
+    if typename in {"BucketAddSuccess", "BucketUpdateSuccess"}:
+        return
+    if typename == "InsufficientPermissions":
+        raise ValueError(result.get("message") or "insufficient permissions")
+    raise ValueError(f"bucket registration failed: {typename}")
+
+
+def _graphql_request(query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
+    from quilt3 import session as quilt_session
+
+    response = quilt_session.get_session().post(
+        quilt_session.get_registry_url().rstrip("/") + "/graphql",
+        json={"query": query, "variables": dict(variables)},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    errors = payload.get("errors")
+    if errors:
+        messages = [error.get("message", "unknown GraphQL error") for error in errors]
+        raise ValueError("; ".join(messages))
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("invalid GraphQL response")
+    return data
+
+
+def _build_data_access_trust_policy(
+    control_principals: Sequence[str],
+    *,
+    external_id: str | None = None,
+) -> dict[str, Any]:
+    principal_value: str | list[str]
+    principals = list(control_principals)
+    principal_value = principals[0] if len(principals) == 1 else principals
+    statement: dict[str, Any] = {
+        "Sid": "QuiltControlAssumeRole",
+        "Effect": "Allow",
+        "Principal": {"AWS": principal_value},
+        "Action": "sts:AssumeRole",
+    }
+    if external_id:
+        statement["Condition"] = {"StringEquals": {"sts:ExternalId": external_id}}
+    return {
+        "Version": "2012-10-17",
+        "Statement": [statement],
+    }
 
 
 def _merge_policy_statements(

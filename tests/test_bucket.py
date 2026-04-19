@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 
 import boto3
+from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
 from quiltx import bucket as bucket_lib
@@ -336,6 +337,7 @@ class FakeBucket:
     title: str
     sns_notification_arn: str | None = None
     prefixes: list[str] | None = None
+    external_role_arn: str | None = None
 
 
 class FakeSession:
@@ -377,12 +379,32 @@ def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls
         if add_calls is not None:
             add_calls.append(kwargs)
         bucket = FakeBucket(
-            kwargs["name"], kwargs["title"], kwargs.get("sns_notification_arn"), []
+            kwargs["name"],
+            kwargs["title"],
+            kwargs.get("sns_notification_arn"),
+            [],
+            kwargs.get("external_role_arn"),
         )
         bucket_list.append(bucket)
         return bucket
 
+    def update(name, **kwargs):
+        if add_calls is not None:
+            add_calls.append({"name": name, **kwargs, "_update": True})
+        for index, bucket in enumerate(bucket_list):
+            if bucket.name == name:
+                bucket_list[index] = FakeBucket(
+                    name,
+                    kwargs.get("title", bucket.title),
+                    kwargs.get("sns_notification_arn", bucket.sns_notification_arn),
+                    bucket.prefixes,
+                    kwargs.get("external_role_arn", bucket.external_role_arn),
+                )
+                return bucket_list[index]
+        raise AssertionError(f"bucket {name} not found")
+
     admin_buckets.add = add
+    admin_buckets.update = update
 
     admin_module = ModuleType("quilt3.admin")
     admin_module.buckets = admin_buckets
@@ -1231,6 +1253,183 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
     sts_stubber.deactivate()
 
 
+def test_add_bucket_creates_new_with_external_role_arn(monkeypatch) -> None:
+    role_arn = "arn:aws:iam::111122223333:role/QuiltDataAccessRole"
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {
+            "Bucket": "bucket",
+            "Policy": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        bucket_lib.build_quilt_policy_statement(
+                            "bucket",
+                            "123456789012",
+                            principals=[role_arn],
+                        )
+                    ],
+                }
+            ),
+        },
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "put_bucket_notification_configuration",
+        {},
+        {
+            "Bucket": "bucket",
+            "NotificationConfiguration": {
+                "TopicConfigurations": [
+                    {
+                        "Id": "QuiltBucketNotifications",
+                        "TopicArn": "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications",
+                        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+                    }
+                ]
+            },
+        },
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name="us-west-2")
+    sns_stubber = Stubber(sns_client)
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    sns_stubber.add_response(
+        "create_topic",
+        {"TopicArn": topic_arn},
+        {"Name": "quilt-bucket-notifications"},
+    )
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {}},
+        {"TopicArn": topic_arn},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "QuiltBucketNotifications",
+                            "Effect": "Allow",
+                            "Principal": {"Service": "s3.amazonaws.com"},
+                            "Action": "sns:Publish",
+                            "Resource": topic_arn,
+                            "Condition": {
+                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
+                                "StringEquals": {"aws:SourceAccount": "111122223333"},
+                            },
+                        },
+                        {
+                            "Sid": "QuiltCrossAccountSNSAccess",
+                            "Effect": "Allow",
+                            "Principal": {"AWS": role_arn},
+                            "Action": [
+                                "sns:GetTopicAttributes",
+                                "sns:Subscribe",
+                            ],
+                            "Resource": topic_arn,
+                        },
+                    ],
+                }
+            ),
+        },
+    )
+    sns_stubber.activate()
+
+    sts_client = _client("sts")
+    sts_stubber = Stubber(sts_client)
+    sts_stubber.add_response(
+        "get_caller_identity",
+        {
+            "Account": "111122223333",
+            "Arn": "arn:aws:iam::111122223333:user/test",
+            "UserId": "test",
+        },
+        {},
+    )
+    sts_stubber.activate()
+
+    graphql_calls: list[dict[str, object]] = []
+
+    def _graphql_request(query, variables):
+        graphql_calls.append({"query": query, "variables": variables})
+        return {"bucketAdd": {"__typename": "BucketAddSuccess"}}
+
+    monkeypatch.setattr(
+        bucket_lib,
+        "_graphql_request",
+        _graphql_request,
+    )
+    _install_fake_quilt3(monkeypatch)
+    _stub_stack_and_config(monkeypatch)
+
+    session = FakeSession(s3_client, sns_client, sts_client)
+    import boto3 as _boto3
+
+    monkeypatch.setattr(_boto3, "Session", lambda profile_name=None: session)
+
+    result = add_bucket(
+        "bucket",
+        title="Demo Bucket",
+        external_role_arn=role_arn,
+    )
+    assert result == AddBucketResult(
+        bucket="bucket",
+        title="Demo Bucket",
+        sns_topic_arn=topic_arn,
+        already_registered=False,
+    )
+    assert graphql_calls == [
+        {
+            "query": bucket_lib._BUCKET_ADD_MUTATION,
+            "variables": {
+                "input": {
+                    "name": "bucket",
+                    "title": "Demo Bucket",
+                    "snsNotificationArn": topic_arn,
+                    "externalRoleArn": role_arn,
+                }
+            },
+        }
+    ]
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    sts_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+    sts_stubber.deactivate()
+
+
 def test_add_bucket_no_stack_payload(monkeypatch) -> None:
     _stub_stack_and_config(monkeypatch, payload=None)
     monkeypatch.setattr(
@@ -1283,6 +1482,128 @@ def test_build_quilt_policy_statement_without_principals_uses_root() -> None:
     assert statement["Principal"] == {"AWS": "arn:aws:iam::123456789012:root"}
 
 
+def test_effective_principals_adds_external_role_arn() -> None:
+    role_arn = "arn:aws:iam::111122223333:role/QuiltDataAccessRole"
+    assert bucket_lib._effective_principals([], external_role_arn=role_arn) == [
+        role_arn
+    ]
+    assert bucket_lib._effective_principals(
+        [role_arn],
+        external_role_arn=role_arn,
+    ) == [role_arn]
+
+
+def test_build_data_access_trust_policy_with_external_id() -> None:
+    policy = bucket_lib._build_data_access_trust_policy(
+        ["arn:aws:iam::123456789012:root"],
+        external_id="shared-external-id",
+    )
+    assert policy == {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "QuiltControlAssumeRole",
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+                "Action": "sts:AssumeRole",
+                "Condition": {"StringEquals": {"sts:ExternalId": "shared-external-id"}},
+            }
+        ],
+    }
+
+
+def test_ensure_data_access_role_creates(monkeypatch) -> None:
+    class FakeIamClient:
+        class exceptions:
+            class NoSuchEntityException(Exception):
+                pass
+
+        def get_role(self, *, RoleName):
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "NoSuchEntity",
+                        "Message": "missing",
+                    }
+                },
+                "GetRole",
+            )
+
+        def create_role(self, **kwargs):
+            assert kwargs["RoleName"] == bucket_lib.DATA_ACCESS_ROLE_NAME
+            policy = json.loads(kwargs["AssumeRolePolicyDocument"])
+            assert (
+                policy["Statement"][0]["Principal"]["AWS"]
+                == "arn:aws:iam::123456789012:root"
+            )
+            return {
+                "Role": {
+                    "Arn": "arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+                }
+            }
+
+    class FakeSession:
+        def client(self, service_name: str, region_name: str | None = None):
+            assert service_name == "iam"
+            return FakeIamClient()
+
+    import boto3 as _boto3
+
+    monkeypatch.setattr(_boto3, "Session", lambda profile_name=None: FakeSession())
+    result = bucket_lib.ensure_data_access_role(
+        control_principals=["arn:aws:iam::123456789012:root"],
+    )
+    assert result == bucket_lib.BootstrapRoleResult(
+        role_arn="arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+        role_name="QuiltDataAccessRole",
+        created=True,
+    )
+
+
+def test_ensure_data_access_role_updates(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeIamClient:
+        def get_role(self, *, RoleName):
+            calls.append(("get_role", RoleName))
+            return {
+                "Role": {
+                    "Arn": "arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+                }
+            }
+
+        def update_assume_role_policy(self, **kwargs):
+            calls.append(("update", json.loads(kwargs["PolicyDocument"])))
+
+    class FakeSession:
+        def client(self, service_name: str, region_name: str | None = None):
+            assert service_name == "iam"
+            return FakeIamClient()
+
+    import boto3 as _boto3
+
+    monkeypatch.setattr(_boto3, "Session", lambda profile_name=None: FakeSession())
+    result = bucket_lib.ensure_data_access_role(
+        control_principals=["arn:aws:iam::123456789012:root"],
+        external_id="shared-external-id",
+    )
+    assert result == bucket_lib.BootstrapRoleResult(
+        role_arn="arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+        role_name="QuiltDataAccessRole",
+        created=False,
+    )
+    assert calls == [
+        ("get_role", "QuiltDataAccessRole"),
+        (
+            "update",
+            bucket_lib._build_data_access_trust_policy(
+                ["arn:aws:iam::123456789012:root"],
+                external_id="shared-external-id",
+            ),
+        ),
+    ]
+
+
 def test_resolve_principals_arg_bare_flag_requests_guidance() -> None:
     principals, show_guidance = bucket_tool._resolve_principals_arg([""])
     assert principals == []
@@ -1313,3 +1634,98 @@ def test_cmd_add_principal_rejects_non_arn(monkeypatch, capsys) -> None:
     assert bucket_tool.main(["add", "bucket", "--principal", "not-an-arn"]) == 1
     captured = capsys.readouterr()
     assert "must be an IAM role ARN" in captured.err
+
+
+def test_cmd_add_external_role_arn_drives_principal_selection(
+    monkeypatch, capsys
+) -> None:
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {"TopicConfigurations": []},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name="us-west-2")
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.activate()
+
+    sts_client = _client("sts", region_name="us-west-2")
+    sts_stubber = Stubber(sts_client)
+    sts_stubber.add_response(
+        "get_caller_identity",
+        {
+            "Account": "111122223333",
+            "Arn": "arn:aws:iam::111122223333:user/test",
+            "UserId": "test",
+        },
+        {},
+    )
+    sts_stubber.activate()
+
+    role_arn = "arn:aws:iam::111122223333:role/QuiltDataAccessRole"
+    session = FakeSession(s3_client, sns_client, sts_client)
+    monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
+    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: {
+            "account_id": "123456789012",
+            "stack_name": "quilt-demo-stack",
+            "region": "us-east-1",
+        },
+    )
+    _install_fake_quilt3(monkeypatch, add_calls=[])
+
+    assert (
+        bucket_tool.main(
+            ["add", "bucket", "--dry-run", "--external-role-arn", role_arn]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert role_arn in captured.out
+    assert "--external-role-arn" in captured.out
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    sts_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+    sts_stubber.deactivate()
+
+
+def test_cmd_bootstrap_role(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: {"account_id": "123456789012"},
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "ensure_data_access_role",
+        lambda **kwargs: bucket_lib.BootstrapRoleResult(
+            role_arn="arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+            role_name="QuiltDataAccessRole",
+            created=True,
+        ),
+    )
+
+    assert bucket_tool.main(["bootstrap-role", "--yes"]) == 0
+    captured = capsys.readouterr()
+    assert "Created role QuiltDataAccessRole." in captured.out
+    assert "arn:aws:iam::111122223333:role/QuiltDataAccessRole" in captured.out

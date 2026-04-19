@@ -70,6 +70,53 @@ def build_parser() -> argparse.ArgumentParser:
             "Use the bare flag (no value) to print guidance on choosing principals."
         ),
     )
+    add_parser.add_argument(
+        "--external-role-arn",
+        help=(
+            "Data-account role ARN to store as external_role_arn when registering "
+            "the bucket. When set, that ARN is also added to the bucket/SNS policy "
+            "principals unless already present."
+        ),
+    )
+
+    bootstrap_role_parser = subparsers.add_parser(
+        "bootstrap-role",
+        prog="quiltx bucket bootstrap-role",
+        help="Create or update the bucket-owner-side QuiltDataAccessRole.",
+    )
+    bootstrap_role_parser.add_argument(
+        "--profile",
+        help="AWS profile for the data account that owns the bucket.",
+    )
+    bootstrap_role_parser.add_argument(
+        "--role-name",
+        default=bucket_lib.DATA_ACCESS_ROLE_NAME,
+        help=(
+            "IAM role name to create/update "
+            f"(default: {bucket_lib.DATA_ACCESS_ROLE_NAME})."
+        ),
+    )
+    bootstrap_role_parser.add_argument(
+        "--trust-principal",
+        metavar="ARN",
+        action="append",
+        help=(
+            "IAM principal ARN(s) allowed to assume the role. Repeatable or "
+            "comma-separated. Defaults to the control account root."
+        ),
+    )
+    bootstrap_role_parser.add_argument(
+        "--external-id",
+        help=(
+            "Optional sts:ExternalId condition to require in the trust policy. "
+            "Leave unset unless the stack is configured to send one."
+        ),
+    )
+    bootstrap_role_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Apply changes without prompting for confirmation.",
+    )
 
     subparsers.add_parser(
         "list",
@@ -93,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.action == "add":
         return _cmd_add(args)
+    if args.action == "bootstrap-role":
+        return _cmd_bootstrap_role(args)
     if args.action == "list":
         return _cmd_list()
     if args.action == "test":
@@ -176,6 +225,16 @@ def _cmd_add(args: argparse.Namespace) -> int:
         if show_guidance:
             _print_principal_guidance()
             return 0
+        external_role_arn = args.external_role_arn
+        if external_role_arn and not external_role_arn.startswith("arn:aws:iam::"):
+            print(
+                (
+                    "Error: --external-role-arn must be an IAM role ARN, "
+                    f"got {external_role_arn!r}"
+                ),
+                file=sys.stderr,
+            )
+            return 1
         for principal in principals:
             if not principal.startswith("arn:aws:iam::"):
                 print(
@@ -188,8 +247,11 @@ def _cmd_add(args: argparse.Namespace) -> int:
         catalog_name = stack_lib.extract_catalog_name(config)
         stack_payload = _ensure_stack_payload(config, catalog_name)
         control_account_id = _load_control_account_id(stack_payload)
-        effective_principals = principals or [f"arn:aws:iam::{control_account_id}:root"]
-        principal_source = "--principal" if principals else "account root (default)"
+        effective_principals, principal_source = _effective_principals(
+            control_account_id,
+            principals,
+            external_role_arn=external_role_arn,
+        )
         stack_name = _stack_payload_value(stack_payload, "stack_name", "") or None
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
         catalog_url = str(config.get("navigator_url") or catalog_name)
@@ -203,6 +265,32 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
         existing_bucket = admin_buckets.get(args.bucket_name)
         if existing_bucket is not None:
+            existing_external_role_arn = getattr(
+                existing_bucket, "external_role_arn", None
+            )
+            if external_role_arn and existing_external_role_arn != external_role_arn:
+                bucket_title = args.title or getattr(
+                    existing_bucket,
+                    "title",
+                    args.bucket_name,
+                )
+                bucket_lib._register_bucket_with_catalog(
+                    bucket=args.bucket_name,
+                    title=bucket_title,
+                    sns_notification_arn=getattr(
+                        existing_bucket,
+                        "sns_notification_arn",
+                        None,
+                    ),
+                    external_role_arn=external_role_arn,
+                    update=True,
+                )
+                print(
+                    f"Updated bucket {args.bucket_name} with external_role_arn {external_role_arn}."
+                )
+                if args.no_test:
+                    return 0
+                return _verify_bucket_registration_and_access(args.bucket_name)
             print(f"Bucket {args.bucket_name} is already registered.")
             if args.no_test:
                 return 0
@@ -214,7 +302,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         quilt_statement = bucket_lib.build_quilt_policy_statement(
             args.bucket_name,
             control_account_id,
-            principals=principals or None,
+            principals=effective_principals or None,
         )
         merged_policy = bucket_lib.merge_bucket_policy(bucket_policy, quilt_statement)
 
@@ -286,14 +374,17 @@ def _cmd_add(args: argparse.Namespace) -> int:
         )
 
         bucket_title = args.title or args.bucket_name
-        admin_buckets.add(
-            name=args.bucket_name,
+        bucket_lib._register_bucket_with_catalog(
+            bucket=args.bucket_name,
             title=bucket_title,
             sns_notification_arn=sns_topic_arn,
+            external_role_arn=external_role_arn,
         )
 
         print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
         print(f"SNS notifications: {sns_topic_arn}")
+        if external_role_arn:
+            print(f"external_role_arn: {external_role_arn}")
         if args.no_test:
             print(
                 f"Run `quiltx bucket test {args.bucket_name}` to verify registration and access."
@@ -301,6 +392,54 @@ def _cmd_add(args: argparse.Namespace) -> int:
             return 0
         print()
         return _verify_bucket_registration_and_access(args.bucket_name)
+    except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+@auto_login
+def _cmd_bootstrap_role(args: argparse.Namespace) -> int:
+    try:
+        trust_principals, _ = _resolve_principals_arg(args.trust_principal)
+        for principal in trust_principals:
+            if not principal.startswith("arn:aws:iam::"):
+                print(
+                    (
+                        "Error: --trust-principal must be an IAM ARN, "
+                        f"got {principal!r}"
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+
+        config = get_catalog_config()
+        catalog_name = stack_lib.extract_catalog_name(config)
+        stack_payload = _ensure_stack_payload(config, catalog_name)
+        control_account_id = _load_control_account_id(stack_payload)
+        effective_trust_principals = trust_principals or [
+            f"arn:aws:iam::{control_account_id}:root"
+        ]
+        if not args.yes and not _confirm_role_bootstrap(
+            role_name=args.role_name,
+            trust_principals=effective_trust_principals,
+            external_id=args.external_id,
+            profile=args.profile,
+        ):
+            print("Aborted.")
+            return 1
+
+        result = bucket_lib.ensure_data_access_role(
+            control_principals=effective_trust_principals,
+            profile=args.profile,
+            role_name=args.role_name,
+            external_id=args.external_id,
+        )
+        action = "Created" if result.created else "Updated"
+        print(f"{action} role {result.role_name}.")
+        print(f"Role ARN: {result.role_arn}")
+        return 0
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
@@ -416,6 +555,25 @@ def _resolve_principals_arg(
     return principals, show_guidance
 
 
+def _effective_principals(
+    control_account_id: str,
+    principals: list[str],
+    *,
+    external_role_arn: str | None = None,
+) -> tuple[list[str], str]:
+    effective_principals = bucket_lib._effective_principals(
+        principals,
+        external_role_arn=external_role_arn,
+    )
+    if principals and external_role_arn and external_role_arn not in principals:
+        return effective_principals, "--principal + --external-role-arn"
+    if principals:
+        return effective_principals, "--principal"
+    if external_role_arn:
+        return effective_principals, "--external-role-arn"
+    return [f"arn:aws:iam::{control_account_id}:root"], "account root (default)"
+
+
 def _print_principal_guidance() -> None:
     print(
         "The --principal flag sets the IAM ARN(s) granted cross-account access in "
@@ -435,6 +593,32 @@ def _print_principal_guidance() -> None:
         "  quiltx bucket add my-bucket \\\n"
         "      --principal arn:aws:iam::123:role/<stack>-SomeRole-XXXX"
     )
+
+
+def _confirm_role_bootstrap(
+    *,
+    role_name: str,
+    trust_principals: list[str],
+    external_id: str | None,
+    profile: str | None,
+) -> bool:
+    console = Console(width=120)
+    table = Table(
+        title="Bucket role bootstrap",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+        expand=False,
+    )
+    table.add_column("Setting", style="green", no_wrap=True)
+    table.add_column("Value", overflow="fold")
+    table.add_row("Role name", role_name)
+    table.add_row("AWS profile", profile or "<default>")
+    table.add_row("Trust principals", "\n".join(trust_principals))
+    table.add_row("ExternalId", external_id or "<none>")
+    console.print(table)
+    response = input("Continue? [y/N]: ").strip().lower()
+    return response in {"y", "yes"}
 
 
 def _get_session_account_id(session: boto3.Session) -> str:
