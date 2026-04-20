@@ -261,48 +261,39 @@ def _cmd_add(args: argparse.Namespace) -> int:
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
         catalog_url = str(config.get("navigator_url") or catalog_name)
 
+        def _run_add_bucket() -> bucket_lib.AddBucketResult:
+            original_get_catalog_config = bucket_lib.get_catalog_config
+            bucket_lib.get_catalog_config = lambda: config
+            try:
+                return bucket_lib.add_bucket(
+                    args.bucket_name,
+                    title=args.title,
+                    profile=args.profile,
+                    principals=principals or None,
+                    external_role_arn=external_role_arn,
+                )
+            finally:
+                bucket_lib.get_catalog_config = original_get_catalog_config
+
         session = boto3.Session(profile_name=args.profile)
         s3_client = session.client("s3")
         bucket_region = get_bucket_region(args.bucket_name, s3_client=s3_client)
-        sns_client = session.client("sns", region_name=bucket_region)
+        if not args.dry_run:
+            from quilt3.admin import buckets as admin_buckets
 
-        from quilt3.admin import buckets as admin_buckets
-
-        existing_bucket = admin_buckets.get(args.bucket_name)
-        if existing_bucket is not None:
-            existing_external_role_arn = getattr(
-                existing_bucket, "external_role_arn", None
-            )
-            if external_role_arn and existing_external_role_arn != external_role_arn:
-                bucket_title = args.title or getattr(
-                    existing_bucket,
-                    "title",
-                    args.bucket_name,
-                )
-                bucket_config = bucket_lib._register_bucket_with_catalog(
-                    bucket=args.bucket_name,
-                    title=bucket_title,
-                    sns_notification_arn=getattr(
-                        existing_bucket,
-                        "sns_notification_arn",
-                        None,
-                    ),
-                    external_role_arn=external_role_arn,
-                    update=True,
-                )
-                print(
-                    f"Updated bucket {args.bucket_name} with external_role_arn {external_role_arn}."
-                )
-                if bucket_config and bucket_config.get("externalId"):
-                    print(f"external_id: {bucket_config['externalId']}")
+            existing_bucket = admin_buckets.get(args.bucket_name)
+            if existing_bucket is not None:
+                result = _run_add_bucket()
+                print(f"Bucket {args.bucket_name} is already registered.")
+                if external_role_arn:
+                    print(f"external_role_arn: {external_role_arn}")
+                if result.athena_access_role_arn:
+                    print(f"athena_access_role_arn: {result.athena_access_role_arn}")
+                if result.external_id:
+                    print(f"external_id: {result.external_id}")
                 if args.no_test:
                     return 0
                 return _verify_bucket_registration_and_access(args.bucket_name)
-            print(f"Bucket {args.bucket_name} is already registered.")
-            if args.no_test:
-                return 0
-            return _verify_bucket_registration_and_access(args.bucket_name)
-
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
         )
@@ -354,46 +345,18 @@ def _cmd_add(args: argparse.Namespace) -> int:
             print("Aborted.")
             return 1
 
-        if sns_topic_arn is None:
-            sns_topic_arn = bucket_lib.ensure_sns_topic(
-                args.bucket_name,
-                bucket_region,
-                sns_client=sns_client,
-            )
-
-        bucket_lib.configure_sns_topic_policy(
-            args.bucket_name,
-            sns_topic_arn,
-            data_account_id,
-            effective_principals,
-            sns_client=sns_client,
-        )
-
-        bucket_lib.apply_bucket_policy(
-            args.bucket_name,
-            merged_policy,
-            s3_client=s3_client,
-        )
-        bucket_lib.configure_bucket_notifications(
-            args.bucket_name,
-            sns_topic_arn,
-            s3_client=s3_client,
-        )
-
-        bucket_title = args.title or args.bucket_name
-        bucket_config = bucket_lib._register_bucket_with_catalog(
-            bucket=args.bucket_name,
-            title=bucket_title,
-            sns_notification_arn=sns_topic_arn,
-            external_role_arn=external_role_arn,
-        )
-
-        print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
-        print(f"SNS notifications: {sns_topic_arn}")
+        result = _run_add_bucket()
+        if result.already_registered:
+            print(f"Bucket {args.bucket_name} is already registered.")
+        else:
+            print(f"Registered bucket {args.bucket_name} as {result.title}.")
+        print(f"SNS notifications: {result.sns_topic_arn}")
         if external_role_arn:
             print(f"external_role_arn: {external_role_arn}")
-        if bucket_config and bucket_config.get("externalId"):
-            print(f"external_id: {bucket_config['externalId']}")
+        if result.athena_access_role_arn:
+            print(f"athena_access_role_arn: {result.athena_access_role_arn}")
+        if result.external_id:
+            print(f"external_id: {result.external_id}")
         if args.no_test:
             print(
                 f"Run `quiltx bucket test {args.bucket_name}` to verify registration and access."
@@ -577,10 +540,12 @@ def _effective_principals(
     principals: list[str],
     *,
     external_role_arn: str | None = None,
+    athena_access_role_arn: str | None = None,
 ) -> tuple[list[str], str]:
     effective_principals = bucket_lib._effective_principals(
         principals,
         external_role_arn=external_role_arn,
+        athena_access_role_arn=athena_access_role_arn,
     )
     if principals and external_role_arn and external_role_arn not in principals:
         return effective_principals, "--principal + --external-role-arn"

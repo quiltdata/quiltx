@@ -651,6 +651,16 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
         {"Bucket": "bucket"},
     )
     s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
         "put_bucket_policy",
         {},
         {
@@ -666,6 +676,19 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
                 }
             ),
         },
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {
+            "TopicConfigurations": [
+                {
+                    "Id": "existing",
+                    "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
+                    "Events": ["s3:ObjectCreated:*"],
+                }
+            ]
+        },
+        {"Bucket": "bucket"},
     )
     s3_stubber.add_response(
         "get_bucket_notification_configuration",
@@ -755,6 +778,15 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
         },
         {},
     )
+    sts_stubber.add_response(
+        "get_caller_identity",
+        {
+            "Account": "111122223333",
+            "Arn": "arn:aws:iam::111122223333:user/test",
+            "UserId": "test",
+        },
+        {},
+    )
     sts_stubber.activate()
 
     add_calls: list[dict[str, str]] = []
@@ -815,6 +847,16 @@ def test_add_creates_sns(monkeypatch) -> None:
         {"Bucket": "bucket"},
     )
     s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
         "put_bucket_policy",
         {},
         {
@@ -830,6 +872,11 @@ def test_add_creates_sns(monkeypatch) -> None:
                 }
             ),
         },
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {},
+        {"Bucket": "bucket"},
     )
     s3_stubber.add_response(
         "get_bucket_notification_configuration",
@@ -907,6 +954,15 @@ def test_add_creates_sns(monkeypatch) -> None:
 
     sts_client = _client("sts")
     sts_stubber = Stubber(sts_client)
+    sts_stubber.add_response(
+        "get_caller_identity",
+        {
+            "Account": "111122223333",
+            "Arn": "arn:aws:iam::111122223333:user/test",
+            "UserId": "test",
+        },
+        {},
+    )
     sts_stubber.add_response(
         "get_caller_identity",
         {
@@ -1096,25 +1152,64 @@ def test_add_bucket_already_registered(monkeypatch) -> None:
         title="My Bucket",
         sns_topic_arn="",
         external_id=None,
+        athena_access_role_arn=None,
         already_registered=True,
     )
 
 
 def test_add_bucket_already_registered_cross_account(monkeypatch) -> None:
     _stub_stack_and_config(monkeypatch)
+    role_arn = "arn:aws:iam::111122223333:role/QuiltDataAccessRole"
+    athena_role_arn = "arn:aws:iam::123456789012:role/QuiltAthenaAccessRole-quilt"
     _install_fake_quilt3(
         monkeypatch,
         get_result=FakeBucket(
             "bucket",
             "My Bucket",
-            external_role_arn="arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+            external_role_arn=role_arn,
         ),
     )
     monkeypatch.setattr(
         bucket_lib,
         "_get_bucket_config",
-        lambda bucket: {"externalId": "registry-external-id"},
+        lambda bucket: {
+            "externalId": "registry-external-id",
+            "externalRoleArn": role_arn,
+            "athenaAccessRoleArn": athena_role_arn,
+        },
     )
+    applied: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        bucket_lib,
+        "_apply_quilt_access_configuration",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+    sns_client = _client("sns", region_name="us-west-2")
+    sts_client = _client("sts")
+    sts_stubber = Stubber(sts_client)
+    sts_stubber.add_response(
+        "get_caller_identity",
+        {
+            "Account": "111122223333",
+            "Arn": "arn:aws:iam::111122223333:user/test",
+            "UserId": "test",
+        },
+        {},
+    )
+    sts_stubber.activate()
+    session = FakeSession(s3_client, sns_client, sts_client)
+    import boto3 as _boto3
+
+    monkeypatch.setattr(_boto3, "Session", lambda profile_name=None: session)
 
     result = add_bucket("bucket")
     assert result == AddBucketResult(
@@ -1122,8 +1217,24 @@ def test_add_bucket_already_registered_cross_account(monkeypatch) -> None:
         title="My Bucket",
         sns_topic_arn="",
         external_id="registry-external-id",
+        athena_access_role_arn=athena_role_arn,
         already_registered=True,
     )
+    assert applied == [
+        {
+            "bucket": "bucket",
+            "control_account_id": "123456789012",
+            "data_account_id": "111122223333",
+            "sns_topic_arn": None,
+            "principals": [role_arn, athena_role_arn],
+            "s3_client": s3_client,
+            "sns_client": sns_client,
+        }
+    ]
+    s3_stubber.assert_no_pending_responses()
+    sts_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sts_stubber.deactivate()
 
 
 def test_add_bucket_creates_new(monkeypatch) -> None:
@@ -1263,6 +1374,7 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
         title="Demo Bucket",
         sns_topic_arn=topic_arn,
         external_id=None,
+        athena_access_role_arn=None,
         already_registered=False,
     )
     assert add_calls == [
@@ -1283,6 +1395,7 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
 
 def test_add_bucket_creates_new_with_external_role_arn(monkeypatch) -> None:
     role_arn = "arn:aws:iam::111122223333:role/QuiltDataAccessRole"
+    athena_role_arn = "arn:aws:iam::123456789012:role/QuiltAthenaAccessRole-quilt"
     s3_client = _client("s3", region_name="us-west-2")
     s3_stubber = Stubber(s3_client)
     s3_stubber.add_response(
@@ -1391,6 +1504,119 @@ def test_add_bucket_creates_new_with_external_role_arn(monkeypatch) -> None:
             ),
         },
     )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {
+            "Policy": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        bucket_lib.build_quilt_policy_statement(
+                            "bucket",
+                            "123456789012",
+                            principals=[role_arn],
+                        )
+                    ],
+                }
+            )
+        },
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {
+            "Bucket": "bucket",
+            "Policy": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        bucket_lib.build_quilt_policy_statement(
+                            "bucket",
+                            "123456789012",
+                            principals=[role_arn, athena_role_arn],
+                        )
+                    ],
+                }
+            ),
+        },
+    )
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {
+            "Attributes": {
+                "Policy": json.dumps(
+                    {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Sid": "QuiltBucketNotifications",
+                                "Effect": "Allow",
+                                "Principal": {"Service": "s3.amazonaws.com"},
+                                "Action": "sns:Publish",
+                                "Resource": topic_arn,
+                                "Condition": {
+                                    "ArnEquals": {
+                                        "aws:SourceArn": "arn:aws:s3:::bucket"
+                                    },
+                                    "StringEquals": {
+                                        "aws:SourceAccount": "111122223333"
+                                    },
+                                },
+                            },
+                            {
+                                "Sid": "QuiltCrossAccountSNSAccess",
+                                "Effect": "Allow",
+                                "Principal": {"AWS": role_arn},
+                                "Action": [
+                                    "sns:GetTopicAttributes",
+                                    "sns:Subscribe",
+                                ],
+                                "Resource": topic_arn,
+                            },
+                        ],
+                    }
+                )
+            }
+        },
+        {"TopicArn": topic_arn},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "QuiltBucketNotifications",
+                            "Effect": "Allow",
+                            "Principal": {"Service": "s3.amazonaws.com"},
+                            "Action": "sns:Publish",
+                            "Resource": topic_arn,
+                            "Condition": {
+                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
+                                "StringEquals": {"aws:SourceAccount": "111122223333"},
+                            },
+                        },
+                        {
+                            "Sid": "QuiltCrossAccountSNSAccess",
+                            "Effect": "Allow",
+                            "Principal": {"AWS": [role_arn, athena_role_arn]},
+                            "Action": [
+                                "sns:GetTopicAttributes",
+                                "sns:Subscribe",
+                            ],
+                            "Resource": topic_arn,
+                        },
+                    ],
+                }
+            ),
+        },
+    )
     sns_stubber.activate()
 
     sts_client = _client("sts")
@@ -1419,6 +1645,7 @@ def test_add_bucket_creates_new_with_external_role_arn(monkeypatch) -> None:
                     "snsNotificationArn": topic_arn,
                     "externalRoleArn": role_arn,
                     "externalId": "registry-external-id",
+                    "athenaAccessRoleArn": athena_role_arn,
                 },
             }
         }
@@ -1446,6 +1673,7 @@ def test_add_bucket_creates_new_with_external_role_arn(monkeypatch) -> None:
         title="Demo Bucket",
         sns_topic_arn=topic_arn,
         external_id="registry-external-id",
+        athena_access_role_arn=athena_role_arn,
         already_registered=False,
     )
     assert graphql_calls == [
@@ -1524,13 +1752,17 @@ def test_build_quilt_policy_statement_without_principals_uses_root() -> None:
 
 def test_effective_principals_adds_external_role_arn() -> None:
     role_arn = "arn:aws:iam::111122223333:role/QuiltDataAccessRole"
-    assert bucket_lib._effective_principals([], external_role_arn=role_arn) == [
-        role_arn
-    ]
+    athena_role_arn = "arn:aws:iam::123456789012:role/QuiltAthenaAccessRole-quilt"
     assert bucket_lib._effective_principals(
-        [role_arn],
+        [],
         external_role_arn=role_arn,
-    ) == [role_arn]
+        athena_access_role_arn=athena_role_arn,
+    ) == [role_arn, athena_role_arn]
+    assert bucket_lib._effective_principals(
+        [role_arn, athena_role_arn],
+        external_role_arn=role_arn,
+        athena_access_role_arn=athena_role_arn,
+    ) == [role_arn, athena_role_arn]
 
 
 def test_build_data_access_trust_policy_with_external_id() -> None:
@@ -1563,6 +1795,7 @@ def test_get_bucket_config(monkeypatch) -> None:
                 "snsNotificationArn": "arn:aws:sns:us-east-1:111122223333:bucket",
                 "externalRoleArn": "arn:aws:iam::111122223333:role/QuiltDataAccessRole",
                 "externalId": "registry-external-id",
+                "athenaAccessRoleArn": "arn:aws:iam::123456789012:role/QuiltAthenaAccessRole-quilt",
             }
         },
     )
@@ -1573,6 +1806,7 @@ def test_get_bucket_config(monkeypatch) -> None:
         "snsNotificationArn": "arn:aws:sns:us-east-1:111122223333:bucket",
         "externalRoleArn": "arn:aws:iam::111122223333:role/QuiltDataAccessRole",
         "externalId": "registry-external-id",
+        "athenaAccessRoleArn": "arn:aws:iam::123456789012:role/QuiltAthenaAccessRole-quilt",
     }
 
 

@@ -47,6 +47,7 @@ mutation BucketAdd($input: BucketAddInput!) {
         snsNotificationArn
         externalRoleArn
         externalId
+        athenaAccessRoleArn
       }
     }
     ... on InsufficientPermissions {
@@ -67,6 +68,7 @@ mutation BucketUpdate($name: String!, $input: BucketUpdateInput!) {
         snsNotificationArn
         externalRoleArn
         externalId
+        athenaAccessRoleArn
       }
     }
     ... on InsufficientPermissions {
@@ -84,6 +86,7 @@ query BucketConfig($name: String!) {
     snsNotificationArn
     externalRoleArn
     externalId
+    athenaAccessRoleArn
   }
 }
 """
@@ -285,6 +288,7 @@ class AddBucketResult:
     title: str
     sns_topic_arn: str
     external_id: str | None
+    athena_access_role_arn: str | None
     already_registered: bool
 
 
@@ -343,8 +347,9 @@ def add_bucket(
         raise ValueError("Stack metadata missing account_id. Run 'quiltx stack' first.")
     control_account_id = str(control_account_id)
 
+    requested_principals = list(principals) if principals else []
     principal_list = _effective_principals(
-        principals,
+        requested_principals,
         external_role_arn=external_role_arn,
     )
     sns_principal: str | list[str] = (
@@ -370,6 +375,37 @@ def add_bucket(
             bucket_config = _get_bucket_config(bucket)
         else:
             bucket_config = None
+        athena_access_role_arn = _get_athena_access_role_arn(bucket_config)
+        if bucket_config is not None:
+            final_external_role_arn = (
+                external_role_arn
+                or bucket_config.get("externalRoleArn")
+                or existing_external_role_arn
+            )
+            final_principals = _effective_principals(
+                requested_principals,
+                external_role_arn=(
+                    str(final_external_role_arn) if final_external_role_arn else None
+                ),
+                athena_access_role_arn=athena_access_role_arn,
+            )
+            if final_principals:
+                session = boto3.Session(profile_name=profile)
+                s3_client = session.client("s3")
+                bucket_region = get_bucket_region(bucket, s3_client=s3_client)
+                sns_client = session.client("sns", region_name=bucket_region)
+                data_account_id = str(
+                    session.client("sts").get_caller_identity()["Account"]
+                )
+                _apply_quilt_access_configuration(
+                    bucket=bucket,
+                    control_account_id=control_account_id,
+                    data_account_id=data_account_id,
+                    sns_topic_arn=getattr(existing, "sns_notification_arn", None),
+                    principals=final_principals,
+                    s3_client=s3_client,
+                    sns_client=sns_client,
+                )
         return AddBucketResult(
             bucket=bucket,
             title=getattr(existing, "title", bucket_title),
@@ -377,6 +413,7 @@ def add_bucket(
             external_id=(
                 None if bucket_config is None else bucket_config.get("externalId")
             ),
+            athena_access_role_arn=athena_access_role_arn,
             already_registered=True,
         )
 
@@ -386,12 +423,15 @@ def add_bucket(
     sns_client = session.client("sns", region_name=bucket_region)
     data_account_id = str(session.client("sts").get_caller_identity()["Account"])
 
-    existing_policy = get_bucket_policy(bucket, s3_client=s3_client)
-    statement = build_quilt_policy_statement(
-        bucket, control_account_id, principals=principal_list or None
+    _apply_quilt_access_configuration(
+        bucket=bucket,
+        control_account_id=control_account_id,
+        data_account_id=data_account_id,
+        sns_topic_arn=None,
+        principals=principal_list,
+        s3_client=s3_client,
+        sns_client=sns_client,
     )
-    merged = merge_bucket_policy(existing_policy, statement)
-    apply_bucket_policy(bucket, merged, s3_client=s3_client)
 
     # SNS topic
     sns_topic_arn = get_bucket_notification_sns(bucket, s3_client=s3_client)
@@ -416,12 +456,29 @@ def add_bucket(
         sns_notification_arn=sns_topic_arn,
         external_role_arn=external_role_arn,
     )
+    athena_access_role_arn = _get_athena_access_role_arn(bucket_config)
+    final_principals = _effective_principals(
+        requested_principals,
+        external_role_arn=external_role_arn,
+        athena_access_role_arn=athena_access_role_arn,
+    )
+    if final_principals != principal_list:
+        _apply_quilt_access_configuration(
+            bucket=bucket,
+            control_account_id=control_account_id,
+            data_account_id=data_account_id,
+            sns_topic_arn=sns_topic_arn,
+            principals=final_principals,
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
 
     return AddBucketResult(
         bucket=bucket,
         title=bucket_title,
         sns_topic_arn=sns_topic_arn,
         external_id=None if bucket_config is None else bucket_config.get("externalId"),
+        athena_access_role_arn=athena_access_role_arn,
         already_registered=False,
     )
 
@@ -486,11 +543,49 @@ def _effective_principals(
     principals: Sequence[str] | None,
     *,
     external_role_arn: str | None = None,
+    athena_access_role_arn: str | None = None,
 ) -> list[str]:
     result = list(principals) if principals else []
     if external_role_arn and external_role_arn not in result:
         result.append(external_role_arn)
+    if athena_access_role_arn and athena_access_role_arn not in result:
+        result.append(athena_access_role_arn)
     return result
+
+
+def _get_athena_access_role_arn(bucket_config: Mapping[str, Any] | None) -> str | None:
+    if not bucket_config:
+        return None
+    value = bucket_config.get("athenaAccessRoleArn")
+    return str(value) if value else None
+
+
+def _apply_quilt_access_configuration(
+    *,
+    bucket: str,
+    control_account_id: str,
+    data_account_id: str,
+    sns_topic_arn: str | None,
+    principals: Sequence[str],
+    s3_client: Any,
+    sns_client: Any,
+) -> None:
+    existing_policy = get_bucket_policy(bucket, s3_client=s3_client)
+    statement = build_quilt_policy_statement(
+        bucket,
+        control_account_id,
+        principals=list(principals) or None,
+    )
+    merged = merge_bucket_policy(existing_policy, statement)
+    apply_bucket_policy(bucket, merged, s3_client=s3_client)
+    if sns_topic_arn:
+        configure_sns_topic_policy(
+            bucket,
+            sns_topic_arn,
+            data_account_id,
+            list(principals) or f"arn:aws:iam::{control_account_id}:root",
+            sns_client=sns_client,
+        )
 
 
 def _register_bucket_with_catalog(
