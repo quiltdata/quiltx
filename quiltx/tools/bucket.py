@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create or update the bucket-owner-side QuiltDataAccessRole.",
     )
     bootstrap_role_parser.add_argument(
+        "bucket_name",
+        nargs="?",
+        help="Registered bucket name to read the registry-managed ExternalId from.",
+    )
+    bootstrap_role_parser.add_argument(
         "--profile",
         help="AWS profile for the data account that owns the bucket.",
     )
@@ -109,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--external-id",
         help=(
             "Optional sts:ExternalId condition to require in the trust policy. "
-            "Leave unset unless the stack is configured to send one."
+            "Defaults to the registry-managed value for BUCKET_NAME when provided."
         ),
     )
     bootstrap_role_parser.add_argument(
@@ -274,7 +279,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
                     "title",
                     args.bucket_name,
                 )
-                bucket_lib._register_bucket_with_catalog(
+                bucket_config = bucket_lib._register_bucket_with_catalog(
                     bucket=args.bucket_name,
                     title=bucket_title,
                     sns_notification_arn=getattr(
@@ -288,6 +293,8 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 print(
                     f"Updated bucket {args.bucket_name} with external_role_arn {external_role_arn}."
                 )
+                if bucket_config and bucket_config.get("externalId"):
+                    print(f"external_id: {bucket_config['externalId']}")
                 if args.no_test:
                     return 0
                 return _verify_bucket_registration_and_access(args.bucket_name)
@@ -374,7 +381,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         )
 
         bucket_title = args.title or args.bucket_name
-        bucket_lib._register_bucket_with_catalog(
+        bucket_config = bucket_lib._register_bucket_with_catalog(
             bucket=args.bucket_name,
             title=bucket_title,
             sns_notification_arn=sns_topic_arn,
@@ -385,6 +392,8 @@ def _cmd_add(args: argparse.Namespace) -> int:
         print(f"SNS notifications: {sns_topic_arn}")
         if external_role_arn:
             print(f"external_role_arn: {external_role_arn}")
+        if bucket_config and bucket_config.get("externalId"):
+            print(f"external_id: {bucket_config['externalId']}")
         if args.no_test:
             print(
                 f"Run `quiltx bucket test {args.bucket_name}` to verify registration and access."
@@ -421,10 +430,16 @@ def _cmd_bootstrap_role(args: argparse.Namespace) -> int:
         effective_trust_principals = trust_principals or [
             f"arn:aws:iam::{control_account_id}:root"
         ]
+        external_id = args.external_id
+        if external_id is None and args.bucket_name:
+            bucket_config = bucket_lib._get_bucket_config(args.bucket_name)
+            if bucket_config is None:
+                raise ValueError(f"bucket {args.bucket_name!r} is not registered")
+            external_id = bucket_config.get("externalId")
         if not args.yes and not _confirm_role_bootstrap(
             role_name=args.role_name,
             trust_principals=effective_trust_principals,
-            external_id=args.external_id,
+            external_id=external_id,
             profile=args.profile,
         ):
             print("Aborted.")
@@ -434,11 +449,13 @@ def _cmd_bootstrap_role(args: argparse.Namespace) -> int:
             control_principals=effective_trust_principals,
             profile=args.profile,
             role_name=args.role_name,
-            external_id=args.external_id,
+            external_id=external_id,
         )
         action = "Created" if result.created else "Updated"
         print(f"{action} role {result.role_name}.")
         print(f"Role ARN: {result.role_arn}")
+        if external_id:
+            print(f"ExternalId: {external_id}")
         return 0
     except Exception as exc:
         if "Authentication failed" in str(exc):

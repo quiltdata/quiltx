@@ -1095,6 +1095,33 @@ def test_add_bucket_already_registered(monkeypatch) -> None:
         bucket="bucket",
         title="My Bucket",
         sns_topic_arn="",
+        external_id=None,
+        already_registered=True,
+    )
+
+
+def test_add_bucket_already_registered_cross_account(monkeypatch) -> None:
+    _stub_stack_and_config(monkeypatch)
+    _install_fake_quilt3(
+        monkeypatch,
+        get_result=FakeBucket(
+            "bucket",
+            "My Bucket",
+            external_role_arn="arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+        ),
+    )
+    monkeypatch.setattr(
+        bucket_lib,
+        "_get_bucket_config",
+        lambda bucket: {"externalId": "registry-external-id"},
+    )
+
+    result = add_bucket("bucket")
+    assert result == AddBucketResult(
+        bucket="bucket",
+        title="My Bucket",
+        sns_topic_arn="",
+        external_id="registry-external-id",
         already_registered=True,
     )
 
@@ -1235,6 +1262,7 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
         bucket="bucket",
         title="Demo Bucket",
         sns_topic_arn=topic_arn,
+        external_id=None,
         already_registered=False,
     )
     assert add_calls == [
@@ -1382,7 +1410,18 @@ def test_add_bucket_creates_new_with_external_role_arn(monkeypatch) -> None:
 
     def _graphql_request(query, variables):
         graphql_calls.append({"query": query, "variables": variables})
-        return {"bucketAdd": {"__typename": "BucketAddSuccess"}}
+        return {
+            "bucketAdd": {
+                "__typename": "BucketAddSuccess",
+                "bucketConfig": {
+                    "name": "bucket",
+                    "title": "Demo Bucket",
+                    "snsNotificationArn": topic_arn,
+                    "externalRoleArn": role_arn,
+                    "externalId": "registry-external-id",
+                },
+            }
+        }
 
     monkeypatch.setattr(
         bucket_lib,
@@ -1406,6 +1445,7 @@ def test_add_bucket_creates_new_with_external_role_arn(monkeypatch) -> None:
         bucket="bucket",
         title="Demo Bucket",
         sns_topic_arn=topic_arn,
+        external_id="registry-external-id",
         already_registered=False,
     )
     assert graphql_calls == [
@@ -1509,6 +1549,30 @@ def test_build_data_access_trust_policy_with_external_id() -> None:
                 "Condition": {"StringEquals": {"sts:ExternalId": "shared-external-id"}},
             }
         ],
+    }
+
+
+def test_get_bucket_config(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bucket_lib,
+        "_graphql_request",
+        lambda query, variables: {
+            "bucketConfig": {
+                "name": variables["name"],
+                "title": "Demo Bucket",
+                "snsNotificationArn": "arn:aws:sns:us-east-1:111122223333:bucket",
+                "externalRoleArn": "arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+                "externalId": "registry-external-id",
+            }
+        },
+    )
+
+    assert bucket_lib._get_bucket_config("bucket") == {
+        "name": "bucket",
+        "title": "Demo Bucket",
+        "snsNotificationArn": "arn:aws:sns:us-east-1:111122223333:bucket",
+        "externalRoleArn": "arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+        "externalId": "registry-external-id",
     }
 
 
@@ -1769,3 +1833,46 @@ def test_cmd_bootstrap_role(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "Created role QuiltDataAccessRole." in captured.out
     assert "arn:aws:iam::111122223333:role/QuiltDataAccessRole" in captured.out
+
+
+def test_cmd_bootstrap_role_uses_registry_external_id(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: {"account_id": "123456789012"},
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "_get_bucket_config",
+        lambda bucket_name: {"externalId": "registry-external-id"},
+    )
+    ensure_calls: list[dict[str, object]] = []
+
+    def fake_ensure_data_access_role(
+        **kwargs: object,
+    ) -> bucket_lib.BootstrapRoleResult:
+        ensure_calls.append(kwargs)
+        return bucket_lib.BootstrapRoleResult(
+            role_arn="arn:aws:iam::111122223333:role/QuiltDataAccessRole",
+            role_name="QuiltDataAccessRole",
+            created=False,
+        )
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "ensure_data_access_role",
+        fake_ensure_data_access_role,
+    )
+
+    assert bucket_tool.main(["bootstrap-role", "bucket", "--yes"]) == 0
+    assert ensure_calls == [
+        {
+            "control_principals": ["arn:aws:iam::123456789012:root"],
+            "profile": None,
+            "role_name": "QuiltDataAccessRole",
+            "external_id": "registry-external-id",
+        }
+    ]
+    captured = capsys.readouterr()
+    assert "ExternalId: registry-external-id" in captured.out

@@ -46,6 +46,7 @@ mutation BucketAdd($input: BucketAddInput!) {
         title
         snsNotificationArn
         externalRoleArn
+        externalId
       }
     }
     ... on InsufficientPermissions {
@@ -65,11 +66,24 @@ mutation BucketUpdate($name: String!, $input: BucketUpdateInput!) {
         title
         snsNotificationArn
         externalRoleArn
+        externalId
       }
     }
     ... on InsufficientPermissions {
       message
     }
+  }
+}
+"""
+
+_BUCKET_CONFIG_QUERY = """
+query BucketConfig($name: String!) {
+  bucketConfig(name: $name) {
+    name
+    title
+    snsNotificationArn
+    externalRoleArn
+    externalId
   }
 }
 """
@@ -270,6 +284,7 @@ class AddBucketResult:
     bucket: str
     title: str
     sns_topic_arn: str
+    external_id: str | None
     already_registered: bool
 
 
@@ -344,17 +359,24 @@ def add_bucket(
         existing_external_role_arn = getattr(existing, "external_role_arn", None)
         if external_role_arn and existing_external_role_arn != external_role_arn:
             existing_title = getattr(existing, "title", None) or bucket_title
-            _register_bucket_with_catalog(
+            bucket_config = _register_bucket_with_catalog(
                 bucket=bucket,
                 title=existing_title,
                 sns_notification_arn=getattr(existing, "sns_notification_arn", None),
                 external_role_arn=external_role_arn,
                 update=True,
             )
+        elif external_role_arn or existing_external_role_arn:
+            bucket_config = _get_bucket_config(bucket)
+        else:
+            bucket_config = None
         return AddBucketResult(
             bucket=bucket,
             title=getattr(existing, "title", bucket_title),
             sns_topic_arn=getattr(existing, "sns_notification_arn", "") or "",
+            external_id=(
+                None if bucket_config is None else bucket_config.get("externalId")
+            ),
             already_registered=True,
         )
 
@@ -388,7 +410,7 @@ def add_bucket(
     configure_bucket_notifications(bucket, sns_topic_arn, s3_client=s3_client)
 
     # Register in Quilt catalog
-    _register_bucket_with_catalog(
+    bucket_config = _register_bucket_with_catalog(
         bucket=bucket,
         title=bucket_title,
         sns_notification_arn=sns_topic_arn,
@@ -399,6 +421,7 @@ def add_bucket(
         bucket=bucket,
         title=bucket_title,
         sns_topic_arn=sns_topic_arn,
+        external_id=None if bucket_config is None else bucket_config.get("externalId"),
         already_registered=False,
     )
 
@@ -477,7 +500,7 @@ def _register_bucket_with_catalog(
     sns_notification_arn: str | None,
     external_role_arn: str | None = None,
     update: bool = False,
-) -> None:
+) -> dict[str, Any] | None:
     if external_role_arn is None:
         from quilt3.admin import buckets as admin_buckets
 
@@ -493,7 +516,7 @@ def _register_bucket_with_catalog(
                 title=title,
                 sns_notification_arn=sns_notification_arn,
             )
-        return
+        return None
 
     input_payload = {
         "title": title,
@@ -515,10 +538,25 @@ def _register_bucket_with_catalog(
     result = data[result_key]
     typename = result.get("__typename")
     if typename in {"BucketAddSuccess", "BucketUpdateSuccess"}:
-        return
+        bucket_config = result.get("bucketConfig")
+        if bucket_config is None:
+            return None
+        if not isinstance(bucket_config, dict):
+            raise ValueError("invalid GraphQL bucketConfig payload")
+        return bucket_config
     if typename == "InsufficientPermissions":
         raise ValueError(result.get("message") or "insufficient permissions")
     raise ValueError(f"bucket registration failed: {typename}")
+
+
+def _get_bucket_config(bucket: str) -> dict[str, Any] | None:
+    data = _graphql_request(_BUCKET_CONFIG_QUERY, {"name": bucket})
+    bucket_config = data.get("bucketConfig")
+    if bucket_config is None:
+        return None
+    if not isinstance(bucket_config, dict):
+        raise ValueError("invalid GraphQL bucketConfig payload")
+    return bucket_config
 
 
 def _graphql_request(query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
