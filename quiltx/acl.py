@@ -17,7 +17,7 @@ from quilt3.admin import sso_config as admin_sso_config
 from quilt3.admin.types import Permission
 
 INLINE_POLICY_SUFFIX = "__inline"
-NEW_FORMAT_KEYS = {"policies", "roles", "store_last_login_context", "multi_sso"}
+NEW_FORMAT_KEYS = {"policies", "roles", "store_last_login_context"}
 OLD_FORMAT_KEYS = {"bucket_policies", "sso"}
 NEW_FORMAT_EXAMPLE = "spec/060-stack-acl/simpler-stack-acl.yml"
 EVERYONE_GROUP = "Everyone"
@@ -47,7 +47,6 @@ class AclConfig:
     policies: list[AclPolicy]
     roles: dict[str, AclStaticRole]
     store_last_login_context: bool = False
-    multi_sso: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,10 +167,6 @@ def parse_acl_config(path: str | Path) -> AclConfig:
     if not isinstance(store_last_login_context, bool):
         raise ValueError("'store_last_login_context' must be a boolean")
 
-    multi_sso = raw.get("multi_sso", False)
-    if not isinstance(multi_sso, bool):
-        raise ValueError("'multi_sso' must be a boolean")
-
     raw_policies = raw.get("policies") or {}
     raw_roles = raw.get("roles") or {}
 
@@ -280,7 +275,6 @@ def parse_acl_config(path: str | Path) -> AclConfig:
         policies=policies,
         roles=roles,
         store_last_login_context=store_last_login_context,
-        multi_sso=multi_sso,
     )
 
 
@@ -406,10 +400,8 @@ def build_sso_config(config: AclConfig) -> str | None:
     if not desired_state.sso_mappings and desired_state.default_role_name is None:
         return None
 
-    payload: dict[str, Any] = {"version": "1.0", "mappings": []}
+    payload: dict[str, Any] = {"version": "1.0", "multi_sso": True, "mappings": []}
     payload["store_last_login_context"] = config.store_last_login_context
-    if config.multi_sso:
-        payload["multi_sso"] = True
     if desired_state.default_role_name is not None:
         payload["default_role"] = desired_state.default_role_name
 
