@@ -400,7 +400,7 @@ def build_sso_config(config: AclConfig) -> str | None:
     if not desired_state.sso_mappings and desired_state.default_role_name is None:
         return None
 
-    payload: dict[str, Any] = {"version": "1.0", "multi_sso": True, "mappings": []}
+    payload: dict[str, Any] = {"version": "1.0", "union_roles": True, "mappings": []}
     payload["store_last_login_context"] = config.store_last_login_context
     if desired_state.default_role_name is not None:
         payload["default_role"] = desired_state.default_role_name
