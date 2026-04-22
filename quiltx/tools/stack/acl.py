@@ -86,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
         warnings = acl_lib.apply_acl(diff, current, verbose=args.verbose)
         for warning in warnings:
             print(f"Warning: {warning}", file=sys.stderr)
+        if warnings:
+            print(f"Done with {len(warnings)} warning(s).", file=sys.stderr)
+            return 1
         print("Done.")
         return 0
     except Exception as exc:

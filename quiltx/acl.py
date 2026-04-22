@@ -543,6 +543,14 @@ def apply_acl(
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
+        dropped = _dropped_permissions(policy.permissions, created.permissions)
+        if dropped:
+            detail = (
+                f"server accepted create but dropped permissions: "
+                f"{', '.join(dropped)}"
+            )
+            warnings.append(f"Policy '{policy.title}' {detail}")
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
     for policy in diff.policies_to_update:
         _print_apply_step(f"update policy {policy.title}", verbose=verbose)
         affected = _policy_uses_buckets(policy.permissions, failed_buckets)
@@ -567,6 +575,14 @@ def apply_acl(
             continue
         known_policies[policy.title] = updated
         print(f"  ~ policy {policy.title}")
+        dropped = _dropped_permissions(policy.permissions, updated.permissions)
+        if dropped:
+            detail = (
+                f"server accepted update but dropped permissions: "
+                f"{', '.join(dropped)}"
+            )
+            warnings.append(f"Policy '{policy.title}' {detail}")
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
 
     for role in diff.roles_to_create:
         _print_apply_step(f"create role {role.name}", verbose=verbose)
@@ -918,6 +934,17 @@ def _canonical_permissions(permissions: list[Permission]) -> list[tuple[str, str
     return sorted(
         (permission.bucket, str(permission.level)) for permission in permissions
     )
+
+
+def _dropped_permissions(
+    sent: list[Permission], returned: list[Permission]
+) -> list[str]:
+    returned_set = set(_canonical_permissions(returned))
+    return [
+        f"{level.split('.')[-1]}:{bucket}"
+        for bucket, level in _canonical_permissions(sent)
+        if (bucket, level) not in returned_set
+    ]
 
 
 def _same_yaml(left: str | None, right: str | None) -> bool:

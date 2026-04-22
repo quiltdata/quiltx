@@ -353,12 +353,12 @@ def _verify_bucket_registration_and_access(bucket_name: str) -> int:
         )
         if registered is None:
             raise ValueError(f"{bucket_name} is not registered in Quilt")
-        print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
 
         b = quilt3.Bucket(bucket_uri)
         # ls() goes through the control account — if the cross-account
         # bucket policy is wrong, this raises AccessDenied.
         list(b.ls())
+        print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
         print(f"OK: control account can read {bucket_uri}")
         return 0
     except Exception as exc:
