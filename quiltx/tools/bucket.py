@@ -204,11 +204,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
         existing_bucket = admin_buckets.get(args.bucket_name)
         if existing_bucket is not None:
             print(
-                f"Bucket {args.bucket_name} is already registered in Quilt; "
-                f"skipping S3 bucket policy, SNS notification, and "
-                f"cross-account principal grants — none of those were "
-                f"reapplied on this run."
+                f"Bucket {args.bucket_name}: already registered in Quilt; "
+                "nothing reapplied."
             )
+            print("  - skipped: S3 bucket policy")
+            print("  - skipped: SNS notification")
+            print("  - skipped: cross-account principal grants")
             if args.no_test:
                 return 0
             return _verify_bucket_registration_and_access(
@@ -308,7 +309,10 @@ def _cmd_add(args: argparse.Namespace) -> int:
             )
             return 0
         print()
-        return _verify_bucket_registration_and_access(args.bucket_name)
+        return _verify_bucket_registration_and_access(
+            args.bucket_name,
+            control_account_id=control_account_id,
+        )
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
@@ -356,6 +360,7 @@ def _verify_bucket_registration_and_access(
     from quilt3.admin import buckets as admin_buckets
 
     bucket_uri = f"s3://{bucket_name}"
+    registered = None
     try:
         registered = next(
             (bucket for bucket in admin_buckets.list() if bucket.name == bucket_name),
@@ -374,18 +379,22 @@ def _verify_bucket_registration_and_access(
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
-        principal = (
-            f"arn:aws:iam::{control_account_id}:root"
+        owner_line = (
+            f"  - S3 bucket owner account: {control_account_id} "
+            "(same as control account)"
             if control_account_id
-            else "the control account"
+            else "  - S3 bucket owner account: unknown"
         )
-        print(
-            f"Bucket {bucket_name} is registered in Quilt, but its S3 "
-            f"bucket policy does not grant {principal} access: {exc}. "
-            f"Until that grant is in place, managed Quilt roles referencing "
-            f"this bucket will be silently dropped by the catalog.",
-            file=sys.stderr,
-        )
+        registered_tag = "yes" if registered is not None else "no"
+        lines = [
+            f"Bucket {bucket_name}: ls() via control account failed.",
+            f"  - registered in Quilt: {registered_tag}",
+            owner_line,
+            f"  - ls() error: {exc}",
+            "  - likely cause: no managed Quilt policy currently grants "
+            "the control-account role s3 access to this bucket",
+        ]
+        print("\n".join(lines), file=sys.stderr)
         return 1
 
 
