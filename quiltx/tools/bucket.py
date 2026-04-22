@@ -203,10 +203,18 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
         existing_bucket = admin_buckets.get(args.bucket_name)
         if existing_bucket is not None:
-            print(f"Bucket {args.bucket_name} is already registered.")
+            print(
+                f"Bucket {args.bucket_name} is already registered in Quilt; "
+                f"skipping S3 bucket policy, SNS notification, and "
+                f"cross-account principal grants — none of those were "
+                f"reapplied on this run."
+            )
             if args.no_test:
                 return 0
-            return _verify_bucket_registration_and_access(args.bucket_name)
+            return _verify_bucket_registration_and_access(
+                args.bucket_name,
+                control_account_id=control_account_id,
+            )
 
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
@@ -341,7 +349,9 @@ def _cmd_test(args: argparse.Namespace) -> int:
 
 
 @auto_login
-def _verify_bucket_registration_and_access(bucket_name: str) -> int:
+def _verify_bucket_registration_and_access(
+    bucket_name: str, *, control_account_id: str | None = None
+) -> int:
     import quilt3
     from quilt3.admin import buckets as admin_buckets
 
@@ -364,8 +374,16 @@ def _verify_bucket_registration_and_access(bucket_name: str) -> int:
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
+        principal = (
+            f"arn:aws:iam::{control_account_id}:root"
+            if control_account_id
+            else "the control account"
+        )
         print(
-            f"Control account cannot read {bucket_uri}: {exc}",
+            f"Bucket {bucket_name} is registered in Quilt, but its S3 "
+            f"bucket policy does not grant {principal} access: {exc}. "
+            f"Until that grant is in place, managed Quilt roles referencing "
+            f"this bucket will be silently dropped by the catalog.",
             file=sys.stderr,
         )
         return 1
