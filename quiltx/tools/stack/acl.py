@@ -137,8 +137,10 @@ def _handle_policy_drift(
         file=sys.stderr,
     )
     to_reset: list[str] = []
+    all_affected_roles: set[str] = set()
     for item in drift:
         affected_roles = acl_lib.managed_roles_using_policy(item.title, current)
+        all_affected_roles.update(affected_roles)
         print(f"  policy {item.title}:", file=sys.stderr)
         if item.missing:
             print(f"    missing on server: {', '.join(item.missing)}", file=sys.stderr)
@@ -165,9 +167,32 @@ def _handle_policy_drift(
     if not to_reset:
         return warnings, current
 
+    affected_users = acl_lib.users_assigned_to_roles(all_affected_roles)
+    if affected_users:
+        print(
+            "WARNING: the following users will be temporarily reassigned "
+            "to the default role while their roles are recreated:",
+            file=sys.stderr,
+        )
+        for binding in affected_users:
+            primary = binding.primary or "(none)"
+            extras = ", ".join(binding.extras) if binding.extras else "(none)"
+            print(
+                f"  - {binding.user_name}: primary={primary} extras={extras}",
+                file=sys.stderr,
+            )
+        print(
+            "  If you are one of these users, your active session may need "
+            "to re-authenticate after the reset completes.",
+            file=sys.stderr,
+        )
+
     print("Resetting drifted policies...")
+    user_snapshots: list[acl_lib.UserRoleBinding] = []
     for title in to_reset:
-        warnings.extend(acl_lib.reset_policy(title, current, verbose=verbose))
+        reset_warnings, snap = acl_lib.reset_policy(title, current, verbose=verbose)
+        warnings.extend(reset_warnings)
+        user_snapshots.extend(snap)
 
     post_reset = acl_lib.fetch_current_state()
     new_diff = acl_lib.compute_diff(desired, post_reset)
@@ -175,6 +200,12 @@ def _handle_policy_drift(
         print("Reapplying after reset...")
         warnings.extend(acl_lib.apply_acl(new_diff, post_reset, verbose=verbose))
         post_reset = acl_lib.fetch_current_state()
+
+    if user_snapshots:
+        print("Restoring user role bindings...")
+        warnings.extend(
+            acl_lib.restore_user_role_bindings(user_snapshots, verbose=verbose)
+        )
 
     residual = acl_lib.detect_policy_drift(desired, post_reset)
     for item in residual:

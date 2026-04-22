@@ -14,6 +14,7 @@ from quilt3.admin import buckets as admin_buckets
 from quilt3.admin import policies as admin_policies
 from quilt3.admin import roles as admin_roles
 from quilt3.admin import sso_config as admin_sso_config
+from quilt3.admin import users as admin_users
 from quilt3.admin.types import Permission
 
 INLINE_POLICY_SUFFIX = "__inline"
@@ -785,24 +786,141 @@ def detach_sso_mappings_for_roles(
     return warnings
 
 
-def reset_policy(
-    title: str, current: CurrentState, *, verbose: bool = False
-) -> list[str]:
-    """Delete a managed policy and any managed roles referencing it.
+@dataclass(frozen=True)
+class UserRoleBinding:
+    """Snapshot of a user's role assignments for restore after role recreate."""
 
-    Removes SSO mappings to the affected roles first, since roleDeleteManaged
-    is rejected while those mappings exist. After calling this, the caller
-    should refetch state and re-run the normal reconcile path, which will
-    recreate the policy via policyCreateManaged and the roles via
-    roleCreateManaged — a different backend codepath than the one that
-    failed — and reattach SSO mappings from the desired config.
+    user_name: str
+    primary: str | None
+    extras: list[str]
+
+
+def detach_users_from_role(
+    role_name: str, *, verbose: bool = False
+) -> tuple[list[str], list[UserRoleBinding]]:
+    """Remove a role from every user that has it assigned.
+
+    The registry rejects roleDeleteManaged while a user still has the role
+    as their primary or extra role. Returns (warnings, snapshot) where
+    snapshot lets callers restore the original assignments once the role
+    has been recreated.
     """
     warnings: list[str] = []
+    snapshot: list[UserRoleBinding] = []
+    default_role = admin_roles.get_default()
+    fallback_name = default_role.name if default_role is not None else None
+    for user in admin_users.list():
+        primary = user.role.name if user.role else None
+        extras = [
+            r.name for r in (getattr(user, "extra_roles", None) or []) if r is not None
+        ]
+        if primary != role_name and role_name not in extras:
+            continue
+        snapshot.append(
+            UserRoleBinding(user_name=user.name, primary=primary, extras=extras)
+        )
+        _print_apply_step(
+            f"detach user {user.name} from role {role_name}", verbose=verbose
+        )
+        try:
+            admin_users.remove_roles(user.name, [role_name], fallback=fallback_name)
+            print(f"  ~ user {user.name} (detached {role_name})")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"User '{user.name}' could not be detached from "
+                f"role '{role_name}': {detail}"
+            )
+            print(f"  ! user {user.name}: {detail}", file=sys.stderr)
+    return warnings, snapshot
+
+
+def users_assigned_to_roles(role_names: set[str]) -> list[UserRoleBinding]:
+    """Snapshot user assignments for the given roles without modifying state."""
+    bindings: list[UserRoleBinding] = []
+    for user in admin_users.list():
+        primary = user.role.name if user.role else None
+        extras = [
+            r.name for r in (getattr(user, "extra_roles", None) or []) if r is not None
+        ]
+        if primary in role_names or any(e in role_names for e in extras):
+            bindings.append(
+                UserRoleBinding(user_name=user.name, primary=primary, extras=extras)
+            )
+    return bindings
+
+
+def restore_user_role_bindings(
+    bindings: list[UserRoleBinding], *, verbose: bool = False
+) -> list[str]:
+    """Reapply captured user role assignments after affected roles exist again."""
+    warnings: list[str] = []
+    for binding in bindings:
+        _print_apply_step(f"restore user {binding.user_name}", verbose=verbose)
+        try:
+            admin_users.set_role(
+                binding.user_name,
+                binding.primary or "",
+                extra_roles=binding.extras or None,
+            )
+            print(f"  ~ user {binding.user_name} (restored)")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"User '{binding.user_name}' role bindings could not be "
+                f"restored: {detail}"
+            )
+            print(f"  ! user {binding.user_name}: {detail}", file=sys.stderr)
+    return warnings
+
+
+def clear_sso_config(*, verbose: bool = False) -> list[str]:
+    """Clear the entire SSO config.
+
+    users.set_role and users.remove_roles are rejected while any SSO config
+    exists (SsoConfigConflict). Callers reset the config entirely, perform
+    the user/role mutations, then let the reapply step rebuild SSO from the
+    desired YAML.
+    """
+    warnings: list[str] = []
+    _print_apply_step("clear sso config", verbose=verbose)
+    try:
+        admin_sso_config.set(None)
+        print("  ~ sso config (cleared)")
+    except Exception as exc:
+        detail = format_exception(exc)
+        warnings.append(f"SSO config could not be cleared: {detail}")
+        print(f"  ! sso config: {detail}", file=sys.stderr)
+    return warnings
+
+
+def reset_policy(
+    title: str, current: CurrentState, *, verbose: bool = False
+) -> tuple[list[str], list[UserRoleBinding]]:
+    """Delete a managed policy and any managed roles referencing it.
+
+    Before the deletes, clear the full SSO config and detach user
+    assignments for the affected roles — the registry rejects
+    roleDeleteManaged while either references still exist, and rejects
+    user role mutations while any SSO config is present. Returns
+    (warnings, user_bindings_snapshot) so the caller can restore user
+    assignments once the new roles exist.
+    """
+    warnings: list[str] = []
+    user_snapshot: list[UserRoleBinding] = []
     roles_to_delete = managed_roles_using_policy(title, current)
     if roles_to_delete:
-        warnings.extend(
-            detach_sso_mappings_for_roles(set(roles_to_delete), verbose=verbose)
-        )
+        users_to_detach = users_assigned_to_roles(set(roles_to_delete))
+        if users_to_detach:
+            warnings.extend(clear_sso_config(verbose=verbose))
+        else:
+            warnings.extend(
+                detach_sso_mappings_for_roles(set(roles_to_delete), verbose=verbose)
+            )
+        for role_name in roles_to_delete:
+            w, snap = detach_users_from_role(role_name, verbose=verbose)
+            warnings.extend(w)
+            user_snapshot.extend(snap)
     for role_name in roles_to_delete:
         try:
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
@@ -820,7 +938,7 @@ def reset_policy(
         detail = format_exception(exc)
         warnings.append(f"Policy '{title}' could not be deleted: {detail}")
         print(f"  ! policy {title}: {detail}", file=sys.stderr)
-    return warnings
+    return warnings, user_snapshot
 
 
 def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
