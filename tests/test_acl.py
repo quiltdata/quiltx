@@ -261,6 +261,7 @@ def test_compute_diff_from_simpler_stack_acl_example_against_empty_state() -> No
         "quilt-dev",
         "quilt-example",
         "quilt-leadership",
+        "udp-spec",
     ]
     assert [policy.title for policy in diff.policies_to_create] == [
         "public",

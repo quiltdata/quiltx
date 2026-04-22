@@ -659,6 +659,103 @@ def apply_acl(
     return warnings
 
 
+@dataclass(frozen=True)
+class PolicyDrift:
+    """A managed policy whose server state diverges from the desired state."""
+
+    title: str
+    desired: list[Permission]
+    actual: list[Permission]
+
+    @property
+    def missing(self) -> list[str]:
+        desired = _canonical_permissions(self.desired)
+        actual = set(_canonical_permissions(self.actual))
+        return [
+            f"{level.split('.')[-1]}:{bucket}"
+            for bucket, level in desired
+            if (bucket, level) not in actual
+        ]
+
+    @property
+    def extra(self) -> list[str]:
+        actual = _canonical_permissions(self.actual)
+        desired = set(_canonical_permissions(self.desired))
+        return [
+            f"{level.split('.')[-1]}:{bucket}"
+            for bucket, level in actual
+            if (bucket, level) not in desired
+        ]
+
+
+def detect_policy_drift(desired: AclConfig, current: CurrentState) -> list[PolicyDrift]:
+    """Return managed policies where the server state diverges from desired.
+
+    Detection is always-on: the catalog's policyUpdateManaged mutation has
+    historically both silently dropped permissions and returned 500 while
+    partially persisting. This compares the desired permissions for each
+    managed policy against whatever the server currently holds.
+    """
+    desired_state = _build_desired_acl_state(desired)
+    drift: list[PolicyDrift] = []
+    for title, policy_update in desired_state.policy_updates.items():
+        current_policy = current.managed_policies.get(title)
+        if current_policy is None:
+            continue  # policy doesn't exist yet — apply_acl will create it
+        if _canonical_permissions(current_policy.permissions) == _canonical_permissions(
+            policy_update.permissions
+        ):
+            continue
+        drift.append(
+            PolicyDrift(
+                title=title,
+                desired=list(policy_update.permissions),
+                actual=list(current_policy.permissions),
+            )
+        )
+    return drift
+
+
+def managed_roles_using_policy(policy_title: str, current: CurrentState) -> list[str]:
+    """Return managed role names that reference the given policy."""
+    return sorted(
+        name
+        for name, role in current.managed_roles.items()
+        if any(p.title == policy_title for p in getattr(role, "policies", []) or [])
+    )
+
+
+def reset_policy(
+    title: str, current: CurrentState, *, verbose: bool = False
+) -> list[str]:
+    """Delete a managed policy and any managed roles referencing it.
+
+    After calling this, the caller should refetch state and re-run the normal
+    reconcile path, which will recreate the policy via policyCreateManaged and
+    the roles via roleCreateManaged — a different backend codepath than the
+    one that failed.
+    """
+    warnings: list[str] = []
+    for role_name in managed_roles_using_policy(title, current):
+        try:
+            _print_apply_step(f"delete role {role_name}", verbose=verbose)
+            admin_roles.delete(role_name)
+            print(f"  - role {role_name}")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(f"Role '{role_name}' could not be deleted: {detail}")
+            print(f"  ! role {role_name}: {detail}", file=sys.stderr)
+    try:
+        _print_apply_step(f"delete policy {title}", verbose=verbose)
+        admin_policies.delete(title)
+        print(f"  - policy {title}")
+    except Exception as exc:
+        detail = format_exception(exc)
+        warnings.append(f"Policy '{title}' could not be deleted: {detail}")
+        print(f"  ! policy {title}: {detail}", file=sys.stderr)
+    return warnings
+
+
 def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
     policy_updates: dict[str, PolicyUpdate] = {}
     synthesized_roles: list[_SynthesizedRole] = []
