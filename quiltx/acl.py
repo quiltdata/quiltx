@@ -725,18 +725,85 @@ def managed_roles_using_policy(policy_title: str, current: CurrentState) -> list
     )
 
 
+def detach_sso_mappings_for_roles(
+    role_names: set[str], *, verbose: bool = False
+) -> list[str]:
+    """Rewrite the live SSO config so it no longer references the given roles.
+
+    The registry rejects roleDeleteManaged while a role is still bound in the
+    SSO mapping, so callers that need to delete synthetic roles must clear
+    the mapping first. The recreate-and-reapply flow restores the mappings
+    when the new role IDs exist.
+    """
+    warnings: list[str] = []
+    current_sso = admin_sso_config.get()
+    if current_sso is None or not current_sso.text:
+        return warnings
+    try:
+        payload = yaml.safe_load(current_sso.text) or {}
+    except yaml.YAMLError as exc:
+        warnings.append(f"SSO config YAML could not be parsed: {exc}")
+        return warnings
+    if not isinstance(payload, dict):
+        return warnings
+
+    mappings = payload.get("mappings") or []
+    new_mappings: list[Any] = []
+    changed = False
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            new_mappings.append(mapping)
+            continue
+        roles = mapping.get("roles") or []
+        remaining = [r for r in roles if r not in role_names]
+        if remaining != roles:
+            changed = True
+            if not remaining:
+                continue
+            mapping = {**mapping, "roles": remaining}
+        new_mappings.append(mapping)
+
+    if payload.get("default_role") in role_names:
+        payload.pop("default_role", None)
+        changed = True
+
+    if not changed:
+        return warnings
+
+    payload["mappings"] = new_mappings
+    new_text = yaml.safe_dump(payload, sort_keys=False)
+    _print_apply_step(
+        f"detach sso mappings for {', '.join(sorted(role_names))}", verbose=verbose
+    )
+    try:
+        admin_sso_config.set(new_text)
+        print(f"  ~ sso config (detached: {', '.join(sorted(role_names))})")
+    except Exception as exc:
+        detail = format_exception(exc)
+        warnings.append(f"SSO config could not be detached: {detail}")
+        print(f"  ! sso config: {detail}", file=sys.stderr)
+    return warnings
+
+
 def reset_policy(
     title: str, current: CurrentState, *, verbose: bool = False
 ) -> list[str]:
     """Delete a managed policy and any managed roles referencing it.
 
-    After calling this, the caller should refetch state and re-run the normal
-    reconcile path, which will recreate the policy via policyCreateManaged and
-    the roles via roleCreateManaged — a different backend codepath than the
-    one that failed.
+    Removes SSO mappings to the affected roles first, since roleDeleteManaged
+    is rejected while those mappings exist. After calling this, the caller
+    should refetch state and re-run the normal reconcile path, which will
+    recreate the policy via policyCreateManaged and the roles via
+    roleCreateManaged — a different backend codepath than the one that
+    failed — and reattach SSO mappings from the desired config.
     """
     warnings: list[str] = []
-    for role_name in managed_roles_using_policy(title, current):
+    roles_to_delete = managed_roles_using_policy(title, current)
+    if roles_to_delete:
+        warnings.extend(
+            detach_sso_mappings_for_roles(set(roles_to_delete), verbose=verbose)
+        )
+    for role_name in roles_to_delete:
         try:
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
             admin_roles.delete(role_name)
