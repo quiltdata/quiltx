@@ -25,7 +25,7 @@ policies:
   internal:
     sso.groups:         [Employees]
     buckets.read_write: [quilt-bake, quilt-dev]
-    buckets.read:       [quilt-leadership]
+    buckets.read:       [quilt-leadership, udp-spec]
 
 ## Roles
 
