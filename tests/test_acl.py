@@ -231,7 +231,7 @@ def test_build_sso_config_emits_policy_and_static_role_mappings() -> None:
     assert sso_config is not None
     payload = yaml.safe_load(sso_config)
 
-    assert payload["default_role"] == "public"
+    assert payload["default_role"] == "internal_public"
     assert payload["mappings"][0]["roles"] == ["public"]
     assert payload["mappings"][1]["roles"] == ["internal_public"]
     assert payload["mappings"][2]["roles"] == ["exec"]
@@ -452,8 +452,8 @@ def test_print_current_state_summarizes_server_acl(capsys) -> None:
     out = capsys.readouterr().out
 
     assert "policy public (managed)" in out
-    assert "role internal_public (managed)" in out
-    assert "default_role: public" in out
+    assert "role internal_public (default) (managed)" in out
+    assert "default_role: internal_public" in out
     assert "groups=Executives -> [exec] (admin)" in out
 
 
