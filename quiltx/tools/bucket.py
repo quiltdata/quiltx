@@ -59,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the post-add registration/read verification.",
     )
     add_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Reapply bucket policy, SNS topic, and notification settings even "
+            "if the bucket is already registered in Quilt."
+        ),
+    )
+    add_parser.add_argument(
         "--principal",
         metavar="ARN",
         action="append",
@@ -222,7 +230,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         from quilt3.admin import buckets as admin_buckets
 
         existing_bucket = admin_buckets.get(args.bucket_name)
-        if existing_bucket is not None:
+        if existing_bucket is not None and not args.force:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
                 "nothing reapplied."
@@ -230,11 +238,17 @@ def _cmd_add(args: argparse.Namespace) -> int:
             print("  - skipped: S3 bucket policy")
             print("  - skipped: SNS notification")
             print("  - skipped: cross-account principal grants")
+            print("  (use --force to reapply policy/SNS configuration)")
             if args.no_test:
                 return 0
             return _verify_bucket_registration_and_access(
                 args.bucket_name,
                 control_account_id=control_account_id,
+            )
+        if existing_bucket is not None:
+            print(
+                f"Bucket {args.bucket_name}: already registered in Quilt; "
+                "reapplying bucket policy and SNS configuration (--force)."
             )
 
         bucket_policy = bucket_lib.get_bucket_policy(
@@ -315,13 +329,15 @@ def _cmd_add(args: argparse.Namespace) -> int:
         )
 
         bucket_title = args.title or args.bucket_name
-        admin_buckets.add(
-            name=args.bucket_name,
-            title=bucket_title,
-            sns_notification_arn=sns_topic_arn,
-        )
-
-        print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
+        if existing_bucket is None:
+            admin_buckets.add(
+                name=args.bucket_name,
+                title=bucket_title,
+                sns_notification_arn=sns_topic_arn,
+            )
+            print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
+        else:
+            print(f"Reapplied bucket policy/SNS for {args.bucket_name}.")
         print(f"SNS notifications: {sns_topic_arn}")
         if args.no_test:
             print(
