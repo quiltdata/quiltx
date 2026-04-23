@@ -474,6 +474,7 @@ def _verify_bucket_registration_and_access(
 
     bucket_uri = f"s3://{bucket_name}"
     registered = None
+    stage = "registration lookup"
     try:
         registered = next(
             (bucket for bucket in admin_buckets.list() if bucket.name == bucket_name),
@@ -483,11 +484,34 @@ def _verify_bucket_registration_and_access(
             raise ValueError(f"{bucket_name} is not registered in Quilt")
 
         b = quilt3.Bucket(bucket_uri)
-        # ls() goes through the control account — if the cross-account
-        # bucket policy is wrong, this raises AccessDenied.
+
+        stage = "ls() via control account"
+        # If the cross-account / managed-policy grant is wrong, this raises
+        # AccessDenied.
         list(b.ls())
+
+        stage = "search index probe"
+        # Confirm the catalog's search index actually has entries for this
+        # bucket — proves the SNS -> SQS subscription wiring is live.
+        # Retry briefly since the initial scan can lag a freshly added bucket.
+        import time as _time
+
+        results: list[Any] = []
+        for attempt in range(6):
+            results = b.search("*", limit=1)
+            if results:
+                break
+            if attempt < 5:
+                _time.sleep(10)
+        if not results:
+            raise RuntimeError(
+                "search index returned 0 results after ~60s; SNS "
+                "subscription or initial scan has not indexed this bucket yet"
+            )
+
         print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
         print(f"OK: control account can read {bucket_uri}")
+        print(f"OK: search index is populated ({len(results)}+ result[s])")
         return 0
     except Exception as exc:
         if "Authentication failed" in str(exc):
@@ -498,13 +522,22 @@ def _verify_bucket_registration_and_access(
             else "  - Quilt control account: unknown"
         )
         registered_tag = "yes" if registered is not None else "no"
+        if stage == "search index probe":
+            cause = (
+                "  - likely cause: bucket's SNS topic is not subscribed to "
+                "this stack's SQS queues, or initial scan has not completed"
+            )
+        else:
+            cause = (
+                "  - likely cause: no managed Quilt policy currently grants "
+                "the control-account role s3 access to this bucket"
+            )
         lines = [
-            f"Bucket {bucket_name}: ls() via control account failed.",
+            f"FAILED: bucket {bucket_name} verification failed at {stage}.",
             f"  - registered in Quilt: {registered_tag}",
             control_line,
-            f"  - ls() error: {exc}",
-            "  - likely cause: no managed Quilt policy currently grants "
-            "the control-account role s3 access to this bucket",
+            f"  - error: {exc}",
+            cause,
         ]
         print("\n".join(lines), file=sys.stderr)
         return 1

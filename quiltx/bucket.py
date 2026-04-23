@@ -88,6 +88,11 @@ SNS_SUBSCRIBE_POLICY_SID = "QuiltCrossAccountSNSAccess"
 SNS_TOPIC_CONFIG_ID = "QuiltBucketNotifications"
 
 QUILT_POLICY_ACTIONS = [
+    "s3:GetBucketCORS",
+    "s3:GetBucketLocation",
+    "s3:GetBucketNotification",
+    "s3:GetBucketTagging",
+    "s3:GetBucketVersioning",
     "s3:GetObject",
     "s3:GetObjectAttributes",
     "s3:GetObjectTagging",

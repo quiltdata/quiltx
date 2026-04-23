@@ -36,7 +36,7 @@ def test_build_quilt_policy_statement() -> None:
         "arn:aws:s3:::demo-bucket/*",
     ]
     assert statement["Action"] == bucket_lib.QUILT_POLICY_ACTIONS
-    assert len(statement["Action"]) == 12
+    assert len(statement["Action"]) == 17
 
 
 def test_merge_bucket_policy_no_existing() -> None:
@@ -362,6 +362,9 @@ class FakeQuiltBucket:
 
     def ls(self):
         return iter(["file.txt"])
+
+    def search(self, query, limit=10):
+        return [{"_source": {"key": "file.txt"}}]
 
 
 def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls=None):
