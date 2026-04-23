@@ -701,17 +701,18 @@ def detect_policy_drift(desired: AclConfig, current: CurrentState) -> list[Polic
     drift: list[PolicyDrift] = []
     for title, policy_update in desired_state.policy_updates.items():
         current_policy = current.managed_policies.get(title)
-        if current_policy is None:
-            continue  # policy doesn't exist yet — apply_acl will create it
-        if _canonical_permissions(current_policy.permissions) == _canonical_permissions(
-            policy_update.permissions
-        ):
+        actual_permissions = (
+            list(current_policy.permissions) if current_policy is not None else []
+        )
+        if current_policy is not None and _canonical_permissions(
+            current_policy.permissions
+        ) == _canonical_permissions(policy_update.permissions):
             continue
         drift.append(
             PolicyDrift(
                 title=title,
                 desired=list(policy_update.permissions),
-                actual=list(current_policy.permissions),
+                actual=actual_permissions,
             )
         )
     return drift
