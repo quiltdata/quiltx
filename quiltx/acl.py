@@ -956,7 +956,11 @@ def clear_sso_config(*, verbose: bool = False) -> list[str]:
 
 
 def reset_policy(
-    title: str, current: CurrentState, *, verbose: bool = False
+    title: str,
+    current: CurrentState,
+    *,
+    verbose: bool = False,
+    already_deleted_roles: set[str] | None = None,
 ) -> tuple[list[str], list[UserRoleBinding]]:
     """Delete a managed policy and any managed roles referencing it.
 
@@ -966,10 +970,20 @@ def reset_policy(
     user role mutations while any SSO config is present. Returns
     (warnings, user_bindings_snapshot) so the caller can restore user
     assignments once the new roles exist.
+
+    In the cumulative-role model a single managed role can reference
+    multiple policies, so resetting several drifted policies in one pass
+    can ask us to delete the same role twice. Pass ``already_deleted_roles``
+    (a mutable set shared across calls) to skip roles that a prior call
+    has already handled; this function mutates the set to record the
+    roles it processes.
     """
     warnings: list[str] = []
     user_snapshot: list[UserRoleBinding] = []
-    roles_to_delete = managed_roles_using_policy(title, current)
+    deleted = already_deleted_roles if already_deleted_roles is not None else set()
+    roles_to_delete = [
+        r for r in managed_roles_using_policy(title, current) if r not in deleted
+    ]
     if roles_to_delete:
         users_to_detach = users_assigned_to_roles(set(roles_to_delete))
         if users_to_detach:
@@ -991,6 +1005,8 @@ def reset_policy(
             detail = format_exception(exc)
             warnings.append(f"Role '{role_name}' could not be deleted: {detail}")
             print(f"  ! role {role_name}: {detail}", file=sys.stderr)
+        finally:
+            deleted.add(role_name)
     try:
         _print_apply_step(f"delete policy {title}", verbose=verbose)
         admin_policies.delete(title)

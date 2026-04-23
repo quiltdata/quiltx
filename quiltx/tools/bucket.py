@@ -421,17 +421,16 @@ def _verify_bucket_registration_and_access(
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
-        owner_line = (
-            f"  - S3 bucket owner account: {control_account_id} "
-            "(same as control account)"
+        control_line = (
+            f"  - Quilt control account: {control_account_id}"
             if control_account_id
-            else "  - S3 bucket owner account: unknown"
+            else "  - Quilt control account: unknown"
         )
         registered_tag = "yes" if registered is not None else "no"
         lines = [
             f"Bucket {bucket_name}: ls() via control account failed.",
             f"  - registered in Quilt: {registered_tag}",
-            owner_line,
+            control_line,
             f"  - ls() error: {exc}",
             "  - likely cause: no managed Quilt policy currently grants "
             "the control-account role s3 access to this bucket",

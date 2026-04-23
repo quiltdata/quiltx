@@ -191,8 +191,14 @@ def _handle_policy_drift(
 
     print("Resetting drifted policies...")
     user_snapshots: list[acl_lib.UserRoleBinding] = []
+    deleted_roles: set[str] = set()
     for title in to_reset:
-        reset_warnings, snap = acl_lib.reset_policy(title, current, verbose=verbose)
+        reset_warnings, snap = acl_lib.reset_policy(
+            title,
+            current,
+            verbose=verbose,
+            already_deleted_roles=deleted_roles,
+        )
         warnings.extend(reset_warnings)
         user_snapshots.extend(snap)
 
