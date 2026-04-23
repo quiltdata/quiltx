@@ -505,17 +505,79 @@ def print_current_state(current: CurrentState) -> None:
         print("  sso config: (none)")
 
 
+def _register_bucket_with_retry(
+    bucket: str, control_account_id: str, *, assume_yes: bool
+) -> None:
+    """Run the full cross-account bucket registration, probing profiles on failure."""
+    from quiltx import bucket as bucket_lib
+
+    session, s3_client, region, _profile = bucket_lib.resolve_bucket_session(
+        bucket, None, assume_yes=assume_yes
+    )
+    if session is None:
+        raise RuntimeError(f"no accessible AWS profile for bucket {bucket}")
+
+    sns_client = session.client("sns", region_name=region)
+    data_account_id = str(session.client("sts").get_caller_identity()["Account"])
+
+    existing_policy = bucket_lib.get_bucket_policy(bucket, s3_client=s3_client)
+    statement = bucket_lib.build_quilt_policy_statement(bucket, control_account_id)
+    merged = bucket_lib.merge_bucket_policy(existing_policy, statement)
+    bucket_lib.apply_bucket_policy(bucket, merged, s3_client=s3_client)
+
+    sns_topic_arn = bucket_lib.get_bucket_notification_sns(bucket, s3_client=s3_client)
+    if sns_topic_arn is None:
+        sns_topic_arn = bucket_lib.ensure_sns_topic(
+            bucket, region, sns_client=sns_client
+        )
+    bucket_lib.configure_sns_topic_policy(
+        bucket,
+        sns_topic_arn,
+        data_account_id,
+        f"arn:aws:iam::{control_account_id}:root",
+        sns_client=sns_client,
+    )
+    bucket_lib.configure_bucket_notifications(
+        bucket, sns_topic_arn, s3_client=s3_client
+    )
+    admin_buckets.add(name=bucket, title=bucket, sns_notification_arn=sns_topic_arn)
+
+
 def apply_acl(
-    diff: AclDiff, current: CurrentState, *, verbose: bool = False
+    diff: AclDiff,
+    current: CurrentState,
+    *,
+    verbose: bool = False,
+    assume_yes: bool = False,
 ) -> list[str]:
     """Apply ACL changes. Returns any runtime warnings."""
+    from quiltx import bucket as bucket_lib
+    from quiltx import stack as stack_lib
+    from quiltx.config import get_catalog_config
+
     warnings = list(diff.warnings)
     failed_buckets: set[str] = set()
+
+    control_account_id: str | None = None
+    if diff.buckets_to_add:
+        try:
+            config = get_catalog_config()
+            catalog_name = stack_lib.extract_catalog_name(config)
+            payload = stack_lib.load_stack_payload(catalog_name)
+            if payload and payload.get("account_id"):
+                control_account_id = str(payload["account_id"])
+        except Exception as exc:  # pragma: no cover - external API surface
+            warnings.append(f"Could not load control account for bucket add: {exc}")
 
     for bucket in diff.buckets_to_add:
         try:
             _print_apply_step(f"add bucket {bucket}", verbose=verbose)
-            admin_buckets.add(bucket, bucket)
+            if control_account_id is None:
+                admin_buckets.add(bucket, bucket)
+            else:
+                _register_bucket_with_retry(
+                    bucket, control_account_id, assume_yes=assume_yes
+                )
             print(f"  + bucket {bucket}")
         except Exception as exc:  # pragma: no cover - external API surface
             failed_buckets.add(bucket)

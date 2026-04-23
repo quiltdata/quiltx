@@ -209,8 +209,10 @@ def _cmd_add(args: argparse.Namespace) -> int:
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
         catalog_url = str(config.get("navigator_url") or catalog_name)
 
-        session, s3_client, bucket_region, resolved_profile = _resolve_bucket_session(
-            args.bucket_name, args.profile, assume_yes=args.yes
+        session, s3_client, bucket_region, resolved_profile = (
+            bucket_lib.resolve_bucket_session(
+                args.bucket_name, args.profile, assume_yes=args.yes
+            )
         )
         if session is None:
             return 1
@@ -377,7 +379,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             print(name)
         return 0
 
-    match = _find_profile_for_bucket(args.bucket_name, profiles)
+    match = bucket_lib.find_profile_for_bucket(args.bucket_name, profiles)
     if match is None:
         print(
             f"No configured profile can access bucket {args.bucket_name!r}.",
@@ -386,64 +388,6 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         return 1
     print(match)
     return 0
-
-
-def _resolve_bucket_session(
-    bucket: str, profile: str | None, *, assume_yes: bool
-) -> tuple[boto3.Session | None, Any, str, str | None]:
-    """Open an S3 session for the bucket, probing other profiles if the first fails.
-
-    Returns (session, s3_client, region, profile_name) or (None, ...) if aborted.
-    """
-    from botocore.exceptions import BotoCoreError, ClientError
-
-    session = boto3.Session(profile_name=profile)
-    s3_client = session.client("s3")
-    try:
-        region = get_bucket_region(bucket, s3_client=s3_client)
-        return session, s3_client, region, profile
-    except (ClientError, BotoCoreError) as exc:
-        print(
-            f"Profile {profile or '<default>'} cannot access bucket {bucket}: {exc}",
-            file=sys.stderr,
-        )
-
-    candidates = [
-        name for name in boto3.Session().available_profiles if name != (profile or "")
-    ]
-    match = _find_profile_for_bucket(bucket, candidates)
-    if match is None:
-        print(
-            f"No other configured profile can access bucket {bucket}.",
-            file=sys.stderr,
-        )
-        return None, None, "", profile
-
-    if assume_yes:
-        print(f"Retrying with profile {match}.")
-    else:
-        response = input(f"Try profile {match} instead? [y/N]: ").strip().lower()
-        if response not in {"y", "yes"}:
-            print("Aborted.")
-            return None, None, "", profile
-
-    new_session = boto3.Session(profile_name=match)
-    new_s3 = new_session.client("s3")
-    region = get_bucket_region(bucket, s3_client=new_s3)
-    return new_session, new_s3, region, match
-
-
-def _find_profile_for_bucket(bucket: str, profiles: list[str]) -> str | None:
-    from botocore.exceptions import BotoCoreError, ClientError
-
-    for name in profiles:
-        try:
-            session = boto3.Session(profile_name=name)
-            session.client("s3").get_bucket_location(Bucket=bucket)
-        except (ClientError, BotoCoreError):
-            continue
-        return name
-    return None
 
 
 def _cmd_test(args: argparse.Namespace) -> int:

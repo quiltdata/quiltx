@@ -1395,7 +1395,7 @@ def test_resolve_bucket_session_switches_on_access_denied(monkeypatch, capsys) -
 
     monkeypatch.setattr(bucket_tool.boto3, "Session", FakeSession)
 
-    session, s3_client, region, profile = bucket_tool._resolve_bucket_session(
+    session, s3_client, region, profile = bucket_lib.resolve_bucket_session(
         "quilt-example", "sales", assume_yes=True
     )
     assert profile == "prod"
@@ -1431,7 +1431,7 @@ def test_resolve_bucket_session_aborts_when_user_declines(monkeypatch, capsys) -
     monkeypatch.setattr(bucket_tool.boto3, "Session", FakeSession)
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
 
-    session, _s3, _region, profile = bucket_tool._resolve_bucket_session(
+    session, _s3, _region, profile = bucket_lib.resolve_bucket_session(
         "quilt-example", "sales", assume_yes=False
     )
     assert session is None

@@ -83,7 +83,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print("Applying...")
-        warnings = acl_lib.apply_acl(diff, current, verbose=args.verbose)
+        warnings = acl_lib.apply_acl(
+            diff, current, verbose=args.verbose, assume_yes=args.yes
+        )
 
         post_current = acl_lib.fetch_current_state()
         drift = acl_lib.detect_policy_drift(desired, post_current)
@@ -198,7 +200,9 @@ def _handle_policy_drift(
     new_diff = acl_lib.compute_diff(desired, post_reset)
     if new_diff.has_changes():
         print("Reapplying after reset...")
-        warnings.extend(acl_lib.apply_acl(new_diff, post_reset, verbose=verbose))
+        warnings.extend(
+            acl_lib.apply_acl(new_diff, post_reset, verbose=verbose, assume_yes=auto)
+        )
         post_reset = acl_lib.fetch_current_state()
 
     if user_snapshots:
