@@ -62,9 +62,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "Reapply bucket policy, SNS topic, and notification settings even "
-            "if the bucket is already registered in Quilt."
+            "If the bucket is already registered, remove it from the catalog "
+            "first and then re-add it (so Quilt re-subscribes its SQS queues "
+            "to the SNS topic). Reapplies bucket policy and SNS configuration."
         ),
+    )
+
+    remove_parser = subparsers.add_parser(
+        "remove",
+        prog="quiltx bucket remove",
+        help="Unregister a bucket from the Quilt catalog.",
+    )
+    remove_parser.add_argument("bucket_name", help="S3 bucket name to unregister.")
+    remove_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Remove without prompting for confirmation.",
     )
     add_parser.add_argument(
         "--principal",
@@ -114,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.action == "add":
         return _cmd_add(args)
+    if args.action == "remove":
+        return _cmd_remove(args)
     if args.action == "list":
         return _cmd_list()
     if args.action == "profile":
@@ -238,18 +253,25 @@ def _cmd_add(args: argparse.Namespace) -> int:
             print("  - skipped: S3 bucket policy")
             print("  - skipped: SNS notification")
             print("  - skipped: cross-account principal grants")
-            print("  (use --force to reapply policy/SNS configuration)")
+            print("  (use --force to remove and re-add so Quilt re-subscribes)")
             if args.no_test:
                 return 0
             return _verify_bucket_registration_and_access(
                 args.bucket_name,
                 control_account_id=control_account_id,
             )
+        prior_title = (
+            getattr(existing_bucket, "title", None)
+            if existing_bucket is not None
+            else None
+        )
         if existing_bucket is not None:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
-                "reapplying bucket policy and SNS configuration (--force)."
+                "removing and re-adding (--force) so Quilt re-subscribes SQS."
             )
+            admin_buckets.remove(args.bucket_name)
+            existing_bucket = None
 
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
@@ -328,16 +350,13 @@ def _cmd_add(args: argparse.Namespace) -> int:
             s3_client=s3_client,
         )
 
-        bucket_title = args.title or args.bucket_name
-        if existing_bucket is None:
-            admin_buckets.add(
-                name=args.bucket_name,
-                title=bucket_title,
-                sns_notification_arn=sns_topic_arn,
-            )
-            print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
-        else:
-            print(f"Reapplied bucket policy/SNS for {args.bucket_name}.")
+        bucket_title = args.title or prior_title or args.bucket_name
+        admin_buckets.add(
+            name=args.bucket_name,
+            title=bucket_title,
+            sns_notification_arn=sns_topic_arn,
+        )
+        print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
         print(f"SNS notifications: {sns_topic_arn}")
         if args.no_test:
             print(
@@ -349,6 +368,42 @@ def _cmd_add(args: argparse.Namespace) -> int:
             args.bucket_name,
             control_account_id=control_account_id,
         )
+    except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+@auto_login
+def _cmd_remove(args: argparse.Namespace) -> int:
+    try:
+        from quilt3.admin import buckets as admin_buckets
+
+        existing = admin_buckets.get(args.bucket_name)
+        if existing is None:
+            print(f"Bucket {args.bucket_name}: not registered in Quilt; nothing to do.")
+            return 0
+
+        if not args.yes:
+            reply = (
+                input(
+                    f"Remove bucket {args.bucket_name} from the Quilt catalog? [y/N] "
+                )
+                .strip()
+                .lower()
+            )
+            if reply not in ("y", "yes"):
+                print("Aborted.")
+                return 1
+
+        admin_buckets.remove(args.bucket_name)
+        print(f"Removed bucket {args.bucket_name} from the Quilt catalog.")
+        print(
+            "Note: S3 bucket policy, SNS topic, and bucket notifications were left "
+            "in place."
+        )
+        return 0
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
