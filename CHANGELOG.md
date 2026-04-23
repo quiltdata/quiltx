@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-04-23
+
+### Changed
+
+- Auto-release on merge to `main` when `pyproject.toml` version is bumped. The publish workflow now triggers on push to `main`, tags `v$VERSION` if the tag is new, and publishes to PyPI. No more manual `./poe tag` step. If the version tag already exists, the run is a no-op.
+
 ## [0.9.2] - 2026-04-17
 
 ### Added
