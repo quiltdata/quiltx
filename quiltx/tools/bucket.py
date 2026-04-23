@@ -77,6 +77,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="List buckets registered in the catalog.",
     )
 
+    profile_parser = subparsers.add_parser(
+        "profile",
+        prog="quiltx bucket profile",
+        help=(
+            "List available AWS profiles, or find which profile can access a bucket."
+        ),
+    )
+    profile_parser.add_argument(
+        "bucket_name",
+        nargs="?",
+        help="If given, find the first AWS profile that can access this bucket.",
+    )
+
     test_parser = subparsers.add_parser(
         "test",
         prog="quiltx bucket test",
@@ -95,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_add(args)
     if args.action == "list":
         return _cmd_list()
+    if args.action == "profile":
+        return _cmd_profile(args)
     if args.action == "test":
         return _cmd_test(args)
 
@@ -346,6 +361,41 @@ def _cmd_list() -> int:
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    profiles = list(boto3.Session().available_profiles)
+    if not profiles:
+        print("No AWS profiles found.", file=sys.stderr)
+        return 1
+
+    if args.bucket_name is None:
+        for name in profiles:
+            print(name)
+        return 0
+
+    match = _find_profile_for_bucket(args.bucket_name, profiles)
+    if match is None:
+        print(
+            f"No configured profile can access bucket {args.bucket_name!r}.",
+            file=sys.stderr,
+        )
+        return 1
+    print(match)
+    return 0
+
+
+def _find_profile_for_bucket(bucket: str, profiles: list[str]) -> str | None:
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    for name in profiles:
+        try:
+            session = boto3.Session(profile_name=name)
+            session.client("s3").get_bucket_location(Bucket=bucket)
+        except (ClientError, BotoCoreError):
+            continue
+        return name
+    return None
 
 
 def _cmd_test(args: argparse.Namespace) -> int:
