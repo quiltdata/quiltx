@@ -69,18 +69,6 @@ def test_parse_acl_config_accepts_simpler_stack_acl_example() -> None:
     assert config.roles["exec"].is_admin is True
 
 
-def test_parse_acl_config_rejects_old_format_keys(tmp_path: Path) -> None:
-    config_path = tmp_path / "acl.yml"
-    config_path.write_text("""
-bucket_policies: {}
-roles: {}
-sso: []
-""")
-
-    with pytest.raises(ValueError, match="old stack ACL format"):
-        acl.parse_acl_config(config_path)
-
-
 def test_parse_acl_config_rejects_unknown_top_level_keys(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""

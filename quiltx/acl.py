@@ -18,9 +18,7 @@ from quilt3.admin import users as admin_users
 from quilt3.admin.types import Permission
 
 INLINE_POLICY_SUFFIX = "__inline"
-NEW_FORMAT_KEYS = {"policies", "roles", "store_last_login_context"}
-OLD_FORMAT_KEYS = {"bucket_policies", "sso"}
-NEW_FORMAT_EXAMPLE = "spec/060-stack-acl/simpler-stack-acl.yml"
+ACL_TOP_LEVEL_KEYS = {"policies", "roles", "store_last_login_context"}
 EVERYONE_GROUP = "Everyone"
 
 
@@ -1075,22 +1073,13 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
 
 
 def _validate_top_level_keys(raw: dict[str, Any]) -> None:
-    keys = set(raw)
-    old_keys = sorted(keys & OLD_FORMAT_KEYS)
-    if old_keys:
-        raise ValueError(
-            "The old stack ACL format is no longer supported. Replace "
-            f"{', '.join(old_keys)} with top-level 'policies' and 'roles'; see "
-            f"{NEW_FORMAT_EXAMPLE}."
-        )
-
-    unknown_keys = sorted(keys - NEW_FORMAT_KEYS)
+    unknown_keys = sorted(set(raw) - ACL_TOP_LEVEL_KEYS)
     if unknown_keys:
         raise ValueError(
             "Unknown top-level ACL keys: "
             + ", ".join(unknown_keys)
             + ". Supported keys: "
-            + ", ".join(sorted(NEW_FORMAT_KEYS))
+            + ", ".join(sorted(ACL_TOP_LEVEL_KEYS))
             + "."
         )
 
