@@ -77,6 +77,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="List buckets registered in the catalog.",
     )
 
+    profile_parser = subparsers.add_parser(
+        "profile",
+        prog="quiltx bucket profile",
+        help=(
+            "List available AWS profiles, or find which profile can access a bucket."
+        ),
+    )
+    profile_parser.add_argument(
+        "bucket_name",
+        nargs="?",
+        help="If given, find the first AWS profile that can access this bucket.",
+    )
+
     test_parser = subparsers.add_parser(
         "test",
         prog="quiltx bucket test",
@@ -95,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_add(args)
     if args.action == "list":
         return _cmd_list()
+    if args.action == "profile":
+        return _cmd_profile(args)
     if args.action == "test":
         return _cmd_test(args)
 
@@ -194,19 +209,33 @@ def _cmd_add(args: argparse.Namespace) -> int:
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
         catalog_url = str(config.get("navigator_url") or catalog_name)
 
-        session = boto3.Session(profile_name=args.profile)
-        s3_client = session.client("s3")
-        bucket_region = get_bucket_region(args.bucket_name, s3_client=s3_client)
+        session, s3_client, bucket_region, resolved_profile = (
+            bucket_lib.resolve_bucket_session(
+                args.bucket_name, args.profile, assume_yes=args.yes
+            )
+        )
+        if session is None:
+            return 1
+        args.profile = resolved_profile
         sns_client = session.client("sns", region_name=bucket_region)
 
         from quilt3.admin import buckets as admin_buckets
 
         existing_bucket = admin_buckets.get(args.bucket_name)
         if existing_bucket is not None:
-            print(f"Bucket {args.bucket_name} is already registered.")
+            print(
+                f"Bucket {args.bucket_name}: already registered in Quilt; "
+                "nothing reapplied."
+            )
+            print("  - skipped: S3 bucket policy")
+            print("  - skipped: SNS notification")
+            print("  - skipped: cross-account principal grants")
             if args.no_test:
                 return 0
-            return _verify_bucket_registration_and_access(args.bucket_name)
+            return _verify_bucket_registration_and_access(
+                args.bucket_name,
+                control_account_id=control_account_id,
+            )
 
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
@@ -300,7 +329,10 @@ def _cmd_add(args: argparse.Namespace) -> int:
             )
             return 0
         print()
-        return _verify_bucket_registration_and_access(args.bucket_name)
+        return _verify_bucket_registration_and_access(
+            args.bucket_name,
+            control_account_id=control_account_id,
+        )
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
@@ -336,16 +368,41 @@ def _cmd_list() -> int:
         return 1
 
 
+def _cmd_profile(args: argparse.Namespace) -> int:
+    profiles = list(boto3.Session().available_profiles)
+    if not profiles:
+        print("No AWS profiles found.", file=sys.stderr)
+        return 1
+
+    if args.bucket_name is None:
+        for name in profiles:
+            print(name)
+        return 0
+
+    match = bucket_lib.find_profile_for_bucket(args.bucket_name, profiles)
+    if match is None:
+        print(
+            f"No configured profile can access bucket {args.bucket_name!r}.",
+            file=sys.stderr,
+        )
+        return 1
+    print(match)
+    return 0
+
+
 def _cmd_test(args: argparse.Namespace) -> int:
     return _verify_bucket_registration_and_access(args.bucket_name)
 
 
 @auto_login
-def _verify_bucket_registration_and_access(bucket_name: str) -> int:
+def _verify_bucket_registration_and_access(
+    bucket_name: str, *, control_account_id: str | None = None
+) -> int:
     import quilt3
     from quilt3.admin import buckets as admin_buckets
 
     bucket_uri = f"s3://{bucket_name}"
+    registered = None
     try:
         registered = next(
             (bucket for bucket in admin_buckets.list() if bucket.name == bucket_name),
@@ -353,21 +410,32 @@ def _verify_bucket_registration_and_access(bucket_name: str) -> int:
         )
         if registered is None:
             raise ValueError(f"{bucket_name} is not registered in Quilt")
-        print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
 
         b = quilt3.Bucket(bucket_uri)
         # ls() goes through the control account — if the cross-account
         # bucket policy is wrong, this raises AccessDenied.
         list(b.ls())
+        print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
         print(f"OK: control account can read {bucket_uri}")
         return 0
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
-        print(
-            f"Control account cannot read {bucket_uri}: {exc}",
-            file=sys.stderr,
+        control_line = (
+            f"  - Quilt control account: {control_account_id}"
+            if control_account_id
+            else "  - Quilt control account: unknown"
         )
+        registered_tag = "yes" if registered is not None else "no"
+        lines = [
+            f"Bucket {bucket_name}: ls() via control account failed.",
+            f"  - registered in Quilt: {registered_tag}",
+            control_line,
+            f"  - ls() error: {exc}",
+            "  - likely cause: no managed Quilt policy currently grants "
+            "the control-account role s3 access to this bucket",
+        ]
+        print("\n".join(lines), file=sys.stderr)
         return 1
 
 

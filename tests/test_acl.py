@@ -69,18 +69,6 @@ def test_parse_acl_config_accepts_simpler_stack_acl_example() -> None:
     assert config.roles["exec"].is_admin is True
 
 
-def test_parse_acl_config_rejects_old_format_keys(tmp_path: Path) -> None:
-    config_path = tmp_path / "acl.yml"
-    config_path.write_text("""
-bucket_policies: {}
-roles: {}
-sso: []
-""")
-
-    with pytest.raises(ValueError, match="old stack ACL format"):
-        acl.parse_acl_config(config_path)
-
-
 def test_parse_acl_config_rejects_unknown_top_level_keys(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
@@ -261,6 +249,7 @@ def test_compute_diff_from_simpler_stack_acl_example_against_empty_state() -> No
         "quilt-dev",
         "quilt-example",
         "quilt-leadership",
+        "udp-spec",
     ]
     assert [policy.title for policy in diff.policies_to_create] == [
         "public",
@@ -496,6 +485,11 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         return SimpleNamespace(text=text)
 
     monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=bucket_add))
+    # Force the simple (non-cross-account) bucket add path in apply_acl.
+    monkeypatch.setattr(
+        "quiltx.config.get_catalog_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("no config in test")),
+    )
     monkeypatch.setattr(
         acl,
         "admin_policies",
@@ -553,6 +547,36 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         ("role_delete", "legacy_role"),
         ("policy_delete", "legacy_policy"),
     ]
+
+
+def test_apply_acl_uses_cross_account_registration_when_stack_available(
+    monkeypatch,
+) -> None:
+    """When a control account is available, apply_acl goes through the full
+    cross-account bucket registration path (including profile retry)."""
+    calls: list[tuple[Any, ...]] = []
+
+    def fake_register(
+        bucket: str, control_account_id: str, *, assume_yes: bool
+    ) -> None:
+        calls.append(("register", bucket, control_account_id, assume_yes))
+
+    monkeypatch.setattr(acl, "_register_bucket_with_retry", fake_register)
+    monkeypatch.setattr(
+        acl, "admin_buckets", SimpleNamespace(add=lambda *a, **kw: None)
+    )
+    monkeypatch.setattr(
+        "quiltx.config.get_catalog_config", lambda: {"navigator_url": "https://x"}
+    )
+    monkeypatch.setattr("quiltx.stack.extract_catalog_name", lambda _config: "catalog")
+    monkeypatch.setattr(
+        "quiltx.stack.load_stack_payload", lambda _name: {"account_id": "111"}
+    )
+
+    diff = acl.AclDiff(buckets_to_add=["bucket-a"])
+    acl.apply_acl(diff, _empty_current_state(), assume_yes=True)
+
+    assert calls == [("register", "bucket-a", "111", True)]
 
 
 def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:

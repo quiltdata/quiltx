@@ -12,6 +12,76 @@ from quiltx import stack as stack_lib
 from quiltx.config import get_catalog_config
 from quiltx.utils import get_bucket_region
 
+
+def find_profile_for_bucket(bucket: str, profiles: Sequence[str]) -> str | None:
+    """Return the first profile whose GetBucketLocation succeeds for *bucket*."""
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    for name in profiles:
+        try:
+            session = boto3.Session(profile_name=name)
+            session.client("s3").get_bucket_location(Bucket=bucket)
+        except (ClientError, BotoCoreError):
+            continue
+        return name
+    return None
+
+
+def resolve_bucket_session(
+    bucket: str,
+    profile: str | None,
+    *,
+    assume_yes: bool,
+    prompt: Any = None,
+    output: Any = None,
+) -> tuple[Any, Any, str, str | None]:
+    """Open an S3 session for *bucket*, probing other profiles if the first fails.
+
+    Returns (session, s3_client, region, resolved_profile). Session is None if
+    the user declined or no profile could access the bucket.
+    """
+    import sys as _sys
+
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    err = output if output is not None else _sys.stderr
+    ask = prompt if prompt is not None else input
+
+    session = boto3.Session(profile_name=profile)
+    s3_client = session.client("s3")
+    try:
+        region = get_bucket_region(bucket, s3_client=s3_client)
+        return session, s3_client, region, profile
+    except (ClientError, BotoCoreError) as exc:
+        print(
+            f"Profile {profile or '<default>'} cannot access bucket {bucket}: {exc}",
+            file=err,
+        )
+
+    candidates = [
+        name for name in boto3.Session().available_profiles if name != (profile or "")
+    ]
+    match = find_profile_for_bucket(bucket, candidates)
+    if match is None:
+        print(f"No other configured profile can access bucket {bucket}.", file=err)
+        return None, None, "", profile
+
+    if assume_yes:
+        print(f"Retrying with profile {match}.")
+    else:
+        response = ask(f"Try profile {match} instead? [y/N]: ").strip().lower()
+        if response not in {"y", "yes"}:
+            print("Aborted.")
+            return None, None, "", profile
+
+    new_session = boto3.Session(profile_name=match)
+    new_s3 = new_session.client("s3")
+    region = get_bucket_region(bucket, s3_client=new_s3)
+    return new_session, new_s3, region, match
+
+
 QUILT_POLICY_SID = "QuiltCrossAccountAccess"
 SNS_PUBLISH_POLICY_SID = "QuiltBucketNotifications"
 SNS_SUBSCRIBE_POLICY_SID = "QuiltCrossAccountSNSAccess"
