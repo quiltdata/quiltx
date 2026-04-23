@@ -62,7 +62,7 @@ roles: {}
 
 
 def test_parse_acl_config_accepts_simpler_stack_acl_example() -> None:
-    config = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    config = acl.parse_acl_config(Path("stack-acl.example.yaml"))
 
     assert [policy.name for policy in config.policies] == ["public", "internal"]
     assert config.roles["exec"].policies == ["public", "internal"]
@@ -225,7 +225,7 @@ def test_all_buckets_includes_inline_role_buckets() -> None:
 
 
 def test_build_sso_config_emits_policy_and_static_role_mappings() -> None:
-    config = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    config = acl.parse_acl_config(Path("stack-acl.example.yaml"))
 
     sso_config = acl.build_sso_config(config)
     assert sso_config is not None
@@ -239,7 +239,7 @@ def test_build_sso_config_emits_policy_and_static_role_mappings() -> None:
 
 
 def test_compute_diff_from_simpler_stack_acl_example_against_empty_state() -> None:
-    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))
     current = _empty_current_state()
 
     diff = acl.compute_diff(desired, current)
@@ -266,7 +266,7 @@ def test_compute_diff_from_simpler_stack_acl_example_against_empty_state() -> No
 
 
 def test_compute_diff_two_policy_ladder_synthesizes_expected_roles() -> None:
-    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))
     current = _empty_current_state()
 
     diff = acl.compute_diff(desired, current)
@@ -324,7 +324,7 @@ def test_reordering_policies_changes_synthesized_role_names() -> None:
 
 
 def test_static_role_with_inline_buckets_creates_hidden_inline_policy() -> None:
-    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))
 
     diff = acl.compute_diff(desired, _empty_current_state())
 
@@ -334,7 +334,7 @@ def test_static_role_with_inline_buckets_creates_hidden_inline_policy() -> None:
 
 
 def test_compute_diff_is_idempotent_against_matching_current_state() -> None:
-    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))
     current = _current_state_for_config(desired)
 
     diff = acl.compute_diff(desired, current)
@@ -344,7 +344,7 @@ def test_compute_diff_is_idempotent_against_matching_current_state() -> None:
 
 
 def test_compute_diff_warns_and_skips_unmanaged_name_collisions() -> None:
-    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))
     current = _empty_current_state()
     current.unmanaged_policies["public"] = FakePolicy(
         id="u-policy",
@@ -395,7 +395,7 @@ def test_changing_policy_groups_updates_sso_config() -> None:
 
 
 def test_policy_rename_cleans_up_old_synthesized_role_in_single_pass() -> None:
-    original = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    original = acl.parse_acl_config(Path("stack-acl.example.yaml"))
     current = _current_state_for_config(original)
 
     renamed = acl.AclConfig(
@@ -432,7 +432,7 @@ def test_policy_rename_cleans_up_old_synthesized_role_in_single_pass() -> None:
 
 
 def test_print_diff_verbose_shows_synthesized_roles(capsys) -> None:
-    desired = acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+    desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))
     diff = acl.compute_diff(desired, _empty_current_state())
 
     acl.print_diff(diff, verbose=True, desired=desired)
@@ -445,7 +445,7 @@ def test_print_diff_verbose_shows_synthesized_roles(capsys) -> None:
 
 def test_print_current_state_summarizes_server_acl(capsys) -> None:
     current = _current_state_for_config(
-        acl.parse_acl_config(Path("spec/060-stack-acl/simpler-stack-acl.yml"))
+        acl.parse_acl_config(Path("stack-acl.example.yaml"))
     )
 
     acl.print_current_state(current)

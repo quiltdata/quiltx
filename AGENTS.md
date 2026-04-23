@@ -19,7 +19,7 @@ Python module for discovering CloudFormation stacks and working with cached stac
 ### Stack ACL (`quiltx stack acl`)
 
 Uses the flat `policies:` / `roles:` YAML format documented in
-[`spec/060-stack-acl/simpler-stack-acl.yml`](spec/060-stack-acl/simpler-stack-acl.yml).
+[`stack-acl.example.yaml`](stack-acl.example.yaml).
 The old `bucket_policies:` / `roles:` / `sso:` format is no longer supported.
 
 ### Config API (`quiltx.config`)
