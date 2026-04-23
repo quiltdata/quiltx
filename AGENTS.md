@@ -29,7 +29,11 @@ Functions for catalog configuration and credentials. Use `from quiltx.config imp
 ## Publishing Releases
 
 1. Update `version` in [pyproject.toml](pyproject.toml) and [CHANGELOG.md](CHANGELOG.md)
-2. Run `./poe tag` to create and push git tag
-3. GitHub workflow auto-creates release and publishes to PyPI after approval
+2. Merge to `main`
 
-See [.github/workflows/publish.yml](.github/workflows/publish.yml) for workflow details.
+On each push to `main`, [.github/workflows/publish.yml](.github/workflows/publish.yml)
+checks whether a `v$VERSION` tag already exists. If not, it builds, tags, creates the
+GitHub release, and publishes to PyPI. If the tag already exists, the run is a no-op —
+so only version bumps trigger a release.
+
+`./poe tag` remains available for manual/local tagging if ever needed.
