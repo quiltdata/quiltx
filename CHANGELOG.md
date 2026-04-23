@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-04-23
+
+### Fixed
+
+- Publish workflow now serializes concurrent runs on `main` via a `publish` concurrency group, and tolerates a pre-existing tag gracefully (skips GitHub release + PyPI publish steps rather than failing after `uv build`).
+
 ## [0.10.4] - 2026-04-23
 
 ### Changed
