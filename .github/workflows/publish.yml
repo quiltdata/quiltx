@@ -60,9 +60,12 @@ jobs:
           git tag -a "$TAG" -m "Release $VERSION"
           if git push origin "$TAG"; then
             echo "pushed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Tag push failed — likely pushed by a concurrent run. Skipping release and publish."
+          elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on remote — concurrent run won. Skipping release and publish."
             echo "pushed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag push failed for an unexpected reason." >&2
+            exit 1
           fi
       - name: Create GitHub Release
         if: steps.tag.outputs.pushed == 'true'
