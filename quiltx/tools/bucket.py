@@ -59,6 +59,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the post-add registration/read verification.",
     )
     add_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "If the bucket is already registered, remove it from the catalog "
+            "first and then re-add it (so Quilt re-subscribes its SQS queues "
+            "to the SNS topic). Reapplies bucket policy and SNS configuration."
+        ),
+    )
+
+    remove_parser = subparsers.add_parser(
+        "remove",
+        prog="quiltx bucket remove",
+        help="Unregister a bucket from the Quilt catalog.",
+    )
+    remove_parser.add_argument("bucket_name", help="S3 bucket name to unregister.")
+    remove_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Remove without prompting for confirmation.",
+    )
+    add_parser.add_argument(
         "--principal",
         metavar="ARN",
         action="append",
@@ -106,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.action == "add":
         return _cmd_add(args)
+    if args.action == "remove":
+        return _cmd_remove(args)
     if args.action == "list":
         return _cmd_list()
     if args.action == "profile":
@@ -222,7 +245,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         from quilt3.admin import buckets as admin_buckets
 
         existing_bucket = admin_buckets.get(args.bucket_name)
-        if existing_bucket is not None:
+        if existing_bucket is not None and not args.force:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
                 "nothing reapplied."
@@ -230,12 +253,25 @@ def _cmd_add(args: argparse.Namespace) -> int:
             print("  - skipped: S3 bucket policy")
             print("  - skipped: SNS notification")
             print("  - skipped: cross-account principal grants")
+            print("  (use --force to remove and re-add so Quilt re-subscribes)")
             if args.no_test:
                 return 0
             return _verify_bucket_registration_and_access(
                 args.bucket_name,
                 control_account_id=control_account_id,
             )
+        prior_title = (
+            getattr(existing_bucket, "title", None)
+            if existing_bucket is not None
+            else None
+        )
+        if existing_bucket is not None:
+            print(
+                f"Bucket {args.bucket_name}: already registered in Quilt; "
+                "removing and re-adding (--force) so Quilt re-subscribes SQS."
+            )
+            admin_buckets.remove(args.bucket_name)
+            existing_bucket = None
 
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
@@ -314,13 +350,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
             s3_client=s3_client,
         )
 
-        bucket_title = args.title or args.bucket_name
+        bucket_title = args.title or prior_title or args.bucket_name
         admin_buckets.add(
             name=args.bucket_name,
             title=bucket_title,
             sns_notification_arn=sns_topic_arn,
         )
-
         print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
         print(f"SNS notifications: {sns_topic_arn}")
         if args.no_test:
@@ -333,6 +368,42 @@ def _cmd_add(args: argparse.Namespace) -> int:
             args.bucket_name,
             control_account_id=control_account_id,
         )
+    except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+@auto_login
+def _cmd_remove(args: argparse.Namespace) -> int:
+    try:
+        from quilt3.admin import buckets as admin_buckets
+
+        existing = admin_buckets.get(args.bucket_name)
+        if existing is None:
+            print(f"Bucket {args.bucket_name}: not registered in Quilt; nothing to do.")
+            return 0
+
+        if not args.yes:
+            reply = (
+                input(
+                    f"Remove bucket {args.bucket_name} from the Quilt catalog? [y/N] "
+                )
+                .strip()
+                .lower()
+            )
+            if reply not in ("y", "yes"):
+                print("Aborted.")
+                return 1
+
+        admin_buckets.remove(args.bucket_name)
+        print(f"Removed bucket {args.bucket_name} from the Quilt catalog.")
+        print(
+            "Note: S3 bucket policy, SNS topic, and bucket notifications were left "
+            "in place."
+        )
+        return 0
     except Exception as exc:
         if "Authentication failed" in str(exc):
             raise
@@ -403,6 +474,7 @@ def _verify_bucket_registration_and_access(
 
     bucket_uri = f"s3://{bucket_name}"
     registered = None
+    stage = "registration lookup"
     try:
         registered = next(
             (bucket for bucket in admin_buckets.list() if bucket.name == bucket_name),
@@ -412,11 +484,34 @@ def _verify_bucket_registration_and_access(
             raise ValueError(f"{bucket_name} is not registered in Quilt")
 
         b = quilt3.Bucket(bucket_uri)
-        # ls() goes through the control account — if the cross-account
-        # bucket policy is wrong, this raises AccessDenied.
+
+        stage = "ls() via control account"
+        # If the cross-account / managed-policy grant is wrong, this raises
+        # AccessDenied.
         list(b.ls())
+
+        stage = "search index probe"
+        # Confirm the catalog's search index actually has entries for this
+        # bucket — proves the SNS -> SQS subscription wiring is live.
+        # Retry briefly since the initial scan can lag a freshly added bucket.
+        import time as _time
+
+        results: list[Any] = []
+        for attempt in range(6):
+            results = b.search("*", limit=1)
+            if results:
+                break
+            if attempt < 5:
+                _time.sleep(10)
+        if not results:
+            raise RuntimeError(
+                "search index returned 0 results after ~60s; SNS "
+                "subscription or initial scan has not indexed this bucket yet"
+            )
+
         print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
         print(f"OK: control account can read {bucket_uri}")
+        print(f"OK: search index is populated ({len(results)}+ result[s])")
         return 0
     except Exception as exc:
         if "Authentication failed" in str(exc):
@@ -427,13 +522,22 @@ def _verify_bucket_registration_and_access(
             else "  - Quilt control account: unknown"
         )
         registered_tag = "yes" if registered is not None else "no"
+        if stage == "search index probe":
+            cause = (
+                "  - likely cause: bucket's SNS topic is not subscribed to "
+                "this stack's SQS queues, or initial scan has not completed"
+            )
+        else:
+            cause = (
+                "  - likely cause: no managed Quilt policy currently grants "
+                "the control-account role s3 access to this bucket"
+            )
         lines = [
-            f"Bucket {bucket_name}: ls() via control account failed.",
+            f"FAILED: bucket {bucket_name} verification failed at {stage}.",
             f"  - registered in Quilt: {registered_tag}",
             control_line,
-            f"  - ls() error: {exc}",
-            "  - likely cause: no managed Quilt policy currently grants "
-            "the control-account role s3 access to this bucket",
+            f"  - error: {exc}",
+            cause,
         ]
         print("\n".join(lines), file=sys.stderr)
         return 1

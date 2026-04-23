@@ -399,7 +399,7 @@ def build_sso_config(config: AclConfig) -> str | None:
     if not desired_state.sso_mappings and desired_state.default_role_name is None:
         return None
 
-    payload: dict[str, Any] = {"version": "1.0", "mappings": []}
+    payload: dict[str, Any] = {"version": "1.0", "union_roles": True, "mappings": []}
     payload["store_last_login_context"] = config.store_last_login_context
     if desired_state.default_role_name is not None:
         payload["default_role"] = desired_state.default_role_name
@@ -615,12 +615,22 @@ def apply_acl(
     for policy in diff.policies_to_update:
         _print_apply_step(f"update policy {policy.title}", verbose=verbose)
         affected = _policy_uses_buckets(policy.permissions, failed_buckets)
+        # Resolve by id when possible — quilt3's update_managed(title) first
+        # calls _get_by_id which currently 500s on non-UUID inputs instead of
+        # returning None, so the title fallback never runs.
+        existing = known_policies.get(policy.title)
+        policy_ref = existing.id if existing is not None else policy.title
+        existing_role_ids = (
+            [role.id for role in getattr(existing, "roles", []) or []]
+            if existing is not None
+            else []
+        )
         try:
             updated = admin_policies.update_managed(
-                policy.title,
+                policy_ref,
                 title=policy.title,
                 permissions=policy.permissions,
-                roles=[],
+                roles=existing_role_ids,
             )
         except Exception as exc:
             hint = (

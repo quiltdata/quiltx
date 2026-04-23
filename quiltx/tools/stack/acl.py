@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to the ACL YAML file. Use the flat policies/roles format "
-            "from spec/060-stack-acl/simpler-stack-acl.yml. If omitted, "
+            "from stack-acl.example.yaml. If omitted, "
             "shows current server state."
         ),
     )
