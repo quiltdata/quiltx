@@ -20,12 +20,12 @@ policies:
   public:
     sso.groups:          [Everyone]
     buckets.read:        [quilt-example]
-    config.default_role: true
 
   internal:
     sso.groups:         [Employees]
     buckets.read_write: [quilt-bake, quilt-dev]
     buckets.read:       [quilt-leadership, udp-spec]
+    config.default_role: true
 
 ## Roles
 
