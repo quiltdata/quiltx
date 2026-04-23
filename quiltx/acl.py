@@ -14,12 +14,11 @@ from quilt3.admin import buckets as admin_buckets
 from quilt3.admin import policies as admin_policies
 from quilt3.admin import roles as admin_roles
 from quilt3.admin import sso_config as admin_sso_config
+from quilt3.admin import users as admin_users
 from quilt3.admin.types import Permission
 
 INLINE_POLICY_SUFFIX = "__inline"
-NEW_FORMAT_KEYS = {"policies", "roles", "store_last_login_context"}
-OLD_FORMAT_KEYS = {"bucket_policies", "sso"}
-NEW_FORMAT_EXAMPLE = "spec/060-stack-acl/simpler-stack-acl.yml"
+ACL_TOP_LEVEL_KEYS = {"policies", "roles", "store_last_login_context"}
 EVERYONE_GROUP = "Everyone"
 
 
@@ -504,17 +503,79 @@ def print_current_state(current: CurrentState) -> None:
         print("  sso config: (none)")
 
 
+def _register_bucket_with_retry(
+    bucket: str, control_account_id: str, *, assume_yes: bool
+) -> None:
+    """Run the full cross-account bucket registration, probing profiles on failure."""
+    from quiltx import bucket as bucket_lib
+
+    session, s3_client, region, _profile = bucket_lib.resolve_bucket_session(
+        bucket, None, assume_yes=assume_yes
+    )
+    if session is None:
+        raise RuntimeError(f"no accessible AWS profile for bucket {bucket}")
+
+    sns_client = session.client("sns", region_name=region)
+    data_account_id = str(session.client("sts").get_caller_identity()["Account"])
+
+    existing_policy = bucket_lib.get_bucket_policy(bucket, s3_client=s3_client)
+    statement = bucket_lib.build_quilt_policy_statement(bucket, control_account_id)
+    merged = bucket_lib.merge_bucket_policy(existing_policy, statement)
+    bucket_lib.apply_bucket_policy(bucket, merged, s3_client=s3_client)
+
+    sns_topic_arn = bucket_lib.get_bucket_notification_sns(bucket, s3_client=s3_client)
+    if sns_topic_arn is None:
+        sns_topic_arn = bucket_lib.ensure_sns_topic(
+            bucket, region, sns_client=sns_client
+        )
+    bucket_lib.configure_sns_topic_policy(
+        bucket,
+        sns_topic_arn,
+        data_account_id,
+        f"arn:aws:iam::{control_account_id}:root",
+        sns_client=sns_client,
+    )
+    bucket_lib.configure_bucket_notifications(
+        bucket, sns_topic_arn, s3_client=s3_client
+    )
+    admin_buckets.add(name=bucket, title=bucket, sns_notification_arn=sns_topic_arn)
+
+
 def apply_acl(
-    diff: AclDiff, current: CurrentState, *, verbose: bool = False
+    diff: AclDiff,
+    current: CurrentState,
+    *,
+    verbose: bool = False,
+    assume_yes: bool = False,
 ) -> list[str]:
     """Apply ACL changes. Returns any runtime warnings."""
+    from quiltx import bucket as bucket_lib
+    from quiltx import stack as stack_lib
+    from quiltx.config import get_catalog_config
+
     warnings = list(diff.warnings)
     failed_buckets: set[str] = set()
+
+    control_account_id: str | None = None
+    if diff.buckets_to_add:
+        try:
+            config = get_catalog_config()
+            catalog_name = stack_lib.extract_catalog_name(config)
+            payload = stack_lib.load_stack_payload(catalog_name)
+            if payload and payload.get("account_id"):
+                control_account_id = str(payload["account_id"])
+        except Exception as exc:  # pragma: no cover - external API surface
+            warnings.append(f"Could not load control account for bucket add: {exc}")
 
     for bucket in diff.buckets_to_add:
         try:
             _print_apply_step(f"add bucket {bucket}", verbose=verbose)
-            admin_buckets.add(bucket, bucket)
+            if control_account_id is None:
+                admin_buckets.add(bucket, bucket)
+            else:
+                _register_bucket_with_retry(
+                    bucket, control_account_id, assume_yes=assume_yes
+                )
             print(f"  + bucket {bucket}")
         except Exception as exc:  # pragma: no cover - external API surface
             failed_buckets.add(bucket)
@@ -543,6 +604,14 @@ def apply_acl(
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
+        dropped = _dropped_permissions(policy.permissions, created.permissions)
+        if dropped:
+            detail = (
+                f"server accepted create but dropped permissions: "
+                f"{', '.join(dropped)}"
+            )
+            warnings.append(f"Policy '{policy.title}' {detail}")
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
     for policy in diff.policies_to_update:
         _print_apply_step(f"update policy {policy.title}", verbose=verbose)
         affected = _policy_uses_buckets(policy.permissions, failed_buckets)
@@ -567,6 +636,14 @@ def apply_acl(
             continue
         known_policies[policy.title] = updated
         print(f"  ~ policy {policy.title}")
+        dropped = _dropped_permissions(policy.permissions, updated.permissions)
+        if dropped:
+            detail = (
+                f"server accepted update but dropped permissions: "
+                f"{', '.join(dropped)}"
+            )
+            warnings.append(f"Policy '{policy.title}' {detail}")
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
 
     for role in diff.roles_to_create:
         _print_apply_step(f"create role {role.name}", verbose=verbose)
@@ -643,6 +720,304 @@ def apply_acl(
     return warnings
 
 
+@dataclass(frozen=True)
+class PolicyDrift:
+    """A managed policy whose server state diverges from the desired state."""
+
+    title: str
+    desired: list[Permission]
+    actual: list[Permission]
+
+    @property
+    def missing(self) -> list[str]:
+        desired = _canonical_permissions(self.desired)
+        actual = set(_canonical_permissions(self.actual))
+        return [
+            f"{level.split('.')[-1]}:{bucket}"
+            for bucket, level in desired
+            if (bucket, level) not in actual
+        ]
+
+    @property
+    def extra(self) -> list[str]:
+        actual = _canonical_permissions(self.actual)
+        desired = set(_canonical_permissions(self.desired))
+        return [
+            f"{level.split('.')[-1]}:{bucket}"
+            for bucket, level in actual
+            if (bucket, level) not in desired
+        ]
+
+
+def detect_policy_drift(desired: AclConfig, current: CurrentState) -> list[PolicyDrift]:
+    """Return managed policies where the server state diverges from desired.
+
+    Detection is always-on: the catalog's policyUpdateManaged mutation has
+    historically both silently dropped permissions and returned 500 while
+    partially persisting. This compares the desired permissions for each
+    managed policy against whatever the server currently holds.
+    """
+    desired_state = _build_desired_acl_state(desired)
+    drift: list[PolicyDrift] = []
+    for title, policy_update in desired_state.policy_updates.items():
+        current_policy = current.managed_policies.get(title)
+        actual_permissions = (
+            list(current_policy.permissions) if current_policy is not None else []
+        )
+        if current_policy is not None and _canonical_permissions(
+            current_policy.permissions
+        ) == _canonical_permissions(policy_update.permissions):
+            continue
+        drift.append(
+            PolicyDrift(
+                title=title,
+                desired=list(policy_update.permissions),
+                actual=actual_permissions,
+            )
+        )
+    return drift
+
+
+def managed_roles_using_policy(policy_title: str, current: CurrentState) -> list[str]:
+    """Return managed role names that reference the given policy."""
+    return sorted(
+        name
+        for name, role in current.managed_roles.items()
+        if any(p.title == policy_title for p in getattr(role, "policies", []) or [])
+    )
+
+
+def detach_sso_mappings_for_roles(
+    role_names: set[str], *, verbose: bool = False
+) -> list[str]:
+    """Rewrite the live SSO config so it no longer references the given roles.
+
+    The registry rejects roleDeleteManaged while a role is still bound in the
+    SSO mapping, so callers that need to delete synthetic roles must clear
+    the mapping first. The recreate-and-reapply flow restores the mappings
+    when the new role IDs exist.
+    """
+    warnings: list[str] = []
+    current_sso = admin_sso_config.get()
+    if current_sso is None or not current_sso.text:
+        return warnings
+    try:
+        payload = yaml.safe_load(current_sso.text) or {}
+    except yaml.YAMLError as exc:
+        warnings.append(f"SSO config YAML could not be parsed: {exc}")
+        return warnings
+    if not isinstance(payload, dict):
+        return warnings
+
+    mappings = payload.get("mappings") or []
+    new_mappings: list[Any] = []
+    changed = False
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            new_mappings.append(mapping)
+            continue
+        roles = mapping.get("roles") or []
+        remaining = [r for r in roles if r not in role_names]
+        if remaining != roles:
+            changed = True
+            if not remaining:
+                continue
+            mapping = {**mapping, "roles": remaining}
+        new_mappings.append(mapping)
+
+    if payload.get("default_role") in role_names:
+        payload.pop("default_role", None)
+        changed = True
+
+    if not changed:
+        return warnings
+
+    payload["mappings"] = new_mappings
+    new_text = yaml.safe_dump(payload, sort_keys=False)
+    _print_apply_step(
+        f"detach sso mappings for {', '.join(sorted(role_names))}", verbose=verbose
+    )
+    try:
+        admin_sso_config.set(new_text)
+        print(f"  ~ sso config (detached: {', '.join(sorted(role_names))})")
+    except Exception as exc:
+        detail = format_exception(exc)
+        warnings.append(f"SSO config could not be detached: {detail}")
+        print(f"  ! sso config: {detail}", file=sys.stderr)
+    return warnings
+
+
+@dataclass(frozen=True)
+class UserRoleBinding:
+    """Snapshot of a user's role assignments for restore after role recreate."""
+
+    user_name: str
+    primary: str | None
+    extras: list[str]
+
+
+def detach_users_from_role(
+    role_name: str, *, verbose: bool = False
+) -> tuple[list[str], list[UserRoleBinding]]:
+    """Remove a role from every user that has it assigned.
+
+    The registry rejects roleDeleteManaged while a user still has the role
+    as their primary or extra role. Returns (warnings, snapshot) where
+    snapshot lets callers restore the original assignments once the role
+    has been recreated.
+    """
+    warnings: list[str] = []
+    snapshot: list[UserRoleBinding] = []
+    default_role = admin_roles.get_default()
+    fallback_name = default_role.name if default_role is not None else None
+    for user in admin_users.list():
+        primary = user.role.name if user.role else None
+        extras = [
+            r.name for r in (getattr(user, "extra_roles", None) or []) if r is not None
+        ]
+        if primary != role_name and role_name not in extras:
+            continue
+        snapshot.append(
+            UserRoleBinding(user_name=user.name, primary=primary, extras=extras)
+        )
+        _print_apply_step(
+            f"detach user {user.name} from role {role_name}", verbose=verbose
+        )
+        try:
+            admin_users.remove_roles(user.name, [role_name], fallback=fallback_name)
+            print(f"  ~ user {user.name} (detached {role_name})")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"User '{user.name}' could not be detached from "
+                f"role '{role_name}': {detail}"
+            )
+            print(f"  ! user {user.name}: {detail}", file=sys.stderr)
+    return warnings, snapshot
+
+
+def users_assigned_to_roles(role_names: set[str]) -> list[UserRoleBinding]:
+    """Snapshot user assignments for the given roles without modifying state."""
+    bindings: list[UserRoleBinding] = []
+    for user in admin_users.list():
+        primary = user.role.name if user.role else None
+        extras = [
+            r.name for r in (getattr(user, "extra_roles", None) or []) if r is not None
+        ]
+        if primary in role_names or any(e in role_names for e in extras):
+            bindings.append(
+                UserRoleBinding(user_name=user.name, primary=primary, extras=extras)
+            )
+    return bindings
+
+
+def restore_user_role_bindings(
+    bindings: list[UserRoleBinding], *, verbose: bool = False
+) -> list[str]:
+    """Reapply captured user role assignments after affected roles exist again."""
+    warnings: list[str] = []
+    for binding in bindings:
+        _print_apply_step(f"restore user {binding.user_name}", verbose=verbose)
+        try:
+            admin_users.set_role(
+                binding.user_name,
+                binding.primary or "",
+                extra_roles=binding.extras or None,
+            )
+            print(f"  ~ user {binding.user_name} (restored)")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"User '{binding.user_name}' role bindings could not be "
+                f"restored: {detail}"
+            )
+            print(f"  ! user {binding.user_name}: {detail}", file=sys.stderr)
+    return warnings
+
+
+def clear_sso_config(*, verbose: bool = False) -> list[str]:
+    """Clear the entire SSO config.
+
+    users.set_role and users.remove_roles are rejected while any SSO config
+    exists (SsoConfigConflict). Callers reset the config entirely, perform
+    the user/role mutations, then let the reapply step rebuild SSO from the
+    desired YAML.
+    """
+    warnings: list[str] = []
+    _print_apply_step("clear sso config", verbose=verbose)
+    try:
+        admin_sso_config.set(None)
+        print("  ~ sso config (cleared)")
+    except Exception as exc:
+        detail = format_exception(exc)
+        warnings.append(f"SSO config could not be cleared: {detail}")
+        print(f"  ! sso config: {detail}", file=sys.stderr)
+    return warnings
+
+
+def reset_policy(
+    title: str,
+    current: CurrentState,
+    *,
+    verbose: bool = False,
+    already_deleted_roles: set[str] | None = None,
+) -> tuple[list[str], list[UserRoleBinding]]:
+    """Delete a managed policy and any managed roles referencing it.
+
+    Before the deletes, clear the full SSO config and detach user
+    assignments for the affected roles — the registry rejects
+    roleDeleteManaged while either references still exist, and rejects
+    user role mutations while any SSO config is present. Returns
+    (warnings, user_bindings_snapshot) so the caller can restore user
+    assignments once the new roles exist.
+
+    In the cumulative-role model a single managed role can reference
+    multiple policies, so resetting several drifted policies in one pass
+    can ask us to delete the same role twice. Pass ``already_deleted_roles``
+    (a mutable set shared across calls) to skip roles that a prior call
+    has already handled; this function mutates the set to record the
+    roles it processes.
+    """
+    warnings: list[str] = []
+    user_snapshot: list[UserRoleBinding] = []
+    deleted = already_deleted_roles if already_deleted_roles is not None else set()
+    roles_to_delete = [
+        r for r in managed_roles_using_policy(title, current) if r not in deleted
+    ]
+    if roles_to_delete:
+        users_to_detach = users_assigned_to_roles(set(roles_to_delete))
+        if users_to_detach:
+            warnings.extend(clear_sso_config(verbose=verbose))
+        else:
+            warnings.extend(
+                detach_sso_mappings_for_roles(set(roles_to_delete), verbose=verbose)
+            )
+        for role_name in roles_to_delete:
+            w, snap = detach_users_from_role(role_name, verbose=verbose)
+            warnings.extend(w)
+            user_snapshot.extend(snap)
+    for role_name in roles_to_delete:
+        try:
+            _print_apply_step(f"delete role {role_name}", verbose=verbose)
+            admin_roles.delete(role_name)
+            print(f"  - role {role_name}")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(f"Role '{role_name}' could not be deleted: {detail}")
+            print(f"  ! role {role_name}: {detail}", file=sys.stderr)
+        finally:
+            deleted.add(role_name)
+    try:
+        _print_apply_step(f"delete policy {title}", verbose=verbose)
+        admin_policies.delete(title)
+        print(f"  - policy {title}")
+    except Exception as exc:
+        detail = format_exception(exc)
+        warnings.append(f"Policy '{title}' could not be deleted: {detail}")
+        print(f"  ! policy {title}: {detail}", file=sys.stderr)
+    return warnings, user_snapshot
+
+
 def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
     policy_updates: dict[str, PolicyUpdate] = {}
     synthesized_roles: list[_SynthesizedRole] = []
@@ -714,22 +1089,13 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
 
 
 def _validate_top_level_keys(raw: dict[str, Any]) -> None:
-    keys = set(raw)
-    old_keys = sorted(keys & OLD_FORMAT_KEYS)
-    if old_keys:
-        raise ValueError(
-            "The old stack ACL format is no longer supported. Replace "
-            f"{', '.join(old_keys)} with top-level 'policies' and 'roles'; see "
-            f"{NEW_FORMAT_EXAMPLE}."
-        )
-
-    unknown_keys = sorted(keys - NEW_FORMAT_KEYS)
+    unknown_keys = sorted(set(raw) - ACL_TOP_LEVEL_KEYS)
     if unknown_keys:
         raise ValueError(
             "Unknown top-level ACL keys: "
             + ", ".join(unknown_keys)
             + ". Supported keys: "
-            + ", ".join(sorted(NEW_FORMAT_KEYS))
+            + ", ".join(sorted(ACL_TOP_LEVEL_KEYS))
             + "."
         )
 
@@ -918,6 +1284,17 @@ def _canonical_permissions(permissions: list[Permission]) -> list[tuple[str, str
     return sorted(
         (permission.bucket, str(permission.level)) for permission in permissions
     )
+
+
+def _dropped_permissions(
+    sent: list[Permission], returned: list[Permission]
+) -> list[str]:
+    returned_set = set(_canonical_permissions(returned))
+    return [
+        f"{level.split('.')[-1]}:{bucket}"
+        for bucket, level in _canonical_permissions(sent)
+        if (bucket, level) not in returned_set
+    ]
 
 
 def _same_yaml(left: str | None, right: str | None) -> bool:
