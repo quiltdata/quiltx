@@ -1369,6 +1369,75 @@ def test_cmd_profile_finds_profile_for_bucket(monkeypatch, capsys) -> None:
     assert calls == ["sales", "open", "prod"]
 
 
+def test_resolve_bucket_session_switches_on_access_denied(monkeypatch, capsys) -> None:
+    from botocore.exceptions import ClientError
+
+    class FakeS3:
+        def __init__(self, profile: str) -> None:
+            self.profile = profile
+
+        def get_bucket_location(self, Bucket: str) -> dict:
+            if self.profile == "prod":
+                return {"LocationConstraint": None}
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+                "GetBucketLocation",
+            )
+
+    class FakeSession:
+        available_profiles = ["sales", "prod"]
+
+        def __init__(self, profile_name: str | None = None) -> None:
+            self.profile_name = profile_name or ""
+
+        def client(self, service: str, region_name: str | None = None):
+            return FakeS3(self.profile_name)
+
+    monkeypatch.setattr(bucket_tool.boto3, "Session", FakeSession)
+
+    session, s3_client, region, profile = bucket_tool._resolve_bucket_session(
+        "quilt-example", "sales", assume_yes=True
+    )
+    assert profile == "prod"
+    assert region == "us-east-1"
+    assert isinstance(session, FakeSession)
+    assert session.profile_name == "prod"
+
+
+def test_resolve_bucket_session_aborts_when_user_declines(monkeypatch, capsys) -> None:
+    from botocore.exceptions import ClientError
+
+    class FakeS3:
+        def __init__(self, profile: str) -> None:
+            self.profile = profile
+
+        def get_bucket_location(self, Bucket: str) -> dict:
+            if self.profile == "prod":
+                return {"LocationConstraint": None}
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+                "GetBucketLocation",
+            )
+
+    class FakeSession:
+        available_profiles = ["sales", "prod"]
+
+        def __init__(self, profile_name: str | None = None) -> None:
+            self.profile_name = profile_name or ""
+
+        def client(self, service: str, region_name: str | None = None):
+            return FakeS3(self.profile_name)
+
+    monkeypatch.setattr(bucket_tool.boto3, "Session", FakeSession)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    session, _s3, _region, profile = bucket_tool._resolve_bucket_session(
+        "quilt-example", "sales", assume_yes=False
+    )
+    assert session is None
+    assert profile == "sales"
+
+
 def test_cmd_profile_no_matching_profile(monkeypatch, capsys) -> None:
     from botocore.exceptions import ClientError
 
