@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-04-23
+
+### Added
+
+- Union-of-matches SSO role assignment: `quiltx stack acl` now always emits `union_roles: true` in the generated SSO config, so a user matching multiple mappings gets all of those roles (requires a registry that consumes the flag).
+- `quiltx bucket remove` unregisters a bucket from the Quilt catalog (leaves S3 policy / SNS / notifications intact).
+- `quiltx bucket add --force` re-applies the S3 bucket policy, SNS topic policy, and notification config when the bucket is already registered, and performs a remove-then-add against the catalog so Quilt re-subscribes its SQS queues to the bucket's SNS topic.
+
+### Changed
+
+- Renamed the canonical ACL example to `stack-acl.example.yaml` at the repo root.
+
+### Fixed
+
+- `quiltx stack acl` policy updates no longer silently fail: resolve the policy id from current state before calling `admin_policies.update_managed` (the title-based fallback was unreachable because `quilt3` raised 500 on non-UUID inputs), and preserve existing role attachments in the update.
+- `quiltx bucket` verification prints a prominent FAILED line identifying the failing stage, probes the catalog search index to confirm SNS→SQS wiring actually landed, and no longer trips AccessDenied on bucket-metadata calls (`GetBucketLocation`, `GetBucketVersioning`, `GetBucketNotification`, `GetBucketCORS`, `GetBucketTagging` added to `QUILT_POLICY_ACTIONS`).
+
 ## [0.10.5] - 2026-04-23
 
 ### Fixed
