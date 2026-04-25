@@ -255,8 +255,10 @@ def _reindex_dry_run(bucket_name: str, prefix: str, args: argparse.Namespace) ->
             print(f"  Sample keys ({shown}):")
             for key in sample[:shown]:
                 print(f"    {key}")
-        else:
+        elif seen == 0:
             print("  (no object versions matched this prefix)")
+        else:
+            print("  (--sample 0: key display suppressed)")
         return 0
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

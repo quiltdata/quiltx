@@ -1696,6 +1696,30 @@ def test_reindex_post_409_returns_error(monkeypatch, capsys) -> None:
     assert "already in progress" in err
 
 
+def test_reindex_post_404_returns_error(monkeypatch, capsys) -> None:
+    class FakeResponse:
+        status_code = 404
+        ok = False
+        text = "Bucket not found"
+
+    class FakeHttpSession:
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    fake_session_module = ModuleType("quilt3.session")
+    fake_session_module.get_registry_url = lambda: "https://registry.example.com"  # type: ignore[attr-defined]
+    fake_session_module.get_session = lambda: FakeHttpSession()  # type: ignore[attr-defined]
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_session_module)
+
+    rc = bucket_tool.main(["reindex", "s3://b/p/"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not registered in this catalog" in err
+
+
 def test_reindex_rejects_non_s3_uri(capsys) -> None:
     rc = bucket_tool.main(["reindex", "https://nope.example.com/x"])
     assert rc == 2
