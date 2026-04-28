@@ -58,6 +58,7 @@ def make_fake_catalog(
             catalog_name=catalog_name,
             catalog_url=f"https://{catalog_name}",
             source="flag",
+            auth_required=False,
         )
         object.__setattr__(cat, "_test_payload", payload)
     else:
@@ -65,6 +66,7 @@ def make_fake_catalog(
             catalog_name=catalog_name,
             catalog_url=f"https://{catalog_name}",
             source="flag",
+            auth_required=False,
         )
 
     if has_admin_stubs:

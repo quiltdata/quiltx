@@ -40,6 +40,8 @@ class AdminClients:
 
 @dataclass(frozen=True)
 class Catalog(CatalogContext):
+    # When False, ensure_auth() is a no-op (set by @catalog_command(auth=False) path).
+    auth_required: bool = field(default=True)
     _admin: AdminClients | None = field(default=None, init=False, repr=False)
     _region: str | None = field(default=None, init=False, repr=False)
 
@@ -52,6 +54,9 @@ class Catalog(CatalogContext):
 
     @property
     def admin(self) -> AdminClients:
+        # ensure_auth() is a no-op if auth=False was set; when active it binds
+        # quilt3's global state to this catalog before we access admin modules.
+        self.ensure_auth()
         if self._admin is None:
             from quiltx.quilt3_facade import admin_modules
 
@@ -75,6 +80,8 @@ class Catalog(CatalogContext):
         return load_stack_payload(self.catalog_name)
 
     def boto3_session(self) -> Any:
+        # Don't cache — credentials.json may rotate between calls.
+        self.ensure_auth()
         from quiltx.quilt3_facade import default_boto3_session
 
         return default_boto3_session()
@@ -87,16 +94,78 @@ class Catalog(CatalogContext):
 
             return boto3.client("cloudformation", region_name=region)
 
-    def ensure_auth(self) -> None:
-        return None
+    def ensure_auth(self, args: Any = None) -> None:
+        """Bind quilt3's process-global state to this catalog.
+
+        No-op when ``auth_required=False`` (AWS-only / bootstrap commands).
+
+        Resolution order (CLI path when ``args`` provided, API path otherwise):
+        1. Walk the credential resolver to obtain (username, secret).
+        2. If secret looks like a password, acquire a refresh token via
+           POST /api/login and replace the keyring entry.
+        3. Under _QUILT3_LOCK: set_global_config + login_with_token.
+        4. Persist the (possibly updated) refresh token.
+        """
+        if not self.auth_required:
+            return
+
+        from quiltx import credentials as creds_module
+        from quiltx import quilt_auth
+        from quiltx.auth import CredentialError, resolve_api, resolve_cli
+        from quiltx.quilt3_facade import (
+            _QUILT3_LOCK,
+            login_with_token,
+            set_global_config,
+        )
+
+        if args is not None:
+            try:
+                resolved = resolve_cli(self, args)
+            except CredentialError as exc:
+                raise ValueError(str(exc)) from exc
+        else:
+            try:
+                resolved = resolve_api(self)
+            except CredentialError as exc:
+                raise ValueError(str(exc)) from exc
+
+        username = resolved.username
+        secret = resolved.secret
+
+        # Determine if secret is already a refresh token or still a password.
+        # Heuristic: refresh tokens returned by the Quilt registry are long
+        # JWT-like strings (>50 chars). Passwords are shorter on average but
+        # there's no reliable discriminator — so we probe: validate the token
+        # first, and if it fails we treat it as a password and acquire a new one.
+        refresh_token: str
+        if quilt_auth.validate_refresh_token(self.catalog_url, secret):
+            refresh_token = secret
+        else:
+            # Treat secret as a password and exchange it for a refresh token.
+            refresh_token = quilt_auth.acquire_refresh_token(
+                self.catalog_url, username, secret
+            )
+            # Replace the stored secret with the refresh token.
+            creds_module.store(self.catalog_name, username, refresh_token)
+
+        with _QUILT3_LOCK:
+            set_global_config(self.catalog_url)
+            login_with_token(refresh_token)
 
     @classmethod
-    def from_dns(cls, dns: str, *, source: CatalogContextSource) -> "Catalog":
+    def from_dns(
+        cls,
+        dns: str,
+        *,
+        source: CatalogContextSource,
+        auth_required: bool = True,
+    ) -> "Catalog":
         """Build a Catalog from a bare DNS name."""
         return cls(
             catalog_name=dns,
             catalog_url=f"https://{dns}",
             source=source,
+            auth_required=auth_required,
         )
 
 
@@ -127,11 +196,11 @@ def catalog_command(
         def wrapper(*args: Any, **kwargs: Any) -> T:
             parsed_args = args[0] if args else kwargs.get("args")
             catalog_arg = getattr(parsed_args, "catalog", None)
-            catalog = resolve_catalog_context(catalog_arg)
+            catalog = resolve_catalog_context(catalog_arg, auth_required=auth)
 
             def invoke() -> T:
                 if auth:
-                    catalog.ensure_auth()
+                    catalog.ensure_auth(parsed_args)
                 return wrapped(catalog, *args, **kwargs)
 
             if not auth:
@@ -142,10 +211,12 @@ def catalog_command(
             except Exception as exc:
                 if not _is_auth_error(exc):
                     raise
-                print("Session expired. Launching quilt3 login...", file=sys.stderr)
-                from quiltx.quilt3_facade import login_global
-
-                login_global()
+                print(
+                    f"Session expired for {catalog.catalog_name}. Re-authenticating...",
+                    file=sys.stderr,
+                )
+                # Per-catalog retry: re-run ensure_auth to refresh credentials.
+                catalog.ensure_auth(parsed_args)
                 return invoke()
 
         return wrapper
@@ -200,6 +271,8 @@ def _lookup_default_dns() -> str | None:
 
 def resolve_catalog_context(
     catalog: str | None = None,
+    *,
+    auth_required: bool = True,
 ) -> Catalog:
     """Resolve the target catalog identity.
 
@@ -210,11 +283,15 @@ def resolve_catalog_context(
     4. Error
     """
     if catalog:
-        return Catalog.from_dns(normalize_dns(catalog), source="flag")
+        return Catalog.from_dns(
+            normalize_dns(catalog), source="flag", auth_required=auth_required
+        )
 
     env_catalog = os.environ.get("QUILTX_CATALOG")
     if env_catalog:
-        return Catalog.from_dns(normalize_dns(env_catalog), source="env")
+        return Catalog.from_dns(
+            normalize_dns(env_catalog), source="env", auth_required=auth_required
+        )
 
     dns = _lookup_default_dns()
     if dns is None:
@@ -223,7 +300,7 @@ def resolve_catalog_context(
             "Pass --catalog or run `quiltx catalog default <dns>`."
         )
 
-    return Catalog.from_dns(dns, source="default")
+    return Catalog.from_dns(dns, source="default", auth_required=auth_required)
 
 
 def fetch_region(

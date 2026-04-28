@@ -10,12 +10,22 @@ The only permitted direct quilt3 import outside this module is the type-only
 Implementation note: every function uses a local ``import quilt3`` so that
 test monkeypatches that replace ``sys.modules["quilt3"]`` take effect
 correctly, matching the pattern used before this facade existed.
+
+Threading note: ``_QUILT3_LOCK`` serialises the set_global_config +
+login_with_token + immediate quilt3 call sequence. This is a tripwire against
+accidental reentrancy (two Catalog admin operations interleaving in one call
+stack) — not a multi-thread feature.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Mapping
+
+# Lock held during the bind-and-call sequence in Catalog.ensure_auth / admin.
+# See §4.4 in the spec.
+_QUILT3_LOCK = threading.Lock()
 
 
 @dataclass
@@ -48,6 +58,18 @@ def login_global(url: str | None = None) -> None:
         quilt3.login()
     else:
         quilt3.login(url)
+
+
+def login_with_token(refresh_token: str) -> None:
+    """Exchange a refresh token for an access token and bind quilt3's session.
+
+    Calls ``quilt3.session.login_with_token(refresh_token)``.
+    Must be called after ``set_global_config`` so quilt3 knows which registry
+    URL to key the auth.json entry under.
+    """
+    from quilt3.session import login_with_token as _login_with_token
+
+    _login_with_token(refresh_token)
 
 
 def default_boto3_session() -> object:

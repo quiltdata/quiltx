@@ -19,11 +19,13 @@ from quiltx.config import (
     get_catalog_config as get_catalog_config,
     get_catalog_region as get_catalog_region,
 )
+from quiltx.stack import Catalog as Catalog
 
 __all__ = [
     "__version__",
     "AclConfig",
     "AclDiff",
+    "Catalog",
     "CurrentState",
     "all_buckets",
     "apply_acl",

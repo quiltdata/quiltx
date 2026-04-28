@@ -34,7 +34,7 @@ def _install_stack_context(monkeypatch, catalog_name: str = "demo") -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "resolve_catalog_context",
-        lambda _catalog=None: cat,
+        lambda _catalog=None, **kw: cat,
     )
 
 
@@ -563,7 +563,7 @@ def test_add_no_config(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "resolve_catalog_context",
-        lambda _catalog=None: (_ for _ in ()).throw(
+        lambda _catalog=None, **kw: (_ for _ in ()).throw(
             ValueError("No Quilt catalog configured")
         ),
     )
@@ -1070,6 +1070,7 @@ def _stub_stack_and_config(monkeypatch, *, payload=None):
         catalog_name="demo",
         catalog_url="https://demo.example.com",
         source="global-config",
+        auth_required=False,
     )
 
 
@@ -1333,6 +1334,12 @@ def test_resolve_principals_arg_splits_comma_separated() -> None:
 
 
 def test_cmd_add_principal_bare_flag_prints_guidance(monkeypatch, capsys) -> None:
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
     assert bucket_tool.main(["add", "bucket", "--principal"]) == 0
     captured = capsys.readouterr()
     assert "--principal" in captured.out
@@ -1341,6 +1348,12 @@ def test_cmd_add_principal_bare_flag_prints_guidance(monkeypatch, capsys) -> Non
 
 
 def test_cmd_add_principal_rejects_non_arn(monkeypatch, capsys) -> None:
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
     assert bucket_tool.main(["add", "bucket", "--principal", "not-an-arn"]) == 1
     captured = capsys.readouterr()
     assert "must be an IAM role ARN" in captured.err
