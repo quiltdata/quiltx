@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import functools
-import sys
-from collections.abc import Callable
-from typing import Any, TypeVar
-
-T = TypeVar("T")
+from typing import Any
 
 
 def get_catalog_config() -> dict[str, Any]:
@@ -66,30 +61,6 @@ def normalize_catalog_url(catalog_url: str) -> str:
     if "://" not in catalog_url:
         catalog_url = f"https://{catalog_url}"
     return catalog_url.rstrip("/")
-
-
-def _is_auth_error(exc: Exception) -> bool:
-    """Check if an exception is a quilt3 authentication error."""
-    return "Authentication failed" in str(exc)
-
-
-def auto_login(func: Callable[..., T]) -> Callable[..., T]:
-    """Decorator that auto-runs quilt3 login on authentication failure, then retries."""
-
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> T:
-        try:
-            return func(*args, **kwargs)
-        except Exception as exc:
-            if not _is_auth_error(exc):
-                raise
-            print("Session expired. Launching quilt3 login...", file=sys.stderr)
-            import quilt3
-
-            quilt3.login()
-            return func(*args, **kwargs)
-
-    return wrapper
 
 
 def set_catalog_url(catalog_url: str, **config_values: Any) -> dict[str, Any]:

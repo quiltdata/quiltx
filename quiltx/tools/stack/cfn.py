@@ -29,31 +29,39 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        ctx = stack_lib.resolve_stack_context(args.catalog_name)
-        catalog_config = stack_lib.fetch_catalog_config(ctx.catalog_url)
-        region = stack_lib.fetch_region(ctx, catalog_config)
+        return _run(args)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+@stack_lib.stack_command(auth=False)
+def _run(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+    try:
+        catalog_config = stack_lib.fetch_catalog_config(stack.catalog_url)
+        region = stack_lib.fetch_region(stack, catalog_config)
 
         # Use the simplified API - pass region and let the functions create clients
-        stack_info = stack_lib.find_matching_stack(ctx.catalog_url, region=region)
+        stack_info = stack_lib.find_matching_stack(stack, region=region)
         log_groups = stack_lib.list_log_group_resources(
-            stack_info["StackName"], region=region
+            stack, stack_info["StackName"], region=region
         )
         ecs_resources = stack_lib.list_ecs_resources(
-            stack_info["StackName"], region=region
+            stack, stack_info["StackName"], region=region
         )
         payload = stack_lib.build_stack_payload(
-            ctx.catalog_name,
-            ctx.catalog_url,
+            stack.catalog_name,
+            stack.catalog_url,
             region,
             stack_info,
             log_groups,
             ecs_resources,
             catalog_config,
         )
-        output_path = stack_lib.write_stack_payload(ctx.catalog_name, payload)
+        output_path = stack_lib.write_stack_payload(stack.catalog_name, payload)
 
         header = stack_lib.format_stack_header(
-            ctx.catalog_name,
+            stack.catalog_name,
             {
                 "stack_name": stack_info.get("StackName"),
                 "region": region,

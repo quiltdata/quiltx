@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import ssl
+import sys
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping, TypeVar, overload
 from urllib.parse import urlparse
 
 from platformdirs import user_data_path
@@ -24,6 +26,124 @@ class StackContext:
     catalog_name: str
     catalog_url: str
     source: StackContextSource
+
+
+@dataclass(frozen=True)
+class AdminClients:
+    buckets: Any
+    policies: Any
+    roles: Any
+    sso_config: Any
+    users: Any
+
+
+@dataclass(frozen=True)
+class Stack(StackContext):
+    _admin: AdminClients | None = field(default=None, init=False, repr=False)
+    _region: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def region(self) -> str:
+        if self._region is None:
+            object.__setattr__(self, "_region", fetch_region(self))
+        assert self._region is not None
+        return self._region
+
+    @property
+    def admin(self) -> AdminClients:
+        if self._admin is None:
+            from quilt3.admin import buckets, policies, roles, sso_config, users
+
+            object.__setattr__(
+                self,
+                "_admin",
+                AdminClients(
+                    buckets=buckets,
+                    policies=policies,
+                    roles=roles,
+                    sso_config=sso_config,
+                    users=users,
+                ),
+            )
+        assert self._admin is not None
+        return self._admin
+
+    @property
+    def payload(self) -> Mapping[str, Any] | None:
+        return load_stack_payload(self.catalog_name)
+
+    def boto3_session(self) -> Any:
+        from quilt3.session import get_boto3_session
+
+        return get_boto3_session()
+
+    def cfn_client(self, region: str | None = None) -> Any:
+        try:
+            return self.boto3_session().client("cloudformation", region_name=region)
+        except Exception:
+            import boto3
+
+            return boto3.client("cloudformation", region_name=region)
+
+    def ensure_auth(self) -> None:
+        return None
+
+
+T = TypeVar("T")
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    return "Authentication failed" in str(exc)
+
+
+@overload
+def stack_command(func: Callable[..., T]) -> Callable[..., T]: ...
+
+
+@overload
+def stack_command(
+    *, auth: bool = True
+) -> Callable[[Callable[..., T]], Callable[..., T]]: ...
+
+
+def stack_command(
+    func: Callable[..., T] | None = None, *, auth: bool = True
+) -> Callable[..., T] | Callable[[Callable[..., T]], Callable[..., T]]:
+    """Resolve and inject a Stack into a parsed CLI command handler."""
+
+    def decorate(wrapped: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(wrapped)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            parsed_args = args[0] if args else kwargs.get("args")
+            catalog = getattr(parsed_args, "catalog_name", None) or getattr(
+                parsed_args, "catalog", None
+            )
+            stack = resolve_stack_context(catalog)
+
+            def invoke() -> T:
+                if auth:
+                    stack.ensure_auth()
+                return wrapped(stack, *args, **kwargs)
+
+            if not auth:
+                return invoke()
+
+            try:
+                return invoke()
+            except Exception as exc:
+                if not _is_auth_error(exc):
+                    raise
+                print("Session expired. Launching quilt3 login...", file=sys.stderr)
+                import quilt3
+
+                quilt3.login()
+                return invoke()
+
+        return wrapper
+
+    if func is not None:
+        return decorate(func)
+    return decorate
 
 
 def extract_catalog_name(config: Mapping[str, Any]) -> str:
@@ -46,11 +166,11 @@ def resolve_stack_context(
     catalog: str | None = None,
     *,
     no_config_message: str = "No Quilt catalog configured",
-) -> StackContext:
+) -> Stack:
     """Resolve the target stack identity from a CLI override or quilt3 config."""
     if catalog:
         catalog_name = get_hostname(catalog)
-        return StackContext(
+        return Stack(
             catalog_name=catalog_name,
             catalog_url=f"https://{catalog_name}",
             source="flag",
@@ -64,7 +184,7 @@ def resolve_stack_context(
 
     catalog_name = extract_catalog_name(config)
     catalog_url = str(config.get("navigator_url") or f"https://{catalog_name}")
-    return StackContext(
+    return Stack(
         catalog_name=catalog_name,
         catalog_url=catalog_url,
         source="global-config",
@@ -88,21 +208,6 @@ def fetch_region(
     import quilt3
 
     return resolve_region(quilt3.config(), catalog_config)
-
-
-def _quilt_cfn_client(region: str | None) -> Any:
-    """Return a CloudFormation client using Quilt-issued stack credentials.
-
-    Falls back to the default boto3 session if quilt3 is not logged in.
-    """
-    try:
-        from quilt3.session import get_boto3_session
-
-        return get_boto3_session().client("cloudformation", region_name=region)
-    except Exception:
-        import boto3
-
-        return boto3.client("cloudformation", region_name=region)
 
 
 def _default_ssl_context() -> ssl.SSLContext | None:
@@ -139,14 +244,14 @@ def stack_parameters(stack: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
 
 
 def find_matching_stack(
-    catalog_url: str,
+    stack: Stack,
     region: str | None = None,
     cfn_client: Any = None,
 ) -> Mapping[str, Any]:
     """Find CloudFormation stack matching the catalog URL.
 
     Args:
-        catalog_url: Catalog URL to match (e.g., "https://example.quiltdata.com")
+        stack: Stack to match (e.g., "https://example.quiltdata.com")
         region: AWS region (defaults to fetching from catalog config if not provided)
         cfn_client: Optional CloudFormation client (creates one if not provided)
 
@@ -159,46 +264,49 @@ def find_matching_stack(
     # Auto-detect region from catalog config if not provided
     if region is None and cfn_client is None:
         try:
-            catalog_config = fetch_catalog_config(catalog_url)
+            catalog_config = fetch_catalog_config(stack.catalog_url)
             region = catalog_config.get("region")
             if not region:
                 raise ValueError(
-                    f"No region found in catalog config for {catalog_url}. "
+                    f"No region found in catalog config for {stack.catalog_url}. "
                     "Please provide region parameter explicitly."
                 )
         except Exception as exc:
             raise ValueError(
-                f"Could not auto-detect region for {catalog_url}: {exc}. "
+                f"Could not auto-detect region for {stack.catalog_url}: {exc}. "
                 "Please provide region parameter explicitly."
             ) from exc
 
     # Create CloudFormation client if not provided
     if cfn_client is None:
-        cfn_client = _quilt_cfn_client(region)
+        cfn_client = stack.cfn_client(region)
 
-    expected_host = get_hostname(catalog_url)
+    expected_host = stack.catalog_name
     paginator = cfn_client.get_paginator("describe_stacks")
 
     output_host_matches = []
 
     for page in paginator.paginate():
-        for stack in page.get("Stacks", []):
-            for output in stack_outputs(stack):
+        for stack_info in page.get("Stacks", []):
+            for output in stack_outputs(stack_info):
                 output_key = str(output.get("OutputKey", "")).lower()
                 output_value = output.get("OutputValue")
                 if not output_value:
                     continue
                 if output_key == "quiltwebhost":
                     if get_hostname(str(output_value)) == expected_host:
-                        output_host_matches.append(stack)
+                        output_host_matches.append(stack_info)
 
     if output_host_matches:
         return output_host_matches[0]
 
-    raise ValueError("No stack found with QuiltWebHost matching " f"{catalog_url}")
+    raise ValueError(
+        "No stack found with QuiltWebHost matching " f"{stack.catalog_url}"
+    )
 
 
 def list_log_group_resources(
+    stack: Stack,
     stack_name: str,
     region: str | None = None,
     cfn_client: Any = None,
@@ -216,7 +324,7 @@ def list_log_group_resources(
     if cfn_client is None:
         if region is None:
             raise ValueError("Either region or cfn_client must be provided")
-        cfn_client = _quilt_cfn_client(region)
+        cfn_client = stack.cfn_client(region)
 
     paginator = cfn_client.get_paginator("list_stack_resources")
     log_groups = []
@@ -236,6 +344,7 @@ def list_log_group_resources(
 
 
 def list_ecs_resources(
+    stack: Stack,
     stack_name: str,
     region: str | None = None,
     cfn_client: Any = None,
@@ -253,7 +362,7 @@ def list_ecs_resources(
     if cfn_client is None:
         if region is None:
             raise ValueError("Either region or cfn_client must be provided")
-        cfn_client = _quilt_cfn_client(region)
+        cfn_client = stack.cfn_client(region)
 
     paginator = cfn_client.get_paginator("list_stack_resources")
     ecs_resources: list[dict[str, str]] = []

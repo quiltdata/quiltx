@@ -57,19 +57,33 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        ctx = stack_lib.resolve_stack_context()
-        header = stack_lib.current_stack_header(ctx)
+        return _run(args)
+    except Exception as exc:
+        details = _format_exception_details(exc)
+        if details:
+            for detail in details:
+                print(detail, file=sys.stderr)
+        if args.verbose:
+            print(f"Failure type: {type(exc).__name__}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+@stack_lib.stack_command
+def _run(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+    try:
+        header = stack_lib.current_stack_header(stack)
         if header:
             print(header)
         if args.config_file is None:
-            current = acl_lib.fetch_current_state()
+            current = acl_lib.fetch_current_state(stack)
             acl_lib.print_current_state(current)
             return 0
 
         desired = acl_lib.parse_acl_config(args.config_file)
         if args.store_last_login_context:
             desired = replace(desired, store_last_login_context=True)
-        current = acl_lib.fetch_current_state()
+        current = acl_lib.fetch_current_state(stack)
         diff = acl_lib.compute_diff(desired, current)
         acl_lib.print_diff(diff, verbose=args.verbose, desired=desired, current=current)
 
@@ -85,14 +99,14 @@ def main(argv: list[str] | None = None) -> int:
 
         print("Applying...")
         warnings = acl_lib.apply_acl(
-            diff, current, verbose=args.verbose, assume_yes=args.yes
+            stack, diff, current, verbose=args.verbose, assume_yes=args.yes
         )
 
-        post_current = acl_lib.fetch_current_state()
+        post_current = acl_lib.fetch_current_state(stack)
         drift = acl_lib.detect_policy_drift(desired, post_current)
         if drift:
             reset_warnings, post_current = _handle_policy_drift(
-                drift, desired, post_current, auto=args.yes, verbose=args.verbose
+                stack, drift, desired, post_current, auto=args.yes, verbose=args.verbose
             )
             warnings.extend(reset_warnings)
 
@@ -119,6 +133,7 @@ def _confirm_apply() -> bool:
 
 
 def _handle_policy_drift(
+    stack: stack_lib.Stack,
     drift: list[acl_lib.PolicyDrift],
     desired: acl_lib.AclConfig,
     current: acl_lib.CurrentState,
@@ -170,7 +185,7 @@ def _handle_policy_drift(
     if not to_reset:
         return warnings, current
 
-    affected_users = acl_lib.users_assigned_to_roles(all_affected_roles)
+    affected_users = acl_lib.users_assigned_to_roles(stack, all_affected_roles)
     if affected_users:
         print(
             "WARNING: the following users will be temporarily reassigned "
@@ -195,6 +210,7 @@ def _handle_policy_drift(
     deleted_roles: set[str] = set()
     for title in to_reset:
         reset_warnings, snap = acl_lib.reset_policy(
+            stack,
             title,
             current,
             verbose=verbose,
@@ -203,19 +219,21 @@ def _handle_policy_drift(
         warnings.extend(reset_warnings)
         user_snapshots.extend(snap)
 
-    post_reset = acl_lib.fetch_current_state()
+    post_reset = acl_lib.fetch_current_state(stack)
     new_diff = acl_lib.compute_diff(desired, post_reset)
     if new_diff.has_changes():
         print("Reapplying after reset...")
         warnings.extend(
-            acl_lib.apply_acl(new_diff, post_reset, verbose=verbose, assume_yes=auto)
+            acl_lib.apply_acl(
+                stack, new_diff, post_reset, verbose=verbose, assume_yes=auto
+            )
         )
-        post_reset = acl_lib.fetch_current_state()
+        post_reset = acl_lib.fetch_current_state(stack)
 
     if user_snapshots:
         print("Restoring user role bindings...")
         warnings.extend(
-            acl_lib.restore_user_role_bindings(user_snapshots, verbose=verbose)
+            acl_lib.restore_user_role_bindings(stack, user_snapshots, verbose=verbose)
         )
 
     residual = acl_lib.detect_policy_drift(desired, post_reset)

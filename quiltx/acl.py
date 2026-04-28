@@ -9,13 +9,8 @@ from typing import Any
 
 import yaml
 
-from quiltx.config import auto_login
-from quilt3.admin import buckets as admin_buckets
-from quilt3.admin import policies as admin_policies
-from quilt3.admin import roles as admin_roles
-from quilt3.admin import sso_config as admin_sso_config
-from quilt3.admin import users as admin_users
 from quilt3.admin.types import Permission
+from quiltx import stack as stack_lib
 
 INLINE_POLICY_SUFFIX = "__inline"
 ACL_TOP_LEVEL_KEYS = {"policies", "roles", "store_last_login_context"}
@@ -289,14 +284,13 @@ def all_buckets(config: AclConfig) -> set[str]:
     return result
 
 
-@auto_login
-def fetch_current_state() -> CurrentState:
+def fetch_current_state(stack: stack_lib.Stack) -> CurrentState:
     """Fetch current buckets, policies, roles, and SSO configuration."""
-    bucket_items = {bucket.name: bucket for bucket in admin_buckets.list()}
+    bucket_items = {bucket.name: bucket for bucket in stack.admin.buckets.list()}
 
     managed_policies: dict[str, Any] = {}
     unmanaged_policies: dict[str, Any] = {}
-    for policy in admin_policies.list():
+    for policy in stack.admin.policies.list():
         if policy.managed:
             managed_policies[policy.title] = policy
         else:
@@ -304,15 +298,15 @@ def fetch_current_state() -> CurrentState:
 
     managed_roles: dict[str, Any] = {}
     unmanaged_roles: dict[str, Any] = {}
-    for role in admin_roles.list():
+    for role in stack.admin.roles.list():
         typename = getattr(role, "typename__", "")
         if typename == "ManagedRole":
             managed_roles[role.name] = role
         else:
             unmanaged_roles[role.name] = role
 
-    sso_config = admin_sso_config.get()
-    default_role = admin_roles.get_default()
+    sso_config = stack.admin.sso_config.get()
+    default_role = stack.admin.roles.get_default()
     return CurrentState(
         buckets=bucket_items,
         managed_policies=managed_policies,
@@ -504,7 +498,7 @@ def print_current_state(current: CurrentState) -> None:
 
 
 def _register_bucket_with_retry(
-    bucket: str, control_account_id: str, *, assume_yes: bool
+    stack: stack_lib.Stack, bucket: str, control_account_id: str, *, assume_yes: bool
 ) -> None:
     """Run the full cross-account bucket registration, probing profiles on failure."""
     from quiltx import bucket as bucket_lib
@@ -538,10 +532,13 @@ def _register_bucket_with_retry(
     bucket_lib.configure_bucket_notifications(
         bucket, sns_topic_arn, s3_client=s3_client
     )
-    admin_buckets.add(name=bucket, title=bucket, sns_notification_arn=sns_topic_arn)
+    stack.admin.buckets.add(
+        name=bucket, title=bucket, sns_notification_arn=sns_topic_arn
+    )
 
 
 def apply_acl(
+    stack: stack_lib.Stack,
     diff: AclDiff,
     current: CurrentState,
     *,
@@ -550,8 +547,6 @@ def apply_acl(
 ) -> list[str]:
     """Apply ACL changes. Returns any runtime warnings."""
     from quiltx import bucket as bucket_lib
-    from quiltx import stack as stack_lib
-    from quiltx.config import get_catalog_config
 
     warnings = list(diff.warnings)
     failed_buckets: set[str] = set()
@@ -559,9 +554,7 @@ def apply_acl(
     control_account_id: str | None = None
     if diff.buckets_to_add:
         try:
-            config = get_catalog_config()
-            catalog_name = stack_lib.extract_catalog_name(config)
-            payload = stack_lib.load_stack_payload(catalog_name)
+            payload = stack.payload
             if payload and payload.get("account_id"):
                 control_account_id = str(payload["account_id"])
         except Exception as exc:  # pragma: no cover - external API surface
@@ -571,10 +564,10 @@ def apply_acl(
         try:
             _print_apply_step(f"add bucket {bucket}", verbose=verbose)
             if control_account_id is None:
-                admin_buckets.add(bucket, bucket)
+                stack.admin.buckets.add(bucket, bucket)
             else:
                 _register_bucket_with_retry(
-                    bucket, control_account_id, assume_yes=assume_yes
+                    stack, bucket, control_account_id, assume_yes=assume_yes
                 )
             print(f"  + bucket {bucket}")
         except Exception as exc:  # pragma: no cover - external API surface
@@ -587,7 +580,7 @@ def apply_acl(
         _print_apply_step(f"create policy {policy.title}", verbose=verbose)
         affected = _policy_uses_buckets(policy.permissions, failed_buckets)
         try:
-            created = admin_policies.create_managed(
+            created = stack.admin.policies.create_managed(
                 policy.title, permissions=policy.permissions
             )
         except Exception as exc:
@@ -626,7 +619,7 @@ def apply_acl(
             else []
         )
         try:
-            updated = admin_policies.update_managed(
+            updated = stack.admin.policies.update_managed(
                 policy_ref,
                 title=policy.title,
                 permissions=policy.permissions,
@@ -659,7 +652,7 @@ def apply_acl(
         _print_apply_step(f"create role {role.name}", verbose=verbose)
         try:
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
-            admin_roles.create_managed(role.name, policies=policy_ids)
+            stack.admin.roles.create_managed(role.name, policies=policy_ids)
         except KeyError as exc:
             warnings.append(
                 f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}"
@@ -679,7 +672,9 @@ def apply_acl(
         _print_apply_step(f"update role {role.name}", verbose=verbose)
         try:
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
-            admin_roles.update_managed(role.name, name=role.name, policies=policy_ids)
+            stack.admin.roles.update_managed(
+                role.name, name=role.name, policies=policy_ids
+            )
         except KeyError as exc:
             warnings.append(
                 f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}"
@@ -698,7 +693,7 @@ def apply_acl(
     if diff.sso_needs_update and diff.sso_config_text is not None:
         _print_apply_step("update sso config", verbose=verbose)
         try:
-            admin_sso_config.set(diff.sso_config_text)
+            stack.admin.sso_config.set(diff.sso_config_text)
         except Exception as exc:
             detail = format_exception(exc)
             warnings.append(f"SSO config could not be updated: {detail}")
@@ -710,7 +705,7 @@ def apply_acl(
     for role_name in diff.roles_to_delete:
         try:
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
-            admin_roles.delete(role_name)
+            stack.admin.roles.delete(role_name)
             print(f"  - role {role_name}")
         except Exception as exc:  # pragma: no cover - external API surface
             warnings.append(
@@ -720,7 +715,7 @@ def apply_acl(
     for policy_title in diff.policies_to_delete:
         try:
             _print_apply_step(f"delete policy {policy_title}", verbose=verbose)
-            admin_policies.delete(policy_title)
+            stack.admin.policies.delete(policy_title)
             print(f"  - policy {policy_title}")
         except Exception as exc:  # pragma: no cover - external API surface
             warnings.append(
@@ -798,7 +793,7 @@ def managed_roles_using_policy(policy_title: str, current: CurrentState) -> list
 
 
 def detach_sso_mappings_for_roles(
-    role_names: set[str], *, verbose: bool = False
+    stack: stack_lib.Stack, role_names: set[str], *, verbose: bool = False
 ) -> list[str]:
     """Rewrite the live SSO config so it no longer references the given roles.
 
@@ -808,7 +803,7 @@ def detach_sso_mappings_for_roles(
     when the new role IDs exist.
     """
     warnings: list[str] = []
-    current_sso = admin_sso_config.get()
+    current_sso = stack.admin.sso_config.get()
     if current_sso is None or not current_sso.text:
         return warnings
     try:
@@ -848,7 +843,7 @@ def detach_sso_mappings_for_roles(
         f"detach sso mappings for {', '.join(sorted(role_names))}", verbose=verbose
     )
     try:
-        admin_sso_config.set(new_text)
+        stack.admin.sso_config.set(new_text)
         print(f"  ~ sso config (detached: {', '.join(sorted(role_names))})")
     except Exception as exc:
         detail = format_exception(exc)
@@ -867,7 +862,7 @@ class UserRoleBinding:
 
 
 def detach_users_from_role(
-    role_name: str, *, verbose: bool = False
+    stack: stack_lib.Stack, role_name: str, *, verbose: bool = False
 ) -> tuple[list[str], list[UserRoleBinding]]:
     """Remove a role from every user that has it assigned.
 
@@ -878,9 +873,9 @@ def detach_users_from_role(
     """
     warnings: list[str] = []
     snapshot: list[UserRoleBinding] = []
-    default_role = admin_roles.get_default()
+    default_role = stack.admin.roles.get_default()
     fallback_name = default_role.name if default_role is not None else None
-    for user in admin_users.list():
+    for user in stack.admin.users.list():
         primary = user.role.name if user.role else None
         extras = [
             r.name for r in (getattr(user, "extra_roles", None) or []) if r is not None
@@ -894,7 +889,9 @@ def detach_users_from_role(
             f"detach user {user.name} from role {role_name}", verbose=verbose
         )
         try:
-            admin_users.remove_roles(user.name, [role_name], fallback=fallback_name)
+            stack.admin.users.remove_roles(
+                user.name, [role_name], fallback=fallback_name
+            )
             print(f"  ~ user {user.name} (detached {role_name})")
         except Exception as exc:
             detail = format_exception(exc)
@@ -906,10 +903,12 @@ def detach_users_from_role(
     return warnings, snapshot
 
 
-def users_assigned_to_roles(role_names: set[str]) -> list[UserRoleBinding]:
+def users_assigned_to_roles(
+    stack: stack_lib.Stack, role_names: set[str]
+) -> list[UserRoleBinding]:
     """Snapshot user assignments for the given roles without modifying state."""
     bindings: list[UserRoleBinding] = []
-    for user in admin_users.list():
+    for user in stack.admin.users.list():
         primary = user.role.name if user.role else None
         extras = [
             r.name for r in (getattr(user, "extra_roles", None) or []) if r is not None
@@ -922,14 +921,14 @@ def users_assigned_to_roles(role_names: set[str]) -> list[UserRoleBinding]:
 
 
 def restore_user_role_bindings(
-    bindings: list[UserRoleBinding], *, verbose: bool = False
+    stack: stack_lib.Stack, bindings: list[UserRoleBinding], *, verbose: bool = False
 ) -> list[str]:
     """Reapply captured user role assignments after affected roles exist again."""
     warnings: list[str] = []
     for binding in bindings:
         _print_apply_step(f"restore user {binding.user_name}", verbose=verbose)
         try:
-            admin_users.set_role(
+            stack.admin.users.set_role(
                 binding.user_name,
                 binding.primary or "",
                 extra_roles=binding.extras or None,
@@ -945,7 +944,7 @@ def restore_user_role_bindings(
     return warnings
 
 
-def clear_sso_config(*, verbose: bool = False) -> list[str]:
+def clear_sso_config(stack: stack_lib.Stack, *, verbose: bool = False) -> list[str]:
     """Clear the entire SSO config.
 
     users.set_role and users.remove_roles are rejected while any SSO config
@@ -956,7 +955,7 @@ def clear_sso_config(*, verbose: bool = False) -> list[str]:
     warnings: list[str] = []
     _print_apply_step("clear sso config", verbose=verbose)
     try:
-        admin_sso_config.set(None)
+        stack.admin.sso_config.set(None)
         print("  ~ sso config (cleared)")
     except Exception as exc:
         detail = format_exception(exc)
@@ -966,6 +965,7 @@ def clear_sso_config(*, verbose: bool = False) -> list[str]:
 
 
 def reset_policy(
+    stack: stack_lib.Stack,
     title: str,
     current: CurrentState,
     *,
@@ -995,21 +995,23 @@ def reset_policy(
         r for r in managed_roles_using_policy(title, current) if r not in deleted
     ]
     if roles_to_delete:
-        users_to_detach = users_assigned_to_roles(set(roles_to_delete))
+        users_to_detach = users_assigned_to_roles(stack, set(roles_to_delete))
         if users_to_detach:
-            warnings.extend(clear_sso_config(verbose=verbose))
+            warnings.extend(clear_sso_config(stack, verbose=verbose))
         else:
             warnings.extend(
-                detach_sso_mappings_for_roles(set(roles_to_delete), verbose=verbose)
+                detach_sso_mappings_for_roles(
+                    stack, set(roles_to_delete), verbose=verbose
+                )
             )
         for role_name in roles_to_delete:
-            w, snap = detach_users_from_role(role_name, verbose=verbose)
+            w, snap = detach_users_from_role(stack, role_name, verbose=verbose)
             warnings.extend(w)
             user_snapshot.extend(snap)
     for role_name in roles_to_delete:
         try:
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
-            admin_roles.delete(role_name)
+            stack.admin.roles.delete(role_name)
             print(f"  - role {role_name}")
         except Exception as exc:
             detail = format_exception(exc)
@@ -1019,7 +1021,7 @@ def reset_policy(
             deleted.add(role_name)
     try:
         _print_apply_step(f"delete policy {title}", verbose=verbose)
-        admin_policies.delete(title)
+        stack.admin.policies.delete(title)
         print(f"  - policy {title}")
     except Exception as exc:
         detail = format_exception(exc)

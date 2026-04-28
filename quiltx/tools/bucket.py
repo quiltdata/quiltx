@@ -14,7 +14,6 @@ from rich.table import Table
 
 from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
-from quiltx.config import auto_login
 from quiltx.utils import get_bucket_region
 
 
@@ -125,46 +124,52 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.action == "add":
-        return _cmd_add(args)
-    if args.action == "remove":
-        return _cmd_remove(args)
-    if args.action == "list":
-        return _cmd_list()
-    if args.action == "profile":
-        return _cmd_profile(args)
-    if args.action == "test":
-        return _cmd_test(args)
+    try:
+        if args.action == "add":
+            return _cmd_add(args)
+        if args.action == "remove":
+            return _cmd_remove(args)
+        if args.action == "list":
+            return _cmd_list()
+        if args.action == "profile":
+            return _cmd_profile(args)
+        if args.action == "test":
+            return _cmd_test(args)
+    except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     parser.print_help()
     return 1
 
 
-def _ensure_stack_payload(ctx: stack_lib.StackContext) -> Mapping[str, Any]:
+def _ensure_stack_payload(stack: stack_lib.Stack) -> Mapping[str, Any]:
     """Load cached stack payload, or derive a lightweight one from the Quilt session."""
-    payload = stack_lib.load_stack_payload(ctx.catalog_name)
+    payload = stack_lib.load_stack_payload(stack.catalog_name)
     if payload is not None:
         return payload
 
-    catalog_config = stack_lib.fetch_catalog_config(ctx.catalog_url)
-    region = stack_lib.fetch_region(ctx, catalog_config)
+    catalog_config = stack_lib.fetch_catalog_config(stack.catalog_url)
+    region = stack_lib.fetch_region(stack, catalog_config)
 
-    print(f"Discovering stack for {ctx.catalog_name}...")
+    print(f"Discovering stack for {stack.catalog_name}...")
     try:
-        stack_info = stack_lib.find_matching_stack(ctx.catalog_url, region=region)
+        stack_info = stack_lib.find_matching_stack(stack, region=region)
         log_groups = stack_lib.list_log_group_resources(
-            stack_info["StackName"], region=region
+            stack, stack_info["StackName"], region=region
         )
         payload = stack_lib.build_stack_payload(
-            ctx.catalog_name,
-            ctx.catalog_url,
+            stack.catalog_name,
+            stack.catalog_url,
             region,
             stack_info,
             log_groups,
             catalog_config=catalog_config,
         )
-        stack_lib.write_stack_payload(ctx.catalog_name, payload)
-        cached = stack_lib.load_stack_payload(ctx.catalog_name)
+        stack_lib.write_stack_payload(stack.catalog_name, payload)
+        cached = stack_lib.load_stack_payload(stack.catalog_name)
         if cached is not None:
             return cached
     except Exception as exc:
@@ -175,20 +180,19 @@ def _ensure_stack_payload(ctx: stack_lib.StackContext) -> Mapping[str, Any]:
         )
 
     return _lightweight_stack_payload(
-        ctx.catalog_name, ctx.catalog_url, region, catalog_config
+        stack, stack.catalog_name, stack.catalog_url, region, catalog_config
     )
 
 
 def _lightweight_stack_payload(
+    stack: stack_lib.Stack,
     catalog_name: str,
     catalog_url: str,
     region: str,
     catalog_config: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     """Build an in-memory stack payload from the Quilt session (no CFN calls)."""
-    from quilt3.session import get_boto3_session
-
-    session = get_boto3_session()
+    session = stack.boto3_session()
     account_id = session.client("sts").get_caller_identity()["Account"]
 
     return {
@@ -207,8 +211,8 @@ def _lightweight_stack_payload(
     }
 
 
-@auto_login
-def _cmd_add(args: argparse.Namespace) -> int:
+@stack_lib.stack_command
+def _cmd_add(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
     try:
         principals, show_guidance = _resolve_principals_arg(args.principal)
         if show_guidance:
@@ -222,15 +226,14 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-        ctx = stack_lib.resolve_stack_context()
-        catalog_name = ctx.catalog_name
-        stack_payload = _ensure_stack_payload(ctx)
+        catalog_name = stack.catalog_name
+        stack_payload = _ensure_stack_payload(stack)
         control_account_id = _load_control_account_id(stack_payload)
         effective_principals = principals or [f"arn:aws:iam::{control_account_id}:root"]
         principal_source = "--principal" if principals else "account root (default)"
         stack_name = _stack_payload_value(stack_payload, "stack_name", "") or None
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
-        catalog_url = ctx.catalog_url
+        catalog_url = stack.catalog_url
 
         session, s3_client, bucket_region, resolved_profile = (
             bucket_lib.resolve_bucket_session(
@@ -242,9 +245,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         args.profile = resolved_profile
         sns_client = session.client("sns", region_name=bucket_region)
 
-        from quilt3.admin import buckets as admin_buckets
-
-        existing_bucket = admin_buckets.get(args.bucket_name)
+        existing_bucket = stack.admin.buckets.get(args.bucket_name)
         if existing_bucket is not None and not args.force:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
@@ -257,6 +258,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
             if args.no_test:
                 return 0
             return _verify_bucket_registration_and_access(
+                stack,
                 args.bucket_name,
                 control_account_id=control_account_id,
             )
@@ -270,7 +272,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
                 "removing and re-adding (--force) so Quilt re-subscribes SQS."
             )
-            admin_buckets.remove(args.bucket_name)
+            stack.admin.buckets.remove(args.bucket_name)
             existing_bucket = None
 
         bucket_policy = bucket_lib.get_bucket_policy(
@@ -351,7 +353,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         )
 
         bucket_title = args.title or prior_title or args.bucket_name
-        admin_buckets.add(
+        stack.admin.buckets.add(
             name=args.bucket_name,
             title=bucket_title,
             sns_notification_arn=sns_topic_arn,
@@ -365,6 +367,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
             return 0
         print()
         return _verify_bucket_registration_and_access(
+            stack,
             args.bucket_name,
             control_account_id=control_account_id,
         )
@@ -375,12 +378,10 @@ def _cmd_add(args: argparse.Namespace) -> int:
         return 1
 
 
-@auto_login
-def _cmd_remove(args: argparse.Namespace) -> int:
+@stack_lib.stack_command
+def _cmd_remove(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
     try:
-        from quilt3.admin import buckets as admin_buckets
-
-        existing = admin_buckets.get(args.bucket_name)
+        existing = stack.admin.buckets.get(args.bucket_name)
         if existing is None:
             print(f"Bucket {args.bucket_name}: not registered in Quilt; nothing to do.")
             return 0
@@ -397,7 +398,7 @@ def _cmd_remove(args: argparse.Namespace) -> int:
                 print("Aborted.")
                 return 1
 
-        admin_buckets.remove(args.bucket_name)
+        stack.admin.buckets.remove(args.bucket_name)
         print(f"Removed bucket {args.bucket_name} from the Quilt catalog.")
         print(
             "Note: S3 bucket policy, SNS topic, and bucket notifications were left "
@@ -411,12 +412,10 @@ def _cmd_remove(args: argparse.Namespace) -> int:
         return 1
 
 
-@auto_login
-def _cmd_list() -> int:
+@stack_lib.stack_command
+def _cmd_list(stack: stack_lib.Stack) -> int:
     try:
-        from quilt3.admin import buckets as admin_buckets
-
-        buckets = admin_buckets.list()
+        buckets = stack.admin.buckets.list()
         console = Console()
         table = Table(show_header=True, header_style="bold cyan")
         table.add_column("Name", style="green")
@@ -461,23 +460,26 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_test(args: argparse.Namespace) -> int:
-    return _verify_bucket_registration_and_access(args.bucket_name)
+@stack_lib.stack_command
+def _cmd_test(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+    return _verify_bucket_registration_and_access(stack, args.bucket_name)
 
 
-@auto_login
 def _verify_bucket_registration_and_access(
-    bucket_name: str, *, control_account_id: str | None = None
+    stack: stack_lib.Stack, bucket_name: str, *, control_account_id: str | None = None
 ) -> int:
     import quilt3
-    from quilt3.admin import buckets as admin_buckets
 
     bucket_uri = f"s3://{bucket_name}"
     registered = None
     stage = "registration lookup"
     try:
         registered = next(
-            (bucket for bucket in admin_buckets.list() if bucket.name == bucket_name),
+            (
+                bucket
+                for bucket in stack.admin.buckets.list()
+                if bucket.name == bucket_name
+            ),
             None,
         )
         if registered is None:

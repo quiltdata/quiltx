@@ -9,7 +9,6 @@ from typing import Any, Mapping, Sequence
 from botocore.exceptions import ClientError
 
 from quiltx import stack as stack_lib
-from quiltx.config import get_catalog_config
 from quiltx.utils import get_bucket_region
 
 
@@ -309,6 +308,7 @@ class AddBucketResult:
 
 
 def add_bucket(
+    stack: stack_lib.Stack,
     bucket: str,
     *,
     title: str | None = None,
@@ -337,11 +337,8 @@ def add_bucket(
         ValueError: If no catalog is configured or stack metadata is missing.
     """
     import boto3
-    from quilt3.admin import buckets as admin_buckets
 
-    config = get_catalog_config()
-    catalog_name = stack_lib.extract_catalog_name(config)
-    payload = stack_lib.load_stack_payload(catalog_name)
+    payload = stack.payload
     if not payload:
         raise ValueError("No cached stack metadata. Run 'quiltx stack' first.")
 
@@ -358,7 +355,7 @@ def add_bucket(
     bucket_title = title or bucket
 
     # Check if already registered
-    existing = admin_buckets.get(bucket)
+    existing = stack.admin.buckets.get(bucket)
     if existing is not None:
         return AddBucketResult(
             bucket=bucket,
@@ -397,7 +394,7 @@ def add_bucket(
     configure_bucket_notifications(bucket, sns_topic_arn, s3_client=s3_client)
 
     # Register in Quilt catalog
-    admin_buckets.add(
+    stack.admin.buckets.add(
         name=bucket,
         title=bucket_title,
         sns_notification_arn=sns_topic_arn,

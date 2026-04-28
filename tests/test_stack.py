@@ -39,7 +39,7 @@ def test_fetch_catalog_config_uses_opener() -> None:
 def test_resolve_stack_context_from_flag() -> None:
     ctx = stack.resolve_stack_context("HTTPS://Example.COM/path")
 
-    assert ctx == stack.StackContext(
+    assert ctx == stack.Stack(
         catalog_name="example.com",
         catalog_url="https://example.com",
         source="flag",
@@ -54,7 +54,7 @@ def test_resolve_stack_context_from_global_config(monkeypatch) -> None:
 
     ctx = stack.resolve_stack_context()
 
-    assert ctx == stack.StackContext(
+    assert ctx == stack.Stack(
         catalog_name="example.com",
         catalog_url="https://example.com",
         source="global-config",
@@ -69,7 +69,59 @@ def test_resolve_stack_context_raises_without_config(monkeypatch) -> None:
         stack.resolve_stack_context()
 
 
+def test_stack_command_retries_after_auth_failure(monkeypatch) -> None:
+    call_count = 0
+    login_called = False
+    ctx = stack.Stack(
+        catalog_name="example.com",
+        catalog_url="https://example.com",
+        source="global-config",
+    )
+    monkeypatch.setattr(stack, "resolve_stack_context", lambda _catalog=None: ctx)
+
+    @stack.stack_command
+    def guarded(stack_arg: stack.Stack) -> str:
+        nonlocal call_count
+        assert stack_arg is ctx
+        call_count += 1
+        if call_count == 1:
+            raise Exception("Authentication failed. Check your credentials or API key.")
+        return "ok"
+
+    def _fake_login() -> None:
+        nonlocal login_called
+        login_called = True
+
+    fake_quilt3 = types.SimpleNamespace(login=_fake_login)
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    result = guarded()
+
+    assert result == "ok"
+    assert call_count == 2
+    assert login_called
+
+
+def test_stack_command_does_not_catch_other_errors(monkeypatch) -> None:
+    ctx = stack.Stack(
+        catalog_name="example.com",
+        catalog_url="https://example.com",
+        source="global-config",
+    )
+    monkeypatch.setattr(stack, "resolve_stack_context", lambda _catalog=None: ctx)
+
+    @stack.stack_command
+    def guarded(_stack_arg: stack.Stack) -> None:
+        raise ValueError("something else")
+
+    with pytest.raises(ValueError, match="something else"):
+        guarded()
+
+
 def test_find_matching_stack() -> None:
+    stack_ctx = stack.Stack(
+        catalog_name="example.com", catalog_url="https://example.com", source="flag"
+    )
     client = boto3.client(
         "cloudformation",
         region_name="us-east-1",
@@ -99,13 +151,16 @@ def test_find_matching_stack() -> None:
     )
     stubber.activate()
 
-    stack_info = stack.find_matching_stack("https://example.com/", cfn_client=client)
+    stack_info = stack.find_matching_stack(stack_ctx, cfn_client=client)
     assert stack_info["StackName"] == "quilt-stack"
 
     stubber.deactivate()
 
 
 def test_list_log_group_resources() -> None:
+    stack_ctx = stack.Stack(
+        catalog_name="example.com", catalog_url="https://example.com", source="flag"
+    )
     client = boto3.client(
         "cloudformation",
         region_name="us-east-1",
@@ -137,7 +192,9 @@ def test_list_log_group_resources() -> None:
     )
     stubber.activate()
 
-    log_groups = stack.list_log_group_resources("quilt-stack", cfn_client=client)
+    log_groups = stack.list_log_group_resources(
+        stack_ctx, "quilt-stack", cfn_client=client
+    )
     assert log_groups == [
         {"logical_id": "LogGroupA", "log_group_name": "/aws/lambda/log-group-a"}
     ]
@@ -146,6 +203,9 @@ def test_list_log_group_resources() -> None:
 
 
 def test_list_ecs_resources() -> None:
+    stack_ctx = stack.Stack(
+        catalog_name="example.com", catalog_url="https://example.com", source="flag"
+    )
     client = boto3.client(
         "cloudformation",
         region_name="us-east-1",
@@ -184,7 +244,9 @@ def test_list_ecs_resources() -> None:
     )
     stubber.activate()
 
-    ecs_resources = stack.list_ecs_resources("quilt-stack", cfn_client=client)
+    ecs_resources = stack.list_ecs_resources(
+        stack_ctx, "quilt-stack", cfn_client=client
+    )
     assert ecs_resources == [
         {
             "logical_id": "EcsCluster",

@@ -16,7 +16,6 @@ from quiltx.acl import (
     print_diff as print_diff,
 )
 from quiltx.config import (
-    auto_login as auto_login,
     get_catalog_config as get_catalog_config,
     get_catalog_region as get_catalog_region,
     get_catalog_url as get_catalog_url,
@@ -30,7 +29,6 @@ __all__ = [
     "CurrentState",
     "all_buckets",
     "apply_acl",
-    "auto_login",
     "build_sso_config",
     "compute_diff",
     "fetch_current_state",

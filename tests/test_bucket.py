@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import boto3
 from botocore.stub import Stubber
@@ -31,7 +32,7 @@ def _install_stack_context(monkeypatch, catalog_name: str = "demo") -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "resolve_stack_context",
-        lambda: bucket_tool.stack_lib.StackContext(
+        lambda _catalog=None: bucket_tool.stack_lib.Stack(
             catalog_name=catalog_name,
             catalog_url=f"https://{catalog_name}",
             source="global-config",
@@ -401,6 +402,10 @@ def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls
 
     admin_module = ModuleType("quilt3.admin")
     admin_module.buckets = admin_buckets
+    admin_module.policies = SimpleNamespace()
+    admin_module.roles = SimpleNamespace()
+    admin_module.sso_config = SimpleNamespace()
+    admin_module.users = SimpleNamespace()
     quilt3_module = ModuleType("quilt3")
     quilt3_module.admin = admin_module
     quilt3_module.Bucket = FakeQuiltBucket
@@ -560,7 +565,9 @@ def test_add_no_config(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "resolve_stack_context",
-        lambda: (_ for _ in ()).throw(ValueError("No Quilt catalog configured")),
+        lambda _catalog=None: (_ for _ in ()).throw(
+            ValueError("No Quilt catalog configured")
+        ),
     )
 
     assert bucket_tool.main(["add", "bucket", "--dry-run"]) == 1
@@ -598,13 +605,15 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "find_matching_stack",
-        lambda url, region: {
+        lambda stack, region: {
             "StackName": "quilt",
             "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/quilt/abc",
         },
     )
     monkeypatch.setattr(
-        bucket_tool.stack_lib, "list_log_group_resources", lambda name, region: []
+        bucket_tool.stack_lib,
+        "list_log_group_resources",
+        lambda stack, name, region: [],
     )
     monkeypatch.setattr(
         bucket_tool.stack_lib, "write_stack_payload", lambda *a, **kw: None
@@ -951,6 +960,7 @@ def test_add_creates_sns(monkeypatch) -> None:
 
 
 def test_list(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
     _install_fake_quilt3(
         monkeypatch,
         listed=[
@@ -970,6 +980,7 @@ def test_list(monkeypatch, capsys) -> None:
 
 
 def test_test_checks_registration_and_read_access(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
     _install_fake_quilt3(
         monkeypatch,
         listed=[FakeBucket("bucket-a", "Bucket A")],
@@ -982,6 +993,7 @@ def test_test_checks_registration_and_read_access(monkeypatch, capsys) -> None:
 
 
 def test_test_fails_when_bucket_not_registered(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
     _install_fake_quilt3(monkeypatch, listed=[FakeBucket("other", "Other")])
 
     assert bucket_tool.main(["test", "bucket-a"]) == 1
@@ -1055,35 +1067,45 @@ def test_sns_topic_source_labels_known_topic_names() -> None:
 
 
 def _stub_stack_and_config(monkeypatch, *, payload=None):
-    """Patch get_catalog_config and stack helpers for add_bucket tests."""
-    monkeypatch.setattr(
-        "quiltx.bucket.get_catalog_config",
-        lambda: {"catalog": "demo", "navigator_url": "https://demo.example.com"},
+    """Build a stack fixture for add_bucket tests."""
+    return bucket_tool.stack_lib.Stack(
+        catalog_name="demo",
+        catalog_url="https://demo.example.com",
+        source="global-config",
     )
+
+
+def _default_stack_payload() -> dict[str, object]:
+    return {
+        "account_id": "123456789012",
+        "outputs": [
+            {
+                "OutputKey": "RegistryRoleARN",
+                "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+            }
+        ],
+    }
+
+
+def _stack_for_add_bucket(
+    monkeypatch, *, payload: dict[str, object] | None = None
+) -> Any:
+    stack = _stub_stack_and_config(monkeypatch)
     monkeypatch.setattr(
-        "quiltx.bucket.stack_lib.extract_catalog_name",
-        lambda config: "demo",
+        type(stack),
+        "payload",
+        property(
+            lambda _stack: _default_stack_payload() if payload is None else payload
+        ),
     )
-    monkeypatch.setattr(
-        "quiltx.bucket.stack_lib.load_stack_payload",
-        lambda catalog_name: payload
-        or {
-            "account_id": "123456789012",
-            "outputs": [
-                {
-                    "OutputKey": "RegistryRoleARN",
-                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
-                }
-            ],
-        },
-    )
+    return stack
 
 
 def test_add_bucket_already_registered(monkeypatch) -> None:
-    _stub_stack_and_config(monkeypatch)
+    stack = _stack_for_add_bucket(monkeypatch)
     _install_fake_quilt3(monkeypatch, get_result=FakeBucket("bucket", "My Bucket"))
 
-    result = add_bucket("bucket")
+    result = add_bucket(stack, "bucket")
     assert result == AddBucketResult(
         bucket="bucket",
         title="My Bucket",
@@ -1216,14 +1238,14 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
 
     add_calls: list[dict[str, str]] = []
     _install_fake_quilt3(monkeypatch, add_calls=add_calls)
-    _stub_stack_and_config(monkeypatch)
+    stack = _stack_for_add_bucket(monkeypatch)
 
     session = FakeSession(s3_client, sns_client, sts_client)
     import boto3 as _boto3
 
     monkeypatch.setattr(_boto3, "Session", lambda profile_name=None: session)
 
-    result = add_bucket("bucket", title="Demo Bucket")
+    result = add_bucket(stack, "bucket", title="Demo Bucket")
     assert result == AddBucketResult(
         bucket="bucket",
         title="Demo Bucket",
@@ -1247,15 +1269,11 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
 
 
 def test_add_bucket_no_stack_payload(monkeypatch) -> None:
-    _stub_stack_and_config(monkeypatch, payload=None)
-    monkeypatch.setattr(
-        "quiltx.bucket.stack_lib.load_stack_payload",
-        lambda catalog_name: None,
-    )
+    stack = _stack_for_add_bucket(monkeypatch, payload={})
     _install_fake_quilt3(monkeypatch)
 
     try:
-        add_bucket("bucket")
+        add_bucket(stack, "bucket")
     except ValueError as exc:
         assert "stack" in str(exc).lower()
     else:
@@ -1263,10 +1281,10 @@ def test_add_bucket_no_stack_payload(monkeypatch) -> None:
 
 
 def test_add_bucket_defaults_title_to_bucket_name(monkeypatch) -> None:
-    _stub_stack_and_config(monkeypatch)
+    stack = _stack_for_add_bucket(monkeypatch)
     _install_fake_quilt3(monkeypatch, get_result=FakeBucket("my-data", "my-data"))
 
-    result = add_bucket("my-data")
+    result = add_bucket(stack, "my-data")
     assert result.title == "my-data"
     assert result.already_registered is True
 
