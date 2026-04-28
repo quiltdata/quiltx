@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
 
 from quiltx import credentials
 from quiltx.stack import Catalog
@@ -139,3 +138,37 @@ def test_catalog_from_dns_no_io():
     assert cat.catalog_name == "nightly.quilttest.com"
     # auth_required=False means ensure_auth is a no-op
     cat.ensure_auth()  # should not raise
+
+
+def test_catalog_from_dns_kwargs_threaded_to_resolver(tmp_path, monkeypatch):
+    """username/password passed to from_dns are used as API-ladder step 1."""
+    _no_keyring(monkeypatch)
+    _tmp_fallback(monkeypatch, tmp_path)
+    monkeypatch.delenv("QUILTX_USERNAME", raising=False)
+    monkeypatch.delenv("QUILTX_PASSWORD", raising=False)
+
+    acquired = []
+
+    def fake_validate(url, token):
+        return False  # treat as password
+
+    def fake_acquire(url, username, password):
+        acquired.append((url, username, password))
+        return "minted-refresh-token"
+
+    cat = Catalog.from_dns(
+        "kw.example.com",
+        source="flag",
+        username="api_user",
+        password="api_pass",
+    )
+
+    with (
+        patch("quiltx.quilt_auth.validate_refresh_token", fake_validate),
+        patch("quiltx.quilt_auth.acquire_refresh_token", fake_acquire),
+        patch("quiltx.quilt3_facade.set_global_config", lambda *a, **kw: None),
+        patch("quiltx.quilt3_facade.login_with_token", lambda *a, **kw: None),
+    ):
+        cat.ensure_auth()
+
+    assert acquired == [("https://kw.example.com", "api_user", "api_pass")]

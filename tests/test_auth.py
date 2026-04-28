@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -160,3 +159,28 @@ def test_api_no_prompt(monkeypatch, tmp_path):
     _tmp_fallback(monkeypatch, tmp_path)
     with pytest.raises(auth.CredentialError):
         auth.resolve_api(FAKE_CATALOG)
+
+
+def test_api_kwargs_take_priority(monkeypatch, tmp_path):
+    """resolve_api(username=..., password=...) overrides env and keyring."""
+    monkeypatch.setenv("QUILTX_USERNAME", "env_user")
+    monkeypatch.setenv("QUILTX_PASSWORD", "env_pass")
+    _no_keyring(monkeypatch)
+    _tmp_fallback(monkeypatch, tmp_path)
+    credentials.set("nightly.quilttest.com", "stored_user", "stored_pass")
+
+    result = auth.resolve_api(FAKE_CATALOG, username="kw_user", password="kw_pass")
+    assert result.username == "kw_user"
+    assert result.secret == "kw_pass"
+    assert result.source == "flag"
+
+
+def test_api_kwargs_partial_falls_through(monkeypatch, tmp_path):
+    """Username without password falls through to env/keyring (must appear together)."""
+    monkeypatch.setenv("QUILTX_USERNAME", "env_user")
+    monkeypatch.setenv("QUILTX_PASSWORD", "env_pass")
+    _no_keyring(monkeypatch)
+    _tmp_fallback(monkeypatch, tmp_path)
+
+    result = auth.resolve_api(FAKE_CATALOG, username="kw_user")
+    assert result.source == "env"

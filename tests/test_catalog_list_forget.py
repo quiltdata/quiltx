@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from quiltx import credentials, userconfig
 from quiltx.tools.catalog import forget as forget_cmd

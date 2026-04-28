@@ -44,6 +44,10 @@ class Catalog(CatalogContext):
     auth_required: bool = field(default=True)
     _admin: AdminClients | None = field(default=None, init=False, repr=False)
     _region: str | None = field(default=None, init=False, repr=False)
+    # API-path credentials passed via Catalog.from_dns(username=..., password=...).
+    # Used as the first step of the API resolver ladder; never set on the CLI path.
+    _api_username: str | None = field(default=None, init=False, repr=False)
+    _api_password: str | None = field(default=None, init=False, repr=False)
 
     @property
     def region(self) -> str:
@@ -125,7 +129,11 @@ class Catalog(CatalogContext):
                 raise ValueError(str(exc)) from exc
         else:
             try:
-                resolved = resolve_api(self)
+                resolved = resolve_api(
+                    self,
+                    username=self._api_username,
+                    password=self._api_password,
+                )
             except CredentialError as exc:
                 raise ValueError(str(exc)) from exc
 
@@ -159,14 +167,26 @@ class Catalog(CatalogContext):
         *,
         source: CatalogContextSource,
         auth_required: bool = True,
+        username: str | None = None,
+        password: str | None = None,
     ) -> "Catalog":
-        """Build a Catalog from a bare DNS name."""
-        return cls(
+        """Build a Catalog from a bare DNS name.
+
+        ``username`` / ``password`` are the Story 5 API-path credentials; they
+        feed step 1 of the API resolver ladder and are used lazily on the
+        first ``ensure_auth()`` call.
+        """
+        catalog = cls(
             catalog_name=dns,
             catalog_url=f"https://{dns}",
             source=source,
             auth_required=auth_required,
         )
+        if username is not None:
+            object.__setattr__(catalog, "_api_username", username)
+        if password is not None:
+            object.__setattr__(catalog, "_api_password", password)
+        return catalog
 
 
 T = TypeVar("T")
@@ -194,10 +214,17 @@ def _probe_auth_source(catalog: "Catalog", parsed_args: Any) -> str:
         return "none"
 
 
-def _print_verbose_preflight(catalog: "Catalog", parsed_args: Any, auth: bool) -> None:
+def _print_verbose_preflight(
+    catalog: "Catalog",
+    parsed_args: Any,
+    auth: bool,
+    bootstrap: bool = False,
+) -> None:
     """Print the four-line verbose preflight block to stderr."""
     if auth:
         auth_label = _probe_auth_source(catalog, parsed_args)
+    elif bootstrap:
+        auth_label = "none-needed (bootstrap)"
     else:
         auth_label = "aws-default-chain"
 
@@ -222,14 +249,23 @@ def catalog_command(func: Callable[..., T]) -> Callable[..., T]: ...
 
 @overload
 def catalog_command(
-    *, auth: bool = True
+    *, auth: bool = True, bootstrap: bool = False
 ) -> Callable[[Callable[..., T]], Callable[..., T]]: ...
 
 
 def catalog_command(
-    func: Callable[..., T] | None = None, *, auth: bool = True
+    func: Callable[..., T] | None = None,
+    *,
+    auth: bool = True,
+    bootstrap: bool = False,
 ) -> Callable[..., T] | Callable[[Callable[..., T]], Callable[..., T]]:
-    """Resolve and inject a Catalog into a parsed CLI command handler."""
+    """Resolve and inject a Catalog into a parsed CLI command handler.
+
+    ``bootstrap=True`` is meaningful only when ``auth=False``. It changes the
+    verbose preflight's auth label from ``aws-default-chain`` to
+    ``none-needed (bootstrap)`` for commands like ``quiltx catalog stack``
+    that establish state rather than consume it.
+    """
 
     def decorate(wrapped: Callable[..., T]) -> Callable[..., T]:
         @functools.wraps(wrapped)
@@ -239,7 +275,7 @@ def catalog_command(
             catalog = resolve_catalog_context(catalog_arg, auth_required=auth)
 
             if _verbose_active(parsed_args):
-                _print_verbose_preflight(catalog, parsed_args, auth)
+                _print_verbose_preflight(catalog, parsed_args, auth, bootstrap)
 
             def invoke() -> T:
                 if auth:

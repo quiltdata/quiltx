@@ -213,6 +213,14 @@ def has_credentials(dns: str) -> bool:
     return get(dns) is not None
 
 
-# Compatibility alias: the public API was ``set`` in earlier drafts.
-# Using ``store`` avoids shadowing the builtin.
-set = store  # noqa: A001
+# PEP 562 module __getattr__: expose the spec-named ``set`` / ``list`` as
+# module attributes without rebinding the builtins inside this file (which
+# would break ``isinstance(x, list)`` and ``list[str]`` type annotations).
+_PUBLIC_ALIASES = {"set": store, "list": catalog_list}
+
+
+def __getattr__(name: str):
+    try:
+        return _PUBLIC_ALIASES[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None

@@ -10,9 +10,10 @@ CLI ladder:
   5. Error
 
 API ladder (no CLI args, no TTY):
-  1. QUILTX_USERNAME / QUILTX_PASSWORD env vars
-  2. keyring entry for catalog.catalog_name
-  3. Error
+  1. Constructor kwargs (username/password passed to Catalog.from_dns)
+  2. QUILTX_USERNAME / QUILTX_PASSWORD env vars
+  3. keyring entry for catalog.catalog_name
+  4. Error
 
 ``source`` is one of: "flag", "env", "keyring", "prompt".
 """
@@ -96,25 +97,35 @@ def resolve_cli(catalog: "Catalog", args: object | None = None) -> ResolvedCrede
     return ResolvedCredentials(username, secret, "prompt")
 
 
-def resolve_api(catalog: "Catalog") -> ResolvedCredentials:
+def resolve_api(
+    catalog: "Catalog",
+    *,
+    username: str | None = None,
+    password: str | None = None,
+) -> ResolvedCredentials:
     """Resolve credentials for an API (non-CLI) invocation.
 
-    No prompting — API consumers use keyring or env vars.
+    No prompting — API consumers use kwargs, env vars, or keyring.
     """
     dns = catalog.catalog_name
 
-    # 1. Env vars
+    # 1. Constructor kwargs
+    if username and password:
+        return ResolvedCredentials(username, password, "flag")
+
+    # 2. Env vars
     env_user = os.environ.get("QUILTX_USERNAME")
     env_pass = os.environ.get("QUILTX_PASSWORD")
     if env_user and env_pass:
         return ResolvedCredentials(env_user, env_pass, "env")
 
-    # 2. Keyring
+    # 3. Keyring
     stored = credentials.get(dns)
     if stored:
         return ResolvedCredentials(stored["username"], stored["secret"], "keyring")
 
     raise CredentialError(
         f"No credentials available for {dns}. "
-        "Set QUILTX_USERNAME / QUILTX_PASSWORD or run a CLI command first to store credentials."
+        "Pass username/password to Catalog.from_dns, set QUILTX_USERNAME / "
+        "QUILTX_PASSWORD, or run a CLI command first to store credentials."
     )

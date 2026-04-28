@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-04-28
+
+This release reshapes `quiltx`'s identity and auth surface around a per-catalog model. quiltx no longer mutates the user's global `quilt3.config()` to do its work, and credentials are stored per-DNS instead of last-write-wins. Scripts that referenced the old `quiltx stack ...` surface or `--catalog-name` will fail at argparse time — there are no aliases (pre-1.0).
+
+### Added
+
+- New `quiltx catalog` namespace:
+  - `quiltx catalog default [<dns>] [--clear]` — read, set, or clear quiltx's own default catalog (stored in `user_data_path("quiltx")/config.json`, never in `quilt3.config()`). On first run with an empty userconfig, bootstraps the default from `quilt3.config()` once.
+  - `quiltx catalog list` — list catalogs with stored credentials (DNS, username, never the secret).
+  - `quiltx catalog forget <dns>` — delete keyring entry for a DNS. Idempotent. Does not touch the default catalog or stack payload cache.
+  - `quiltx catalog acl` (renamed from `quiltx stack acl`).
+  - `quiltx catalog stack` (renamed from `quiltx stack cfn`).
+- Per-DNS credential storage backed by the system keyring (Keychain / Credential Manager / Secret Service). Linux without a keyring backend falls back to mode-0600 JSON at `user_data_path("quiltx")/credentials.json` with a loud first-run warning.
+- Per-catalog auth seam: `Catalog.ensure_auth()` mints refresh tokens via the catalog's `/api/login` endpoint, scopes `quilt3` globals to one catalog at a time under a serialising lock, and isolates token refresh per-DNS. Auth-error retries re-prompt only the catalog that failed.
+- Universal CLI flags: `--username`, `--password`, `--no-prompt`, `--verbose`. Verbose preflight prints a four-line `catalog/source/auth/region` block to stderr.
+- Environment variables: `QUILTX_CATALOG`, `QUILTX_USERNAME`, `QUILTX_PASSWORD`, `QUILTX_NO_PROMPT`, `QUILTX_VERBOSE`.
+- Public API for embedding: `from quiltx import Catalog; Catalog.from_dns(dns, source="flag", username=..., password=...)`. Constructor does no I/O; admin/boto3 access is lazy.
+- `quiltx bucket add --no-prompt` requires `--yes` (or `--dry-run`); profile-fallback prompts are also suppressed in headless mode.
+
+### Changed
+
+- `--catalog-name` is renamed `--catalog` everywhere it appeared.
+- `logs`, `ecs shell`, `ecs run-migration`, and `catalog stack` (bootstrap) now flow through the unified `@catalog_command(auth=False)` resolver.
+- `quilt3` access is consolidated behind `quiltx.quilt3_facade`; runtime callers no longer import `quilt3` directly.
+
+### Removed
+
+- `quiltx stack` namespace and all its subcommands (replaced by `quiltx catalog`).
+- `quiltx stack catalog` (the URL-setter that wrote to `quilt3.config()` — global-state mutation no longer fits the multi-catalog model).
+- `quiltx.config.set_catalog_url` and `get_catalog_url` (zero callers post-multi-auth).
+
+### Fixed
+
+- Catalog identifier normalization rejects `http://`, custom ports, and IP literals; previously these passed silently through `get_hostname`.
+
 ## [0.11.0] - 2026-04-23
 
 ### Added

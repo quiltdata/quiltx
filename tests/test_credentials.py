@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from quiltx import credentials
 
@@ -92,6 +89,12 @@ def test_file_fallback_list(tmp_path, monkeypatch):
     # Secrets must not be exposed
     for _, username, _ in entries:
         assert username in {"alice", "bob"}
+
+
+def test_public_aliases_match_internal_names():
+    """Spec calls the public API set() and list() — internal store/catalog_list are aliased."""
+    assert credentials.set is credentials.store
+    assert credentials.list is credentials.catalog_list
 
 
 def test_file_mode_600(tmp_path, monkeypatch):

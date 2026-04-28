@@ -120,16 +120,8 @@ def test_catalog_command_retries_after_auth_failure(monkeypatch) -> None:
             raise Exception("Authentication failed. Check your credentials or API key.")
         return "ok"
 
-    # Patch catalog.ensure_auth at the class level for this test only.
-    original_ensure_auth = stack.Catalog.ensure_auth
-    monkeypatch.setattr(
-        stack.Catalog,
-        "ensure_auth",
-        lambda self, args=None: ensure_auth_call_count.__class__,
-    )
-
-    # Simpler approach: just verify retry happens (call_count == 2).
-    # The ensure_auth on retry is tested in test_catalog_command_active_auth.py.
+    # The ensure_auth on retry is tested in test_catalog_command_active_auth.py;
+    # here we just verify that retry happens (call_count == 2).
     monkeypatch.setattr(stack.Catalog, "ensure_auth", lambda self, args=None: None)
 
     result = guarded()
@@ -365,6 +357,29 @@ def test_verbose_preflight_prints_to_stderr(monkeypatch, capsys) -> None:
     assert "catalog:  example.com" in err
     assert "source:   flag" in err
     assert "auth:     aws-default-chain" in err
+
+
+def test_verbose_bootstrap_auth_label(monkeypatch, capsys) -> None:
+    """@catalog_command(auth=False, bootstrap=True) shows none-needed (bootstrap)."""
+    ctx = stack.Catalog(
+        catalog_name="example.com",
+        catalog_url="https://example.com",
+        source="flag",
+        auth_required=False,
+    )
+    monkeypatch.setattr(
+        stack, "resolve_catalog_context", lambda _catalog=None, **kw: ctx
+    )
+
+    @stack.catalog_command(auth=False, bootstrap=True)
+    def guarded(cat: stack.Catalog, args: object) -> str:
+        return "ok"
+
+    from types import SimpleNamespace
+
+    guarded(SimpleNamespace(catalog=None, verbose=True))
+    err = capsys.readouterr().err
+    assert "auth:     none-needed (bootstrap)" in err
 
 
 def test_verbose_env_var_activates_preflight(monkeypatch, capsys) -> None:

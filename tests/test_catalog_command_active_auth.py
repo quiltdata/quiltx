@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from quiltx import credentials
-from quiltx.stack import Catalog, catalog_command, resolve_catalog_context
+from quiltx.stack import Catalog, catalog_command
 
 # ---------------------------------------------------------------------------
 # Helpers

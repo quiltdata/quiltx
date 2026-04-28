@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-@stack_lib.catalog_command(auth=False)
+@stack_lib.catalog_command(auth=False, bootstrap=True)
 def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         catalog_config = stack_lib.fetch_catalog_config(stack.catalog_url)
