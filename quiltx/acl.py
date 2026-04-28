@@ -284,7 +284,7 @@ def all_buckets(config: AclConfig) -> set[str]:
     return result
 
 
-def fetch_current_state(stack: stack_lib.Stack) -> CurrentState:
+def fetch_current_state(stack: stack_lib.Catalog) -> CurrentState:
     """Fetch current buckets, policies, roles, and SSO configuration."""
     bucket_items = {bucket.name: bucket for bucket in stack.admin.buckets.list()}
 
@@ -498,7 +498,7 @@ def print_current_state(current: CurrentState) -> None:
 
 
 def _register_bucket_with_retry(
-    stack: stack_lib.Stack, bucket: str, control_account_id: str, *, assume_yes: bool
+    stack: stack_lib.Catalog, bucket: str, control_account_id: str, *, assume_yes: bool
 ) -> None:
     """Run the full cross-account bucket registration, probing profiles on failure."""
     from quiltx import bucket as bucket_lib
@@ -538,7 +538,7 @@ def _register_bucket_with_retry(
 
 
 def apply_acl(
-    stack: stack_lib.Stack,
+    stack: stack_lib.Catalog,
     diff: AclDiff,
     current: CurrentState,
     *,
@@ -793,7 +793,7 @@ def managed_roles_using_policy(policy_title: str, current: CurrentState) -> list
 
 
 def detach_sso_mappings_for_roles(
-    stack: stack_lib.Stack, role_names: set[str], *, verbose: bool = False
+    stack: stack_lib.Catalog, role_names: set[str], *, verbose: bool = False
 ) -> list[str]:
     """Rewrite the live SSO config so it no longer references the given roles.
 
@@ -862,7 +862,7 @@ class UserRoleBinding:
 
 
 def detach_users_from_role(
-    stack: stack_lib.Stack, role_name: str, *, verbose: bool = False
+    stack: stack_lib.Catalog, role_name: str, *, verbose: bool = False
 ) -> tuple[list[str], list[UserRoleBinding]]:
     """Remove a role from every user that has it assigned.
 
@@ -904,7 +904,7 @@ def detach_users_from_role(
 
 
 def users_assigned_to_roles(
-    stack: stack_lib.Stack, role_names: set[str]
+    stack: stack_lib.Catalog, role_names: set[str]
 ) -> list[UserRoleBinding]:
     """Snapshot user assignments for the given roles without modifying state."""
     bindings: list[UserRoleBinding] = []
@@ -921,7 +921,7 @@ def users_assigned_to_roles(
 
 
 def restore_user_role_bindings(
-    stack: stack_lib.Stack, bindings: list[UserRoleBinding], *, verbose: bool = False
+    stack: stack_lib.Catalog, bindings: list[UserRoleBinding], *, verbose: bool = False
 ) -> list[str]:
     """Reapply captured user role assignments after affected roles exist again."""
     warnings: list[str] = []
@@ -944,7 +944,7 @@ def restore_user_role_bindings(
     return warnings
 
 
-def clear_sso_config(stack: stack_lib.Stack, *, verbose: bool = False) -> list[str]:
+def clear_sso_config(stack: stack_lib.Catalog, *, verbose: bool = False) -> list[str]:
     """Clear the entire SSO config.
 
     users.set_role and users.remove_roles are rejected while any SSO config
@@ -965,7 +965,7 @@ def clear_sso_config(stack: stack_lib.Stack, *, verbose: bool = False) -> list[s
 
 
 def reset_policy(
-    stack: stack_lib.Stack,
+    stack: stack_lib.Catalog,
     title: str,
     current: CurrentState,
     *,

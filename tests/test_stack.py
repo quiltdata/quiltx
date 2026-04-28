@@ -36,51 +36,51 @@ def test_fetch_catalog_config_uses_opener() -> None:
     assert config["region"] == "us-east-2"
 
 
-def test_resolve_stack_context_from_flag() -> None:
-    ctx = stack.resolve_stack_context("HTTPS://Example.COM/path")
+def test_resolve_catalog_context_from_flag() -> None:
+    ctx = stack.resolve_catalog_context("HTTPS://Example.COM/path")
 
-    assert ctx == stack.Stack(
+    assert ctx == stack.Catalog(
         catalog_name="example.com",
         catalog_url="https://example.com",
         source="flag",
     )
 
 
-def test_resolve_stack_context_from_global_config(monkeypatch) -> None:
+def test_resolve_catalog_context_from_global_config(monkeypatch) -> None:
     fake_quilt3 = types.SimpleNamespace(
         config=lambda: {"navigator_url": "https://example.com"}
     )
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
 
-    ctx = stack.resolve_stack_context()
+    ctx = stack.resolve_catalog_context()
 
-    assert ctx == stack.Stack(
+    assert ctx == stack.Catalog(
         catalog_name="example.com",
         catalog_url="https://example.com",
         source="global-config",
     )
 
 
-def test_resolve_stack_context_raises_without_config(monkeypatch) -> None:
+def test_resolve_catalog_context_raises_without_config(monkeypatch) -> None:
     fake_quilt3 = types.SimpleNamespace(config=lambda: {})
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
 
     with pytest.raises(ValueError, match="No Quilt catalog configured"):
-        stack.resolve_stack_context()
+        stack.resolve_catalog_context()
 
 
-def test_stack_command_retries_after_auth_failure(monkeypatch) -> None:
+def test_catalog_command_retries_after_auth_failure(monkeypatch) -> None:
     call_count = 0
     login_called = False
-    ctx = stack.Stack(
+    ctx = stack.Catalog(
         catalog_name="example.com",
         catalog_url="https://example.com",
         source="global-config",
     )
-    monkeypatch.setattr(stack, "resolve_stack_context", lambda _catalog=None: ctx)
+    monkeypatch.setattr(stack, "resolve_catalog_context", lambda _catalog=None: ctx)
 
-    @stack.stack_command
-    def guarded(stack_arg: stack.Stack) -> str:
+    @stack.catalog_command
+    def guarded(stack_arg: stack.Catalog) -> str:
         nonlocal call_count
         assert stack_arg is ctx
         call_count += 1
@@ -102,16 +102,16 @@ def test_stack_command_retries_after_auth_failure(monkeypatch) -> None:
     assert login_called
 
 
-def test_stack_command_does_not_catch_other_errors(monkeypatch) -> None:
-    ctx = stack.Stack(
+def test_catalog_command_does_not_catch_other_errors(monkeypatch) -> None:
+    ctx = stack.Catalog(
         catalog_name="example.com",
         catalog_url="https://example.com",
         source="global-config",
     )
-    monkeypatch.setattr(stack, "resolve_stack_context", lambda _catalog=None: ctx)
+    monkeypatch.setattr(stack, "resolve_catalog_context", lambda _catalog=None: ctx)
 
-    @stack.stack_command
-    def guarded(_stack_arg: stack.Stack) -> None:
+    @stack.catalog_command
+    def guarded(_stack_arg: stack.Catalog) -> None:
         raise ValueError("something else")
 
     with pytest.raises(ValueError, match="something else"):
@@ -119,7 +119,7 @@ def test_stack_command_does_not_catch_other_errors(monkeypatch) -> None:
 
 
 def test_find_matching_stack() -> None:
-    stack_ctx = stack.Stack(
+    stack_ctx = stack.Catalog(
         catalog_name="example.com", catalog_url="https://example.com", source="flag"
     )
     client = boto3.client(
@@ -158,7 +158,7 @@ def test_find_matching_stack() -> None:
 
 
 def test_list_log_group_resources() -> None:
-    stack_ctx = stack.Stack(
+    stack_ctx = stack.Catalog(
         catalog_name="example.com", catalog_url="https://example.com", source="flag"
     )
     client = boto3.client(
@@ -203,7 +203,7 @@ def test_list_log_group_resources() -> None:
 
 
 def test_list_ecs_resources() -> None:
-    stack_ctx = stack.Stack(
+    stack_ctx = stack.Catalog(
         catalog_name="example.com", catalog_url="https://example.com", source="flag"
     )
     client = boto3.client(

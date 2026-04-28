@@ -35,8 +35,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-@stack_lib.stack_command(auth=False)
-def _run(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+@stack_lib.catalog_command(auth=False)
+def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         catalog_config = stack_lib.fetch_catalog_config(stack.catalog_url)
         region = stack_lib.fetch_region(stack, catalog_config)

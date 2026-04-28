@@ -481,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        ctx = stack_lib.resolve_stack_context(args.catalog_name)
+        ctx = stack_lib.resolve_catalog_context(args.catalog_name)
         payload = logs_lib.load_stack_payload(ctx.catalog_name)
 
         # Create console for Rich output

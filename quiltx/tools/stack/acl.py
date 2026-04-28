@@ -69,8 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-@stack_lib.stack_command
-def _run(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+@stack_lib.catalog_command
+def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         header = stack_lib.current_stack_header(stack)
         if header:
@@ -133,7 +133,7 @@ def _confirm_apply() -> bool:
 
 
 def _handle_policy_drift(
-    stack: stack_lib.Stack,
+    stack: stack_lib.Catalog,
     drift: list[acl_lib.PolicyDrift],
     desired: acl_lib.AclConfig,
     current: acl_lib.CurrentState,

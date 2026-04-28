@@ -143,7 +143,7 @@ def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> No
 
 
 def _resolve_catalog_name(catalog_arg: str | None) -> str:
-    ctx = stack_lib.resolve_stack_context(
+    ctx = stack_lib.resolve_catalog_context(
         catalog_arg,
         no_config_message=(
             "No Quilt catalog configured. Run 'quiltx config' or pass --catalog."

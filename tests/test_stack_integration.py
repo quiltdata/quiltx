@@ -33,7 +33,7 @@ def test_stack_discovers_nightly_quilttest() -> None:
         pytest.skip("No AWS credentials available.")
 
     cfn_client = session.client("cloudformation")
-    stack_ctx = stack_lib.Stack(
+    stack_ctx = stack_lib.Catalog(
         catalog_name=stack_lib.extract_catalog_name(config),
         catalog_url=str(catalog_url),
         source="global-config",

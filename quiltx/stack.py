@@ -1,4 +1,4 @@
-"""Stack discovery helpers for Quilt catalogs."""
+"""Catalog identity, payload cache, and CloudFormation discovery helpers."""
 
 from __future__ import annotations
 
@@ -18,14 +18,14 @@ from platformdirs import user_data_path
 from quiltx._version import __version__
 from quiltx.utils import get_hostname
 
-StackContextSource = Literal["flag", "global-config"]
+CatalogContextSource = Literal["flag", "global-config"]
 
 
 @dataclass(frozen=True)
-class StackContext:
+class CatalogContext:
     catalog_name: str
     catalog_url: str
-    source: StackContextSource
+    source: CatalogContextSource
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class AdminClients:
 
 
 @dataclass(frozen=True)
-class Stack(StackContext):
+class Catalog(CatalogContext):
     _admin: AdminClients | None = field(default=None, init=False, repr=False)
     _region: str | None = field(default=None, init=False, repr=False)
 
@@ -97,33 +97,33 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 @overload
-def stack_command(func: Callable[..., T]) -> Callable[..., T]: ...
+def catalog_command(func: Callable[..., T]) -> Callable[..., T]: ...
 
 
 @overload
-def stack_command(
+def catalog_command(
     *, auth: bool = True
 ) -> Callable[[Callable[..., T]], Callable[..., T]]: ...
 
 
-def stack_command(
+def catalog_command(
     func: Callable[..., T] | None = None, *, auth: bool = True
 ) -> Callable[..., T] | Callable[[Callable[..., T]], Callable[..., T]]:
-    """Resolve and inject a Stack into a parsed CLI command handler."""
+    """Resolve and inject a Catalog into a parsed CLI command handler."""
 
     def decorate(wrapped: Callable[..., T]) -> Callable[..., T]:
         @functools.wraps(wrapped)
         def wrapper(*args: Any, **kwargs: Any) -> T:
             parsed_args = args[0] if args else kwargs.get("args")
-            catalog = getattr(parsed_args, "catalog_name", None) or getattr(
+            catalog_arg = getattr(parsed_args, "catalog_name", None) or getattr(
                 parsed_args, "catalog", None
             )
-            stack = resolve_stack_context(catalog)
+            catalog = resolve_catalog_context(catalog_arg)
 
             def invoke() -> T:
                 if auth:
-                    stack.ensure_auth()
-                return wrapped(stack, *args, **kwargs)
+                    catalog.ensure_auth()
+                return wrapped(catalog, *args, **kwargs)
 
             if not auth:
                 return invoke()
@@ -162,15 +162,15 @@ def extract_catalog_name(config: Mapping[str, Any]) -> str:
     return parsed.hostname
 
 
-def resolve_stack_context(
+def resolve_catalog_context(
     catalog: str | None = None,
     *,
     no_config_message: str = "No Quilt catalog configured",
-) -> Stack:
-    """Resolve the target stack identity from a CLI override or quilt3 config."""
+) -> Catalog:
+    """Resolve the target catalog identity from a CLI override or quilt3 config."""
     if catalog:
         catalog_name = get_hostname(catalog)
-        return Stack(
+        return Catalog(
             catalog_name=catalog_name,
             catalog_url=f"https://{catalog_name}",
             source="flag",
@@ -184,7 +184,7 @@ def resolve_stack_context(
 
     catalog_name = extract_catalog_name(config)
     catalog_url = str(config.get("navigator_url") or f"https://{catalog_name}")
-    return Stack(
+    return Catalog(
         catalog_name=catalog_name,
         catalog_url=catalog_url,
         source="global-config",
@@ -192,9 +192,9 @@ def resolve_stack_context(
 
 
 def fetch_region(
-    ctx: StackContext, catalog_config: Mapping[str, Any] | None = None
+    ctx: CatalogContext, catalog_config: Mapping[str, Any] | None = None
 ) -> str:
-    """Fetch the AWS region for a resolved stack context."""
+    """Fetch the AWS region for a resolved catalog context."""
     if catalog_config is None:
         catalog_config = fetch_catalog_config(ctx.catalog_url)
     if ctx.source == "flag":
@@ -244,19 +244,19 @@ def stack_parameters(stack: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
 
 
 def find_matching_stack(
-    stack: Stack,
+    catalog: Catalog,
     region: str | None = None,
     cfn_client: Any = None,
 ) -> Mapping[str, Any]:
-    """Find CloudFormation stack matching the catalog URL.
+    """Find the CloudFormation stack backing a catalog.
 
     Args:
-        stack: Stack to match (e.g., "https://example.quiltdata.com")
+        catalog: Catalog whose CFN stack we're looking up
         region: AWS region (defaults to fetching from catalog config if not provided)
         cfn_client: Optional CloudFormation client (creates one if not provided)
 
     Returns:
-        Stack information dictionary
+        CFN stack information dictionary
 
     Raises:
         ValueError: If no matching stack is found
@@ -264,24 +264,24 @@ def find_matching_stack(
     # Auto-detect region from catalog config if not provided
     if region is None and cfn_client is None:
         try:
-            catalog_config = fetch_catalog_config(stack.catalog_url)
+            catalog_config = fetch_catalog_config(catalog.catalog_url)
             region = catalog_config.get("region")
             if not region:
                 raise ValueError(
-                    f"No region found in catalog config for {stack.catalog_url}. "
+                    f"No region found in catalog config for {catalog.catalog_url}. "
                     "Please provide region parameter explicitly."
                 )
         except Exception as exc:
             raise ValueError(
-                f"Could not auto-detect region for {stack.catalog_url}: {exc}. "
+                f"Could not auto-detect region for {catalog.catalog_url}: {exc}. "
                 "Please provide region parameter explicitly."
             ) from exc
 
     # Create CloudFormation client if not provided
     if cfn_client is None:
-        cfn_client = stack.cfn_client(region)
+        cfn_client = catalog.cfn_client(region)
 
-    expected_host = stack.catalog_name
+    expected_host = catalog.catalog_name
     paginator = cfn_client.get_paginator("describe_stacks")
 
     output_host_matches = []
@@ -301,12 +301,12 @@ def find_matching_stack(
         return output_host_matches[0]
 
     raise ValueError(
-        "No stack found with QuiltWebHost matching " f"{stack.catalog_url}"
+        "No stack found with QuiltWebHost matching " f"{catalog.catalog_url}"
     )
 
 
 def list_log_group_resources(
-    stack: Stack,
+    catalog: Catalog,
     stack_name: str,
     region: str | None = None,
     cfn_client: Any = None,
@@ -314,6 +314,7 @@ def list_log_group_resources(
     """List CloudWatch log groups in a CloudFormation stack.
 
     Args:
+        catalog: Catalog whose AWS session is used to query CloudFormation
         stack_name: CloudFormation stack name
         region: AWS region (required if cfn_client not provided)
         cfn_client: Optional CloudFormation client (creates one if not provided)
@@ -324,7 +325,7 @@ def list_log_group_resources(
     if cfn_client is None:
         if region is None:
             raise ValueError("Either region or cfn_client must be provided")
-        cfn_client = stack.cfn_client(region)
+        cfn_client = catalog.cfn_client(region)
 
     paginator = cfn_client.get_paginator("list_stack_resources")
     log_groups = []
@@ -344,7 +345,7 @@ def list_log_group_resources(
 
 
 def list_ecs_resources(
-    stack: Stack,
+    catalog: Catalog,
     stack_name: str,
     region: str | None = None,
     cfn_client: Any = None,
@@ -352,6 +353,7 @@ def list_ecs_resources(
     """List ECS resources in a CloudFormation stack.
 
     Args:
+        catalog: Catalog whose AWS session is used to query CloudFormation
         stack_name: CloudFormation stack name
         region: AWS region (required if cfn_client not provided)
         cfn_client: Optional CloudFormation client (creates one if not provided)
@@ -362,7 +364,7 @@ def list_ecs_resources(
     if cfn_client is None:
         if region is None:
             raise ValueError("Either region or cfn_client must be provided")
-        cfn_client = stack.cfn_client(region)
+        cfn_client = catalog.cfn_client(region)
 
     paginator = cfn_client.get_paginator("list_stack_resources")
     ecs_resources: list[dict[str, str]] = []
@@ -467,8 +469,8 @@ def format_stack_header(
     return f"Stack: ({dns})"
 
 
-def current_stack_header(ctx: StackContext) -> str | None:
-    """Return a header line for a resolved stack context."""
+def current_stack_header(ctx: CatalogContext) -> str | None:
+    """Return a header line for a resolved catalog context."""
     try:
         payload = load_stack_payload(ctx.catalog_name)
     except Exception:

@@ -31,8 +31,8 @@ def _client(service_name: str, region_name: str = "us-east-1"):
 def _install_stack_context(monkeypatch, catalog_name: str = "demo") -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
-        "resolve_stack_context",
-        lambda _catalog=None: bucket_tool.stack_lib.Stack(
+        "resolve_catalog_context",
+        lambda _catalog=None: bucket_tool.stack_lib.Catalog(
             catalog_name=catalog_name,
             catalog_url=f"https://{catalog_name}",
             source="global-config",
@@ -564,7 +564,7 @@ def test_add_skip_post_test_when_no_test_flag(monkeypatch) -> None:
 def test_add_no_config(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         bucket_tool.stack_lib,
-        "resolve_stack_context",
+        "resolve_catalog_context",
         lambda _catalog=None: (_ for _ in ()).throw(
             ValueError("No Quilt catalog configured")
         ),
@@ -1068,7 +1068,7 @@ def test_sns_topic_source_labels_known_topic_names() -> None:
 
 def _stub_stack_and_config(monkeypatch, *, payload=None):
     """Build a stack fixture for add_bucket tests."""
-    return bucket_tool.stack_lib.Stack(
+    return bucket_tool.stack_lib.Catalog(
         catalog_name="demo",
         catalog_url="https://demo.example.com",
         source="global-config",

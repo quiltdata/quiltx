@@ -71,7 +71,7 @@ def _fake_stack(
 def _install_acl_tool_stack(monkeypatch, stack: Any | None = None) -> Any:
     fake_stack = stack or _fake_stack()
     monkeypatch.setattr(
-        acl_tool.stack_lib, "resolve_stack_context", lambda _catalog=None: fake_stack
+        acl_tool.stack_lib, "resolve_catalog_context", lambda _catalog=None: fake_stack
     )
     monkeypatch.setattr(acl_tool.stack_lib, "current_stack_header", lambda _stack: None)
     return fake_stack

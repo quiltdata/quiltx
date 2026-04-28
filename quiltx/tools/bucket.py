@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-def _ensure_stack_payload(stack: stack_lib.Stack) -> Mapping[str, Any]:
+def _ensure_stack_payload(stack: stack_lib.Catalog) -> Mapping[str, Any]:
     """Load cached stack payload, or derive a lightweight one from the Quilt session."""
     payload = stack_lib.load_stack_payload(stack.catalog_name)
     if payload is not None:
@@ -185,7 +185,7 @@ def _ensure_stack_payload(stack: stack_lib.Stack) -> Mapping[str, Any]:
 
 
 def _lightweight_stack_payload(
-    stack: stack_lib.Stack,
+    stack: stack_lib.Catalog,
     catalog_name: str,
     catalog_url: str,
     region: str,
@@ -211,8 +211,8 @@ def _lightweight_stack_payload(
     }
 
 
-@stack_lib.stack_command
-def _cmd_add(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+@stack_lib.catalog_command
+def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         principals, show_guidance = _resolve_principals_arg(args.principal)
         if show_guidance:
@@ -378,8 +378,8 @@ def _cmd_add(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
         return 1
 
 
-@stack_lib.stack_command
-def _cmd_remove(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+@stack_lib.catalog_command
+def _cmd_remove(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         existing = stack.admin.buckets.get(args.bucket_name)
         if existing is None:
@@ -412,8 +412,8 @@ def _cmd_remove(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
         return 1
 
 
-@stack_lib.stack_command
-def _cmd_list(stack: stack_lib.Stack) -> int:
+@stack_lib.catalog_command
+def _cmd_list(stack: stack_lib.Catalog) -> int:
     try:
         buckets = stack.admin.buckets.list()
         console = Console()
@@ -460,13 +460,13 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
-@stack_lib.stack_command
-def _cmd_test(stack: stack_lib.Stack, args: argparse.Namespace) -> int:
+@stack_lib.catalog_command
+def _cmd_test(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     return _verify_bucket_registration_and_access(stack, args.bucket_name)
 
 
 def _verify_bucket_registration_and_access(
-    stack: stack_lib.Stack, bucket_name: str, *, control_account_id: str | None = None
+    stack: stack_lib.Catalog, bucket_name: str, *, control_account_id: str | None = None
 ) -> int:
     import quilt3
 

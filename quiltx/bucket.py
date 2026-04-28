@@ -308,7 +308,7 @@ class AddBucketResult:
 
 
 def add_bucket(
-    stack: stack_lib.Stack,
+    stack: stack_lib.Catalog,
     bucket: str,
     *,
     title: str | None = None,
