@@ -176,6 +176,46 @@ def _is_auth_error(exc: Exception) -> bool:
     return "Authentication failed" in str(exc)
 
 
+def _verbose_active(parsed_args: Any) -> bool:
+    """Return True when verbose output is requested."""
+    if os.environ.get("QUILTX_VERBOSE"):
+        return True
+    return bool(getattr(parsed_args, "verbose", False))
+
+
+def _probe_auth_source(catalog: "Catalog", parsed_args: Any) -> str:
+    """Return a short label describing the credential source without exchanging tokens."""
+    from quiltx.auth import CredentialError, resolve_cli
+
+    try:
+        resolved = resolve_cli(catalog, parsed_args)
+        return resolved.source
+    except CredentialError:
+        return "none"
+
+
+def _print_verbose_preflight(catalog: "Catalog", parsed_args: Any, auth: bool) -> None:
+    """Print the four-line verbose preflight block to stderr."""
+    if auth:
+        auth_label = _probe_auth_source(catalog, parsed_args)
+    else:
+        auth_label = "aws-default-chain"
+
+    lines = [
+        f"catalog:  {catalog.catalog_name}",
+        f"source:   {catalog.source}",
+        f"auth:     {auth_label}",
+    ]
+
+    # Only print region if it was already resolved (avoid triggering the HTTP fetch).
+    region_cached = catalog._region
+    if region_cached is not None:
+        lines.append(f"region:   {region_cached}")
+
+    for line in lines:
+        print(line, file=sys.stderr)
+
+
 @overload
 def catalog_command(func: Callable[..., T]) -> Callable[..., T]: ...
 
@@ -197,6 +237,9 @@ def catalog_command(
             parsed_args = args[0] if args else kwargs.get("args")
             catalog_arg = getattr(parsed_args, "catalog", None)
             catalog = resolve_catalog_context(catalog_arg, auth_required=auth)
+
+            if _verbose_active(parsed_args):
+                _print_verbose_preflight(catalog, parsed_args, auth)
 
             def invoke() -> T:
                 if auth:
