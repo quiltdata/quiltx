@@ -45,8 +45,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         # §2 spec: verify dns is a known catalog (has credentials).
-        # Since credentials.py doesn't exist yet (§3), we skip this check for now
-        # and accept any valid DNS. The §3 implementation will wire this guard.
+        from quiltx import credentials
+
+        if not credentials.has_credentials(dns):
+            print(
+                f"Error: {dns} is not a known catalog. "
+                "Run a Quilt-auth command against it first.",
+                file=sys.stderr,
+            )
+            return 1
+
         userconfig.set_default_catalog(dns)
         print(f"Default catalog set to {dns}.")
         return 0

@@ -1,15 +1,17 @@
-"""Catalog forget command (stub — implemented in §3)."""
+"""Forget a catalog's credentials: quiltx catalog forget <dns>."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 
+from quiltx.identity import normalize_dns
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="quiltx catalog forget",
-        description="Delete keyring entry for a catalog.",
+        description="Delete keyring entry for a catalog (idempotent).",
     )
     parser.add_argument(
         "dns",
@@ -19,8 +21,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    print("not yet implemented", file=sys.stderr)
-    return 1
+    from quiltx import credentials
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        dns = normalize_dns(args.dns)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    credentials.delete(dns)
+    print(f"Forgot {dns}.")
+    return 0
 
 
 if __name__ == "__main__":

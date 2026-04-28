@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
-from quiltx import userconfig
+from quiltx import credentials, userconfig
 from quiltx.tools.catalog import default as default_cmd
+
+
+def _setup_no_keyring(monkeypatch, tmp_path):
+    monkeypatch.setattr(credentials, "_keyring_available", lambda: False)
+    monkeypatch.setattr(
+        credentials, "_fallback_path", lambda: tmp_path / "credentials.json"
+    )
+    monkeypatch.setattr(
+        credentials, "_index_path", lambda: tmp_path / "credentials_index.json"
+    )
+    monkeypatch.setattr(credentials, "_FILE_FALLBACK_WARNED", False)
+    monkeypatch.setattr(userconfig, "_config_path", lambda: tmp_path / "config.json")
 
 
 def test_default_no_arg_no_config(tmp_path, monkeypatch, capsys):
     """No arg + no default stored → error message, exit 1."""
+    import sys
+    import types
+
     monkeypatch.setattr(userconfig, "_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.delenv("QUILTX_CATALOG", raising=False)
+    # Prevent bootstrap from reading a real quilt3 config
+    fake_quilt3 = types.SimpleNamespace(config=lambda: {})
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
 
     result = default_cmd.main([])
     assert result == 1
@@ -28,8 +47,9 @@ def test_default_no_arg_shows_current(tmp_path, monkeypatch, capsys):
 
 
 def test_default_set_dns(tmp_path, monkeypatch, capsys):
-    """Passing a DNS sets the default catalog."""
-    monkeypatch.setattr(userconfig, "_config_path", lambda: tmp_path / "config.json")
+    """Passing a known DNS sets the default catalog."""
+    _setup_no_keyring(monkeypatch, tmp_path)
+    credentials.set("nightly.quilttest.com", "alice", "pass")
 
     result = default_cmd.main(["nightly.quilttest.com"])
     assert result == 0
@@ -40,11 +60,22 @@ def test_default_set_dns(tmp_path, monkeypatch, capsys):
 
 def test_default_set_url_normalised(tmp_path, monkeypatch):
     """A full URL is normalised to DNS before storing."""
-    monkeypatch.setattr(userconfig, "_config_path", lambda: tmp_path / "config.json")
+    _setup_no_keyring(monkeypatch, tmp_path)
+    credentials.set("nightly.quilttest.com", "alice", "pass")
 
     result = default_cmd.main(["https://nightly.quilttest.com/"])
     assert result == 0
     assert userconfig.get_default_catalog() == "nightly.quilttest.com"
+
+
+def test_default_set_unknown_catalog_rejected(tmp_path, monkeypatch, capsys):
+    """Setting default to an unknown catalog (no credentials) is rejected."""
+    _setup_no_keyring(monkeypatch, tmp_path)
+
+    result = default_cmd.main(["unknown.example.com"])
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "not a known catalog" in captured.err
 
 
 def test_default_set_http_rejected(tmp_path, monkeypatch, capsys):
