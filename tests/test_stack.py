@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sys
+import types
 from datetime import datetime, timezone
 
 import boto3
+import pytest
 from botocore.stub import Stubber
 
 from quiltx import stack
@@ -31,6 +34,39 @@ def test_fetch_catalog_config_uses_opener() -> None:
 
     config = stack.fetch_catalog_config("https://example.com", opener=opener)
     assert config["region"] == "us-east-2"
+
+
+def test_resolve_stack_context_from_flag() -> None:
+    ctx = stack.resolve_stack_context("HTTPS://Example.COM/path")
+
+    assert ctx == stack.StackContext(
+        catalog_name="example.com",
+        catalog_url="https://example.com",
+        source="flag",
+    )
+
+
+def test_resolve_stack_context_from_global_config(monkeypatch) -> None:
+    fake_quilt3 = types.SimpleNamespace(
+        config=lambda: {"navigator_url": "https://example.com"}
+    )
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    ctx = stack.resolve_stack_context()
+
+    assert ctx == stack.StackContext(
+        catalog_name="example.com",
+        catalog_url="https://example.com",
+        source="global-config",
+    )
+
+
+def test_resolve_stack_context_raises_without_config(monkeypatch) -> None:
+    fake_quilt3 = types.SimpleNamespace(config=lambda: {})
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+
+    with pytest.raises(ValueError, match="No Quilt catalog configured"):
+        stack.resolve_stack_context()
 
 
 def test_find_matching_stack() -> None:

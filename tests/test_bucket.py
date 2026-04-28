@@ -27,6 +27,18 @@ def _client(service_name: str, region_name: str = "us-east-1"):
     )
 
 
+def _install_stack_context(monkeypatch, catalog_name: str = "demo") -> None:
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_stack_context",
+        lambda: bucket_tool.stack_lib.StackContext(
+            catalog_name=catalog_name,
+            catalog_url=f"https://{catalog_name}",
+            source="global-config",
+        ),
+    )
+
+
 def test_build_quilt_policy_statement() -> None:
     statement = bucket_lib.build_quilt_policy_statement("demo-bucket", "123456789012")
     assert statement["Sid"] == "QuiltCrossAccountAccess"
@@ -435,7 +447,7 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
 
     session = FakeSession(s3_client, sns_client, sts_client)
     monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -497,7 +509,7 @@ def test_add_skip_already_registered(monkeypatch, capsys) -> None:
 
     session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
     monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -525,7 +537,7 @@ def test_add_skip_post_test_when_no_test_flag(monkeypatch) -> None:
 
     session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
     monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -546,8 +558,8 @@ def test_add_skip_post_test_when_no_test_flag(monkeypatch) -> None:
 
 def test_add_no_config(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
-        bucket_tool,
-        "get_catalog_config",
+        bucket_tool.stack_lib,
+        "resolve_stack_context",
         lambda: (_ for _ in ()).throw(ValueError("No Quilt catalog configured")),
     )
 
@@ -571,7 +583,7 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
             "outputs": [],
         }
 
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib, "load_stack_payload", _load_stack_payload
     )
@@ -581,7 +593,7 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
         lambda url: {"region": "us-east-1"},
     )
     monkeypatch.setattr(
-        bucket_tool.stack_lib, "resolve_region", lambda config, cc: "us-east-1"
+        bucket_tool.stack_lib, "fetch_region", lambda ctx, cc: "us-east-1"
     )
     monkeypatch.setattr(
         bucket_tool.stack_lib,
@@ -745,7 +757,7 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
         "Session",
         lambda profile_name=None: FakeSession(s3_client, sns_client, sts_client),
     )
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -906,7 +918,7 @@ def test_add_creates_sns(monkeypatch) -> None:
         "Session",
         lambda profile_name=None: FakeSession(s3_client, sns_client, sts_client),
     )
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",

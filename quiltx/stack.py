@@ -6,14 +6,24 @@ import json
 import os
 import ssl
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 from urllib.parse import urlparse
 
 from platformdirs import user_data_path
 
 from quiltx._version import __version__
-from quiltx.utils import get_hostname, normalize_url
+from quiltx.utils import get_hostname
+
+StackContextSource = Literal["flag", "global-config"]
+
+
+@dataclass(frozen=True)
+class StackContext:
+    catalog_name: str
+    catalog_url: str
+    source: StackContextSource
 
 
 def extract_catalog_name(config: Mapping[str, Any]) -> str:
@@ -30,6 +40,54 @@ def extract_catalog_name(config: Mapping[str, Any]) -> str:
         raise ValueError(f"Invalid navigator_url: {navigator_url}")
 
     return parsed.hostname
+
+
+def resolve_stack_context(
+    catalog: str | None = None,
+    *,
+    no_config_message: str = "No Quilt catalog configured",
+) -> StackContext:
+    """Resolve the target stack identity from a CLI override or quilt3 config."""
+    if catalog:
+        catalog_name = get_hostname(catalog)
+        return StackContext(
+            catalog_name=catalog_name,
+            catalog_url=f"https://{catalog_name}",
+            source="flag",
+        )
+
+    import quilt3
+
+    config = quilt3.config()
+    if not config:
+        raise ValueError(no_config_message)
+
+    catalog_name = extract_catalog_name(config)
+    catalog_url = str(config.get("navigator_url") or f"https://{catalog_name}")
+    return StackContext(
+        catalog_name=catalog_name,
+        catalog_url=catalog_url,
+        source="global-config",
+    )
+
+
+def fetch_region(
+    ctx: StackContext, catalog_config: Mapping[str, Any] | None = None
+) -> str:
+    """Fetch the AWS region for a resolved stack context."""
+    if catalog_config is None:
+        catalog_config = fetch_catalog_config(ctx.catalog_url)
+    if ctx.source == "flag":
+        region = catalog_config.get("region")
+        if not region:
+            raise ValueError(
+                f"No region found in catalog config for {ctx.catalog_name}"
+            )
+        return str(region)
+
+    import quilt3
+
+    return resolve_region(quilt3.config(), catalog_config)
 
 
 def _quilt_cfn_client(region: str | None) -> Any:
@@ -300,19 +358,13 @@ def format_stack_header(
     return f"Stack: ({dns})"
 
 
-def current_stack_header() -> str | None:
-    """Return a header line for the currently configured catalog, or None."""
+def current_stack_header(ctx: StackContext) -> str | None:
+    """Return a header line for a resolved stack context."""
     try:
-        import quilt3
-
-        config = quilt3.config()
-        if not config:
-            return None
-        dns = extract_catalog_name(config)
+        payload = load_stack_payload(ctx.catalog_name)
     except Exception:
         return None
-    payload = load_stack_payload(dns)
-    return format_stack_header(dns, payload)
+    return format_stack_header(ctx.catalog_name, payload)
 
 
 def ensure_min_version(payload: Mapping[str, Any] | None, min_version: str) -> bool:

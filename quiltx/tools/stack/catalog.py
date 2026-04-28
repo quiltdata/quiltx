@@ -55,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
             # Show the current config without modifying
             try:
                 config = quiltx.get_catalog_config()
-                header = stack_lib.current_stack_header()
+                ctx = stack_lib.resolve_stack_context()
+                header = stack_lib.current_stack_header(ctx)
                 if header:
                     print(header)
                 for key, value in config.items():

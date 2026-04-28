@@ -481,17 +481,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        if args.catalog_name:
-            catalog_name = args.catalog_name
-        else:
-            import quilt3
-
-            config = quilt3.config()
-            if not config:
-                raise ValueError("No Quilt catalog configured")
-            catalog_name = stack_lib.extract_catalog_name(config)
-
-        payload = logs_lib.load_stack_payload(catalog_name)
+        ctx = stack_lib.resolve_stack_context(args.catalog_name)
+        payload = logs_lib.load_stack_payload(ctx.catalog_name)
 
         # Create console for Rich output
         console = Console(force_terminal=not args.no_color)

@@ -16,7 +16,6 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from quiltx import stack as stack_lib
-from quiltx.utils import get_hostname
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -144,19 +143,13 @@ def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> No
 
 
 def _resolve_catalog_name(catalog_arg: str | None) -> str:
-    if catalog_arg:
-        return get_hostname(catalog_arg)
-    try:
-        import quilt3
-
-        config = quilt3.config()
-        if config:
-            return stack_lib.extract_catalog_name(config)
-    except Exception:
-        pass
-    raise ValueError(
-        "No Quilt catalog configured. Run 'quiltx config' or pass --catalog."
+    ctx = stack_lib.resolve_stack_context(
+        catalog_arg,
+        no_config_message=(
+            "No Quilt catalog configured. Run 'quiltx config' or pass --catalog."
+        ),
     )
+    return ctx.catalog_name
 
 
 def _prompt_resource(

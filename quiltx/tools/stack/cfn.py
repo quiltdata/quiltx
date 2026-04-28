@@ -29,36 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        if args.catalog_name:
-            # Override path: use provided catalog name
-            catalog_name = args.catalog_name
-            catalog_url = f"https://{catalog_name}"
-
-            # Fetch catalog config to get region
-            catalog_config = stack_lib.fetch_catalog_config(catalog_url)
-            region = catalog_config.get("region")
-            if not region:
-                raise ValueError(
-                    f"No region found in catalog config for {catalog_name}"
-                )
-        else:
-            # Default path: use quilt3.config() (existing logic)
-            import quilt3
-
-            config = quilt3.config()
-            if not config:
-                raise ValueError("No Quilt catalog configured")
-
-            catalog_url = config.get("navigator_url")
-            if not catalog_url:
-                raise ValueError("navigator_url missing from Quilt config")
-
-            catalog_name = stack_lib.extract_catalog_name(config)
-            catalog_config = stack_lib.fetch_catalog_config(str(catalog_url))
-            region = stack_lib.resolve_region(config, catalog_config)
+        ctx = stack_lib.resolve_stack_context(args.catalog_name)
+        catalog_config = stack_lib.fetch_catalog_config(ctx.catalog_url)
+        region = stack_lib.fetch_region(ctx, catalog_config)
 
         # Use the simplified API - pass region and let the functions create clients
-        stack_info = stack_lib.find_matching_stack(str(catalog_url), region=region)
+        stack_info = stack_lib.find_matching_stack(ctx.catalog_url, region=region)
         log_groups = stack_lib.list_log_group_resources(
             stack_info["StackName"], region=region
         )
@@ -66,18 +42,18 @@ def main(argv: list[str] | None = None) -> int:
             stack_info["StackName"], region=region
         )
         payload = stack_lib.build_stack_payload(
-            catalog_name,
-            str(catalog_url),
+            ctx.catalog_name,
+            ctx.catalog_url,
             region,
             stack_info,
             log_groups,
             ecs_resources,
             catalog_config,
         )
-        output_path = stack_lib.write_stack_payload(catalog_name, payload)
+        output_path = stack_lib.write_stack_payload(ctx.catalog_name, payload)
 
         header = stack_lib.format_stack_header(
-            catalog_name,
+            ctx.catalog_name,
             {
                 "stack_name": stack_info.get("StackName"),
                 "region": region,

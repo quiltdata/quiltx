@@ -14,7 +14,7 @@ from rich.table import Table
 
 from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
-from quiltx.config import auto_login, get_catalog_config
+from quiltx.config import auto_login
 from quiltx.utils import get_bucket_region
 
 
@@ -140,34 +140,31 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-def _ensure_stack_payload(
-    config: Mapping[str, Any], catalog_name: str
-) -> Mapping[str, Any]:
+def _ensure_stack_payload(ctx: stack_lib.StackContext) -> Mapping[str, Any]:
     """Load cached stack payload, or derive a lightweight one from the Quilt session."""
-    payload = stack_lib.load_stack_payload(catalog_name)
+    payload = stack_lib.load_stack_payload(ctx.catalog_name)
     if payload is not None:
         return payload
 
-    catalog_url = str(config.get("navigator_url") or f"https://{catalog_name}")
-    catalog_config = stack_lib.fetch_catalog_config(catalog_url)
-    region = stack_lib.resolve_region(config, catalog_config)
+    catalog_config = stack_lib.fetch_catalog_config(ctx.catalog_url)
+    region = stack_lib.fetch_region(ctx, catalog_config)
 
-    print(f"Discovering stack for {catalog_name}...")
+    print(f"Discovering stack for {ctx.catalog_name}...")
     try:
-        stack_info = stack_lib.find_matching_stack(catalog_url, region=region)
+        stack_info = stack_lib.find_matching_stack(ctx.catalog_url, region=region)
         log_groups = stack_lib.list_log_group_resources(
             stack_info["StackName"], region=region
         )
         payload = stack_lib.build_stack_payload(
-            catalog_name,
-            catalog_url,
+            ctx.catalog_name,
+            ctx.catalog_url,
             region,
             stack_info,
             log_groups,
             catalog_config=catalog_config,
         )
-        stack_lib.write_stack_payload(catalog_name, payload)
-        cached = stack_lib.load_stack_payload(catalog_name)
+        stack_lib.write_stack_payload(ctx.catalog_name, payload)
+        cached = stack_lib.load_stack_payload(ctx.catalog_name)
         if cached is not None:
             return cached
     except Exception as exc:
@@ -177,7 +174,9 @@ def _ensure_stack_payload(
             file=sys.stderr,
         )
 
-    return _lightweight_stack_payload(catalog_name, catalog_url, region, catalog_config)
+    return _lightweight_stack_payload(
+        ctx.catalog_name, ctx.catalog_url, region, catalog_config
+    )
 
 
 def _lightweight_stack_payload(
@@ -223,15 +222,15 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-        config = get_catalog_config()
-        catalog_name = stack_lib.extract_catalog_name(config)
-        stack_payload = _ensure_stack_payload(config, catalog_name)
+        ctx = stack_lib.resolve_stack_context()
+        catalog_name = ctx.catalog_name
+        stack_payload = _ensure_stack_payload(ctx)
         control_account_id = _load_control_account_id(stack_payload)
         effective_principals = principals or [f"arn:aws:iam::{control_account_id}:root"]
         principal_source = "--principal" if principals else "account root (default)"
         stack_name = _stack_payload_value(stack_payload, "stack_name", "") or None
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
-        catalog_url = str(config.get("navigator_url") or catalog_name)
+        catalog_url = ctx.catalog_url
 
         session, s3_client, bucket_region, resolved_profile = (
             bucket_lib.resolve_bucket_session(
