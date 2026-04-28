@@ -158,7 +158,7 @@ def _ensure_stack_payload(
         log_groups = stack_lib.list_log_group_resources(
             stack_info["StackName"], region=region
         )
-        stack_lib.write_stack_payload(
+        payload = stack_lib.build_stack_payload(
             catalog_name,
             catalog_url,
             region,
@@ -166,6 +166,7 @@ def _ensure_stack_payload(
             log_groups,
             catalog_config=catalog_config,
         )
+        stack_lib.write_stack_payload(catalog_name, payload)
         cached = stack_lib.load_stack_payload(catalog_name)
         if cached is not None:
             return cached

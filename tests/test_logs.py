@@ -9,6 +9,7 @@ import boto3
 from botocore.stub import Stubber
 
 from quiltx import logs
+from quiltx import stack
 
 
 def test_parse_time_epoch_seconds() -> None:
@@ -35,7 +36,7 @@ def test_resolve_time_range_explicit() -> None:
 
 
 def test_load_stack_payload(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(logs, "user_data_path", lambda *_args, **_kwargs: tmp_path)
+    monkeypatch.setattr(stack, "user_data_path", lambda *_args, **_kwargs: tmp_path)
     payload_path = tmp_path / "catalog" / "stack.json"
     payload_path.parent.mkdir(parents=True, exist_ok=True)
     payload_path.write_text(json.dumps({"region": "us-east-1"}))

@@ -168,7 +168,7 @@ def test_list_ecs_resources() -> None:
 def test_write_log_groups(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(stack, "user_data_path", lambda *_args, **_kwargs: tmp_path)
 
-    output_path = stack.write_stack_payload(
+    payload = stack.build_stack_payload(
         "catalog",
         "https://example.com",
         "us-east-1",
@@ -190,6 +190,7 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
         ],
         {"registryUrl": "https://registry.example.com"},
     )
+    output_path = stack.write_stack_payload("catalog", payload)
 
     assert output_path.exists()
     content = output_path.read_text()

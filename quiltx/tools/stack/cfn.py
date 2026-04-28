@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         ecs_resources = stack_lib.list_ecs_resources(
             stack_info["StackName"], region=region
         )
-        output_path = stack_lib.write_stack_payload(
+        payload = stack_lib.build_stack_payload(
             catalog_name,
             str(catalog_url),
             region,
@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             ecs_resources,
             catalog_config,
         )
+        output_path = stack_lib.write_stack_payload(catalog_name, payload)
 
         header = stack_lib.format_stack_header(
             catalog_name,

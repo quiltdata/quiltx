@@ -7,11 +7,9 @@ import json
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import boto3
-from platformdirs import user_data_path
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.prompt import Prompt
@@ -137,17 +135,12 @@ https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-wor
     console.print(Markdown(message))
 
 
-def _stack_payload_path(catalog_name: str) -> Path:
-    return user_data_path("quiltx") / catalog_name / "stack.json"
-
-
 def _load_stack_payload(catalog_name: str) -> Mapping[str, object] | None:
     return stack_lib.load_stack_payload(catalog_name)
 
 
 def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> None:
-    payload_path = _stack_payload_path(catalog_name)
-    payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    stack_lib.write_stack_payload(catalog_name, payload)
 
 
 def _resolve_catalog_name(catalog_arg: str | None) -> str:

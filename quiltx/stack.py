@@ -232,7 +232,11 @@ def stack_account_id(stack: Mapping[str, Any]) -> str | None:
     return None
 
 
-def write_stack_payload(
+def _stack_payload_path(catalog_name: str) -> Path:
+    return user_data_path("quiltx") / catalog_name / "stack.json"
+
+
+def build_stack_payload(
     catalog_name: str,
     catalog_url: str,
     region: str,
@@ -240,12 +244,8 @@ def write_stack_payload(
     log_groups: list[dict[str, str]],
     ecs_resources: list[dict[str, str]] | None = None,
     catalog_config: Mapping[str, Any] | None = None,
-) -> Path:
-    target_dir = user_data_path("quiltx") / catalog_name
-    target_dir.mkdir(parents=True, exist_ok=True)
-    output_path = target_dir / "stack.json"
-
-    payload = {
+) -> dict[str, Any]:
+    return {
         "catalog_name": catalog_name,
         "catalog_url": catalog_url,
         "web_url": catalog_url,
@@ -261,17 +261,30 @@ def write_stack_payload(
         "quiltx_version": __version__,
     }
 
-    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+def write_stack_payload(catalog_name: str, payload: Mapping[str, Any]) -> Path:
+    """Write stack payload for a catalog."""
+    output_path = _stack_payload_path(catalog_name)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True))
     return output_path
 
 
 def load_stack_payload(catalog_name: str) -> Mapping[str, Any] | None:
     """Load stack payload for a catalog."""
-    target_dir = user_data_path("quiltx") / catalog_name
-    output_path = target_dir / "stack.json"
+    output_path = _stack_payload_path(catalog_name)
     if not output_path.exists():
         return None
     return json.loads(output_path.read_text())
+
+
+def require_stack_payload(catalog_name: str) -> Mapping[str, Any]:
+    """Load stack payload for a catalog, or raise if it is missing."""
+    output_path = _stack_payload_path(catalog_name)
+    payload = load_stack_payload(catalog_name)
+    if payload is None:
+        raise FileNotFoundError(f"Missing stack payload at {output_path}")
+    return payload
 
 
 def format_stack_header(
