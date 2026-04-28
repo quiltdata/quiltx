@@ -338,3 +338,55 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
     assert '"parameters"' in content
     assert '"ecs_resources"' in content
     assert '"catalog_config"' in content
+
+
+def test_verbose_preflight_prints_to_stderr(monkeypatch, capsys) -> None:
+    """@catalog_command prints catalog/source/auth block when --verbose is set."""
+    ctx = stack.Catalog(
+        catalog_name="example.com",
+        catalog_url="https://example.com",
+        source="flag",
+        auth_required=False,
+    )
+    monkeypatch.setattr(
+        stack, "resolve_catalog_context", lambda _catalog=None, **kw: ctx
+    )
+
+    @stack.catalog_command(auth=False)
+    def guarded(cat: stack.Catalog, args: object) -> str:
+        return "ok"
+
+    from types import SimpleNamespace
+
+    result = guarded(SimpleNamespace(catalog=None, verbose=True))
+    assert result == "ok"
+
+    err = capsys.readouterr().err
+    assert "catalog:  example.com" in err
+    assert "source:   flag" in err
+    assert "auth:     aws-default-chain" in err
+
+
+def test_verbose_env_var_activates_preflight(monkeypatch, capsys) -> None:
+    """QUILTX_VERBOSE=1 also activates the preflight block."""
+    ctx = stack.Catalog(
+        catalog_name="example.com",
+        catalog_url="https://example.com",
+        source="env",
+        auth_required=False,
+    )
+    monkeypatch.setattr(
+        stack, "resolve_catalog_context", lambda _catalog=None, **kw: ctx
+    )
+    monkeypatch.setenv("QUILTX_VERBOSE", "1")
+
+    @stack.catalog_command(auth=False)
+    def guarded(cat: stack.Catalog, args: object) -> str:
+        return "ok"
+
+    from types import SimpleNamespace
+
+    guarded(SimpleNamespace(catalog=None, verbose=False))
+    err = capsys.readouterr().err
+    assert "catalog:  example.com" in err
+    assert "source:   env" in err

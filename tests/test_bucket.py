@@ -1359,6 +1359,35 @@ def test_cmd_add_principal_rejects_non_arn(monkeypatch, capsys) -> None:
     assert "must be an IAM role ARN" in captured.err
 
 
+def test_cmd_add_no_prompt_without_yes_exits_early(monkeypatch, capsys) -> None:
+    """--no-prompt without --yes prints an error and returns 1 before any AWS calls."""
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
+    # --no-prompt is a top-level flag; must come before the subcommand.
+    result = bucket_tool.main(["--no-prompt", "add", "bucket"])
+    assert result == 1
+    err = capsys.readouterr().err
+    assert "--no-prompt" in err
+    assert "--yes" in err
+
+
+def test_cmd_add_no_prompt_with_dry_run_requires_yes(monkeypatch, capsys) -> None:
+    """--no-prompt guard checks --yes regardless of --dry-run."""
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
+    result = bucket_tool.main(["--no-prompt", "add", "bucket", "--dry-run"])
+    assert result == 1
+    assert "--yes" in capsys.readouterr().err
+
+
 def test_cmd_profile_lists_profiles(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         bucket_tool.boto3,
