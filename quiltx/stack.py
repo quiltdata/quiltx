@@ -19,7 +19,7 @@ from quiltx._version import __version__
 from quiltx.identity import normalize_dns
 from quiltx.utils import get_hostname
 
-CatalogContextSource = Literal["flag", "global-config"]
+CatalogContextSource = Literal["flag", "env", "default", "global-config"]
 
 
 @dataclass(frozen=True)
@@ -172,35 +172,58 @@ def extract_catalog_name(config: Mapping[str, Any]) -> str:
 
 
 def _lookup_default_dns() -> str | None:
-    """Return the catalog DNS name from quilt3.config(), or None if unconfigured."""
+    """Return the default catalog DNS name, or None if unconfigured.
+
+    Resolution order:
+    1. quiltx userconfig (default_catalog key).
+    2. Bootstrap: if userconfig is empty and quilt3.config() has a catalog,
+       copy that DNS into userconfig once and return it.
+    """
+    from quiltx import userconfig
     from quiltx.quilt3_facade import current_global_config
 
+    dns = userconfig.get_default_catalog()
+    if dns is not None:
+        return dns
+
+    # Bootstrap: read quilt3.config() once and persist it.
     config = current_global_config()
     if not config:
         return None
-    return extract_catalog_name(config)
+    try:
+        dns = extract_catalog_name(config)
+    except ValueError:
+        return None
+    userconfig.set_default_catalog(dns)
+    return dns
 
 
 def resolve_catalog_context(
     catalog: str | None = None,
 ) -> Catalog:
-    """Resolve the target catalog identity from a CLI override or quilt3 config."""
+    """Resolve the target catalog identity.
+
+    Resolution ladder:
+    1. ``catalog`` argument (from --catalog flag)
+    2. QUILTX_CATALOG env var
+    3. quiltx default catalog (userconfig, with quilt3.config() bootstrap)
+    4. Error
+    """
     if catalog:
         return Catalog.from_dns(normalize_dns(catalog), source="flag")
 
+    env_catalog = os.environ.get("QUILTX_CATALOG")
+    if env_catalog:
+        return Catalog.from_dns(normalize_dns(env_catalog), source="env")
+
     dns = _lookup_default_dns()
     if dns is None:
-        raise ValueError("No Quilt catalog configured")
+        raise ValueError(
+            "No catalog specified and no default configured. "
+            "Pass --catalog or run `quiltx catalog default <dns>`."
+        )
 
-    from quiltx.quilt3_facade import current_global_config
-
-    config = current_global_config() or {}
-    catalog_url = str(config.get("navigator_url") or f"https://{dns}")
-    return Catalog(
-        catalog_name=dns,
-        catalog_url=catalog_url,
-        source="global-config",
-    )
+    return Catalog.from_dns(dns, source="default")
 
 
 def fetch_region(

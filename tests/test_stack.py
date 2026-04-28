@@ -46,7 +46,11 @@ def test_resolve_catalog_context_from_flag() -> None:
     )
 
 
-def test_resolve_catalog_context_from_global_config(monkeypatch) -> None:
+def test_resolve_catalog_context_from_global_config(tmp_path, monkeypatch) -> None:
+    """Bootstrap: quilt3.config() used when no userconfig default is set."""
+    from quiltx import userconfig
+
+    monkeypatch.setattr(userconfig, "_config_path", lambda: tmp_path / "config.json")
     fake_quilt3 = types.SimpleNamespace(
         config=lambda: {"navigator_url": "https://example.com"}
     )
@@ -57,15 +61,32 @@ def test_resolve_catalog_context_from_global_config(monkeypatch) -> None:
     assert ctx == stack.Catalog(
         catalog_name="example.com",
         catalog_url="https://example.com",
-        source="global-config",
+        source="default",
     )
 
 
-def test_resolve_catalog_context_raises_without_config(monkeypatch) -> None:
+def test_resolve_catalog_context_env_var(tmp_path, monkeypatch) -> None:
+    """QUILTX_CATALOG env var resolves with source='env'."""
+    from quiltx import userconfig
+
+    monkeypatch.setattr(userconfig, "_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setenv("QUILTX_CATALOG", "env.example.com")
+
+    ctx = stack.resolve_catalog_context()
+
+    assert ctx.catalog_name == "env.example.com"
+    assert ctx.source == "env"
+
+
+def test_resolve_catalog_context_raises_without_config(tmp_path, monkeypatch) -> None:
+    from quiltx import userconfig
+
+    monkeypatch.setattr(userconfig, "_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.delenv("QUILTX_CATALOG", raising=False)
     fake_quilt3 = types.SimpleNamespace(config=lambda: {})
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
 
-    with pytest.raises(ValueError, match="No Quilt catalog configured"):
+    with pytest.raises(ValueError, match="No catalog specified"):
         stack.resolve_catalog_context()
 
 
