@@ -18,8 +18,6 @@ from quiltx.acl import (
 from quiltx.config import (
     get_catalog_config as get_catalog_config,
     get_catalog_region as get_catalog_region,
-    get_catalog_url as get_catalog_url,
-    set_catalog_url as set_catalog_url,
 )
 
 __all__ = [
@@ -34,8 +32,6 @@ __all__ = [
     "fetch_current_state",
     "get_catalog_config",
     "get_catalog_region",
-    "get_catalog_url",
     "parse_acl_config",
     "print_diff",
-    "set_catalog_url",
 ]

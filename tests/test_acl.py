@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from quiltx import acl
-from quiltx.tools.stack import acl as acl_tool
+from quiltx.tools.catalog import acl as acl_tool
 
 from tests.conftest import make_fake_catalog
 

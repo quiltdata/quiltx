@@ -12,7 +12,7 @@ from quiltx.cli_common import add_catalog_args
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="quiltx stack cfn",
+        prog="quiltx catalog stack",
         description=(
             "Discover and store information about the CloudFormation stack for the configured catalog."
         ),

@@ -36,21 +36,6 @@ def test_get_catalog_config_raises_when_not_configured(monkeypatch) -> None:
         quiltx.get_catalog_config()
 
 
-def test_get_catalog_url(monkeypatch) -> None:
-    """Test get_catalog_url extracts navigator_url."""
-    fake_config = {"navigator_url": "https://example.test", "region": "us-east-1"}
-
-    def _config_return():
-        return fake_config
-
-    fake_quilt3 = types.SimpleNamespace(config=_config_return)
-    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
-
-    url = quiltx.get_catalog_url()
-
-    assert url == "https://example.test"
-
-
 def test_get_catalog_region(monkeypatch) -> None:
     """Test get_catalog_region extracts region."""
     fake_config = {"navigator_url": "https://example.test", "region": "us-east-1"}
@@ -78,58 +63,3 @@ def test_get_catalog_region_raises_when_missing(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="region not found"):
         quiltx.get_catalog_region()
-
-
-def test_set_catalog_url(monkeypatch) -> None:
-    """Test set_catalog_url calls quilt3.config with args."""
-    called = {}
-
-    def _config(*args, **kwargs):
-        called["args"] = args
-        called["kwargs"] = kwargs
-        return {"navigator_url": args[0] if args else None}
-
-    fake_quilt3 = types.SimpleNamespace(config=_config)
-    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
-
-    config = quiltx.set_catalog_url("https://example.test", token="abc123")
-
-    assert called == {
-        "args": ("https://example.test",),
-        "kwargs": {"token": "abc123"},
-    }
-    assert config["navigator_url"] == "https://example.test"
-
-
-def test_set_catalog_url_bare_hostname(monkeypatch) -> None:
-    """Test set_catalog_url normalizes bare DNS names to https://."""
-    called = {}
-
-    def _config(*args, **kwargs):
-        called["args"] = args
-        called["kwargs"] = kwargs
-        return {"navigator_url": args[0] if args else None}
-
-    fake_quilt3 = types.SimpleNamespace(config=_config)
-    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
-
-    config = quiltx.set_catalog_url("unstable.dev.quilttest.com")
-
-    assert called["args"] == ("https://unstable.dev.quilttest.com",)
-    assert config["navigator_url"] == "https://unstable.dev.quilttest.com"
-
-
-def test_set_catalog_url_strips_trailing_slash(monkeypatch) -> None:
-    """Test set_catalog_url strips trailing slash."""
-    called = {}
-
-    def _config(*args, **kwargs):
-        called["args"] = args
-        return {"navigator_url": args[0] if args else None}
-
-    fake_quilt3 = types.SimpleNamespace(config=_config)
-    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
-
-    quiltx.set_catalog_url("https://example.test/")
-
-    assert called["args"] == ("https://example.test",)

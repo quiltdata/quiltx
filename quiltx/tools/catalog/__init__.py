@@ -1,4 +1,4 @@
-"""Quilt stack management commands."""
+"""Quilt catalog management commands."""
 
 from __future__ import annotations
 
@@ -7,16 +7,18 @@ import sys
 from importlib import import_module
 
 SUBCOMMANDS = {
-    "acl": "quiltx.tools.stack.acl",
-    "catalog": "quiltx.tools.stack.catalog",
-    "cfn": "quiltx.tools.stack.cfn",
+    "acl": "quiltx.tools.catalog.acl",
+    "default": "quiltx.tools.catalog.default",
+    "forget": "quiltx.tools.catalog.forget",
+    "list": "quiltx.tools.catalog.list_",
+    "stack": "quiltx.tools.catalog.stack",
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="quiltx stack",
-        description="Manage Quilt stack: catalog connection, CloudFormation discovery, and access control.",
+        prog="quiltx catalog",
+        description="Manage Quilt catalogs: default, credentials, ACLs, and CloudFormation discovery.",
     )
 
     subparsers = parser.add_subparsers(
@@ -31,13 +33,23 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     subparsers.add_parser(
-        "catalog",
-        help="Show or set the Quilt catalog configured by quilt3.",
+        "default",
+        help="Read, set, or clear the default catalog.",
         add_help=False,
     )
     subparsers.add_parser(
-        "cfn",
-        help="Discover and store information about the CloudFormation stack for the configured catalog.",
+        "forget",
+        help="Delete keyring entry for a catalog.",
+        add_help=False,
+    )
+    subparsers.add_parser(
+        "list",
+        help="List known catalogs (keyring entries).",
+        add_help=False,
+    )
+    subparsers.add_parser(
+        "stack",
+        help="Discover and store CloudFormation stack information for the configured catalog.",
         add_help=False,
     )
 

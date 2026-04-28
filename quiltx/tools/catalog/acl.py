@@ -12,7 +12,7 @@ from quiltx import stack as stack_lib
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="quiltx stack acl",
+        prog="quiltx catalog acl",
         description=(
             "Reconcile Quilt ACLs from flat YAML with top-level "
             "'policies:' and 'roles:' blocks."
