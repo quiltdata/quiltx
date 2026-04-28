@@ -13,6 +13,8 @@ import yaml
 from quiltx import acl
 from quiltx.tools.stack import acl as acl_tool
 
+from tests.conftest import make_fake_catalog
+
 
 @dataclass
 class FakePolicySummary:
@@ -53,18 +55,14 @@ def _fake_stack(
     sso_config: Any = None,
     users: Any = None,
 ) -> Any:
-    return SimpleNamespace(
-        catalog_name="catalog",
-        catalog_url="https://catalog",
+    return make_fake_catalog(
+        "catalog",
         payload=payload,
-        admin=SimpleNamespace(
-            buckets=buckets or SimpleNamespace(),
-            policies=policies or SimpleNamespace(),
-            roles=roles or SimpleNamespace(),
-            sso_config=sso_config or SimpleNamespace(),
-            users=users or SimpleNamespace(),
-        ),
-        ensure_auth=lambda: None,
+        buckets=buckets,
+        policies=policies,
+        roles=roles,
+        sso_config=sso_config,
+        users=users,
     )
 
 

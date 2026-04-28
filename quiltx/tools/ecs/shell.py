@@ -16,6 +16,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from quiltx import stack as stack_lib
+from quiltx.cli_common import add_catalog_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,10 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--region",
         help="AWS region (defaults to AWS SDK configuration).",
     )
-    parser.add_argument(
-        "--catalog",
-        help="Catalog name or URL used to locate stack payload.",
-    )
+    add_catalog_args(parser, auth_required=False)
     parser.add_argument(
         "--list",
         action="store_true",
@@ -143,12 +141,7 @@ def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> No
 
 
 def _resolve_catalog_name(catalog_arg: str | None) -> str:
-    ctx = stack_lib.resolve_catalog_context(
-        catalog_arg,
-        no_config_message=(
-            "No Quilt catalog configured. Run 'quiltx config' or pass --catalog."
-        ),
-    )
+    ctx = stack_lib.resolve_catalog_context(catalog_arg)
     return ctx.catalog_name
 
 
@@ -448,7 +441,7 @@ def _print_execute_command_not_enabled_error(
     if service:
         console.print("\n[bold]Quick Fix:[/bold]")
         console.print(
-            f"I can enable Execute Command on the service and restart it for you.\n"
+            "I can enable Execute Command on the service and restart it for you.\n"
         )
 
         should_enable = auto_enable

@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import sys
 
-import boto3
 
 from quiltx import stack as stack_lib
+from quiltx.cli_common import add_catalog_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,10 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Discover and store information about the CloudFormation stack for the configured catalog."
         ),
     )
-    parser.add_argument(
-        "--catalog-name",
-        help="Override catalog name (e.g., example.quiltdata.com)",
-    )
+    add_catalog_args(parser, auth_required=False)
     return parser
 
 

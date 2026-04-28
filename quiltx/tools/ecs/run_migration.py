@@ -9,6 +9,7 @@ import sys
 import boto3
 
 from quiltx import ecs as ecs_lib
+from quiltx.cli_common import add_catalog_args
 from quiltx.tools.ecs import shell
 
 
@@ -17,10 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx ecs run-migration",
         description="Re-run the registry migration ECS task for the configured catalog stack.",
     )
-    parser.add_argument(
-        "--catalog",
-        help="Catalog name or URL used to locate stack payload.",
-    )
+    add_catalog_args(parser, auth_required=False)
     parser.add_argument(
         "--region",
         help="AWS region override (defaults to stack payload).",

@@ -166,8 +166,7 @@ def _handle_policy_drift(
             print(f"    extra on server:   {', '.join(item.extra)}", file=sys.stderr)
         if affected_roles:
             print(
-                f"    reset would delete+recreate roles: "
-                f"{', '.join(affected_roles)}",
+                f"    reset would delete+recreate roles: {', '.join(affected_roles)}",
                 file=sys.stderr,
             )
         if auto:

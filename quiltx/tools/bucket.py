@@ -14,7 +14,7 @@ from rich.table import Table
 
 from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
-from quiltx.utils import get_bucket_region
+from quiltx.cli_common import add_catalog_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket",
         description="Register S3 buckets with the configured Quilt catalog.",
     )
+    add_catalog_args(parser, auth_required=False)
     subparsers = parser.add_subparsers(
         dest="action",
         title="actions",
@@ -468,7 +469,7 @@ def _cmd_test(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
 def _verify_bucket_registration_and_access(
     stack: stack_lib.Catalog, bucket_name: str, *, control_account_id: str | None = None
 ) -> int:
-    import quilt3
+    from quiltx.quilt3_facade import make_bucket
 
     bucket_uri = f"s3://{bucket_name}"
     registered = None
@@ -485,7 +486,7 @@ def _verify_bucket_registration_and_access(
         if registered is None:
             raise ValueError(f"{bucket_name} is not registered in Quilt")
 
-        b = quilt3.Bucket(bucket_uri)
+        b: Any = make_bucket(bucket_uri)
 
         stage = "ls() via control account"
         # If the cross-account / managed-policy grant is wrong, this raises

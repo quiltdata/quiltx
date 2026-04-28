@@ -6,7 +6,6 @@ import json
 import contextlib
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -16,6 +15,8 @@ from botocore.stub import Stubber
 from quiltx import bucket as bucket_lib
 from quiltx.bucket import AddBucketResult, add_bucket
 from quiltx.tools import bucket as bucket_tool
+
+from tests.conftest import make_fake_catalog
 
 
 def _client(service_name: str, region_name: str = "us-east-1"):
@@ -29,14 +30,11 @@ def _client(service_name: str, region_name: str = "us-east-1"):
 
 
 def _install_stack_context(monkeypatch, catalog_name: str = "demo") -> None:
+    cat = make_fake_catalog(catalog_name)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "resolve_catalog_context",
-        lambda _catalog=None: bucket_tool.stack_lib.Catalog(
-            catalog_name=catalog_name,
-            catalog_url=f"https://{catalog_name}",
-            source="global-config",
-        ),
+        lambda _catalog=None: cat,
     )
 
 

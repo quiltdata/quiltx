@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json as json_lib
 import sys
 import time
 from datetime import datetime, timezone
@@ -17,6 +16,7 @@ from rich.text import Text
 
 from quiltx import logs as logs_lib
 from quiltx import stack as stack_lib
+from quiltx.cli_common import add_catalog_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,10 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List all available log group keys.",
     )
-    parser.add_argument(
-        "--catalog-name",
-        help="Catalog name used in the stack payload path.",
-    )
+    add_catalog_args(parser, auth_required=False)
     parser.add_argument(
         "--since",
         help="Start time (ISO 8601 or epoch seconds/millis).",
@@ -481,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        ctx = stack_lib.resolve_catalog_context(args.catalog_name)
+        ctx = stack_lib.resolve_catalog_context(args.catalog)
         payload = logs_lib.load_stack_payload(ctx.catalog_name)
 
         # Create console for Rich output

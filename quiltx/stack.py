@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from platformdirs import user_data_path
 
 from quiltx._version import __version__
+from quiltx.identity import normalize_dns
 from quiltx.utils import get_hostname
 
 CatalogContextSource = Literal["flag", "global-config"]
@@ -52,17 +53,18 @@ class Catalog(CatalogContext):
     @property
     def admin(self) -> AdminClients:
         if self._admin is None:
-            from quilt3.admin import buckets, policies, roles, sso_config, users
+            from quiltx.quilt3_facade import admin_modules
 
+            clients = admin_modules()
             object.__setattr__(
                 self,
                 "_admin",
                 AdminClients(
-                    buckets=buckets,
-                    policies=policies,
-                    roles=roles,
-                    sso_config=sso_config,
-                    users=users,
+                    buckets=clients.buckets,
+                    policies=clients.policies,
+                    roles=clients.roles,
+                    sso_config=clients.sso_config,
+                    users=clients.users,
                 ),
             )
         assert self._admin is not None
@@ -73,9 +75,9 @@ class Catalog(CatalogContext):
         return load_stack_payload(self.catalog_name)
 
     def boto3_session(self) -> Any:
-        from quilt3.session import get_boto3_session
+        from quiltx.quilt3_facade import default_boto3_session
 
-        return get_boto3_session()
+        return default_boto3_session()
 
     def cfn_client(self, region: str | None = None) -> Any:
         try:
@@ -87,6 +89,15 @@ class Catalog(CatalogContext):
 
     def ensure_auth(self) -> None:
         return None
+
+    @classmethod
+    def from_dns(cls, dns: str, *, source: CatalogContextSource) -> "Catalog":
+        """Build a Catalog from a bare DNS name."""
+        return cls(
+            catalog_name=dns,
+            catalog_url=f"https://{dns}",
+            source=source,
+        )
 
 
 T = TypeVar("T")
@@ -115,9 +126,7 @@ def catalog_command(
         @functools.wraps(wrapped)
         def wrapper(*args: Any, **kwargs: Any) -> T:
             parsed_args = args[0] if args else kwargs.get("args")
-            catalog_arg = getattr(parsed_args, "catalog_name", None) or getattr(
-                parsed_args, "catalog", None
-            )
+            catalog_arg = getattr(parsed_args, "catalog", None)
             catalog = resolve_catalog_context(catalog_arg)
 
             def invoke() -> T:
@@ -134,9 +143,9 @@ def catalog_command(
                 if not _is_auth_error(exc):
                     raise
                 print("Session expired. Launching quilt3 login...", file=sys.stderr)
-                import quilt3
+                from quiltx.quilt3_facade import login_global
 
-                quilt3.login()
+                login_global()
                 return invoke()
 
         return wrapper
@@ -162,30 +171,33 @@ def extract_catalog_name(config: Mapping[str, Any]) -> str:
     return parsed.hostname
 
 
+def _lookup_default_dns() -> str | None:
+    """Return the catalog DNS name from quilt3.config(), or None if unconfigured."""
+    from quiltx.quilt3_facade import current_global_config
+
+    config = current_global_config()
+    if not config:
+        return None
+    return extract_catalog_name(config)
+
+
 def resolve_catalog_context(
     catalog: str | None = None,
-    *,
-    no_config_message: str = "No Quilt catalog configured",
 ) -> Catalog:
     """Resolve the target catalog identity from a CLI override or quilt3 config."""
     if catalog:
-        catalog_name = get_hostname(catalog)
-        return Catalog(
-            catalog_name=catalog_name,
-            catalog_url=f"https://{catalog_name}",
-            source="flag",
-        )
+        return Catalog.from_dns(normalize_dns(catalog), source="flag")
 
-    import quilt3
+    dns = _lookup_default_dns()
+    if dns is None:
+        raise ValueError("No Quilt catalog configured")
 
-    config = quilt3.config()
-    if not config:
-        raise ValueError(no_config_message)
+    from quiltx.quilt3_facade import current_global_config
 
-    catalog_name = extract_catalog_name(config)
-    catalog_url = str(config.get("navigator_url") or f"https://{catalog_name}")
+    config = current_global_config() or {}
+    catalog_url = str(config.get("navigator_url") or f"https://{dns}")
     return Catalog(
-        catalog_name=catalog_name,
+        catalog_name=dns,
         catalog_url=catalog_url,
         source="global-config",
     )
@@ -205,9 +217,9 @@ def fetch_region(
             )
         return str(region)
 
-    import quilt3
+    from quiltx.quilt3_facade import current_global_config
 
-    return resolve_region(quilt3.config(), catalog_config)
+    return resolve_region(current_global_config() or {}, catalog_config)
 
 
 def _default_ssl_context() -> ssl.SSLContext | None:
@@ -300,9 +312,7 @@ def find_matching_stack(
     if output_host_matches:
         return output_host_matches[0]
 
-    raise ValueError(
-        "No stack found with QuiltWebHost matching " f"{catalog.catalog_url}"
-    )
+    raise ValueError(f"No stack found with QuiltWebHost matching {catalog.catalog_url}")
 
 
 def list_log_group_resources(
@@ -469,10 +479,10 @@ def format_stack_header(
     return f"Stack: ({dns})"
 
 
-def current_stack_header(ctx: CatalogContext) -> str | None:
+def current_stack_header(ctx: "Catalog") -> str | None:
     """Return a header line for a resolved catalog context."""
     try:
-        payload = load_stack_payload(ctx.catalog_name)
+        payload = ctx.payload
     except Exception:
         return None
     return format_stack_header(ctx.catalog_name, payload)

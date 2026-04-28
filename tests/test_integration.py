@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import quilt3
 import quilt3.util as util
 
 import quiltx

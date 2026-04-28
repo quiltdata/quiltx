@@ -546,7 +546,6 @@ def apply_acl(
     assume_yes: bool = False,
 ) -> list[str]:
     """Apply ACL changes. Returns any runtime warnings."""
-    from quiltx import bucket as bucket_lib
 
     warnings = list(diff.warnings)
     failed_buckets: set[str] = set()
@@ -600,8 +599,7 @@ def apply_acl(
         dropped = _dropped_permissions(policy.permissions, created.permissions)
         if dropped:
             detail = (
-                f"server accepted create but dropped permissions: "
-                f"{', '.join(dropped)}"
+                f"server accepted create but dropped permissions: {', '.join(dropped)}"
             )
             warnings.append(f"Policy '{policy.title}' {detail}")
             print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
@@ -642,8 +640,7 @@ def apply_acl(
         dropped = _dropped_permissions(policy.permissions, updated.permissions)
         if dropped:
             detail = (
-                f"server accepted update but dropped permissions: "
-                f"{', '.join(dropped)}"
+                f"server accepted update but dropped permissions: {', '.join(dropped)}"
             )
             warnings.append(f"Policy '{policy.title}' {detail}")
             print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
@@ -1202,9 +1199,7 @@ def _print_verbose_state(
     for synth_role in desired_state.synthesized_roles:
         prefix = _diff_prefix(synth_role.name, created_roles, updated_roles)
         sources = ", ".join(synth_role.source_policies)
-        print(
-            f"{prefix} role {synth_role.name} " f"(synthesized from policies {sources})"
-        )
+        print(f"{prefix} role {synth_role.name} (synthesized from policies {sources})")
         print(f"    groups: {', '.join(synth_role.groups)}")
         print(f"    policies: {', '.join(synth_role.policy_titles)}")
         if desired_state.default_role_name == synth_role.name:

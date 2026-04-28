@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import timezone
 
 import boto3
 from botocore.stub import Stubber
