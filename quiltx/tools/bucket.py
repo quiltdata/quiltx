@@ -215,6 +215,13 @@ def _lightweight_stack_payload(
 @stack_lib.catalog_command
 def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
+        if getattr(args, "no_prompt", False) and not getattr(args, "yes", False):
+            print(
+                "Error: --no-prompt requires --yes (or --dry-run) to avoid interactive prompts.",
+                file=sys.stderr,
+            )
+            return 1
+
         principals, show_guidance = _resolve_principals_arg(args.principal)
         if show_guidance:
             _print_principal_guidance()
@@ -238,7 +245,10 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
 
         session, s3_client, bucket_region, resolved_profile = (
             bucket_lib.resolve_bucket_session(
-                args.bucket_name, args.profile, assume_yes=args.yes
+                args.bucket_name,
+                args.profile,
+                assume_yes=args.yes,
+                no_prompt=getattr(args, "no_prompt", False),
             )
         )
         if session is None:

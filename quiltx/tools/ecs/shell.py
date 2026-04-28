@@ -140,11 +140,6 @@ def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> No
     stack_lib.write_stack_payload(catalog_name, payload)
 
 
-def _resolve_catalog_name(catalog_arg: str | None) -> str:
-    ctx = stack_lib.resolve_catalog_context(catalog_arg)
-    return ctx.catalog_name
-
-
 def _prompt_resource(
     console: Console,
     title: str,
@@ -575,14 +570,11 @@ def _format_command(cmd: Iterable[str]) -> str:
     return " ".join(cmd)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
+@stack_lib.catalog_command(auth=False)
+def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         console = Console()
-        catalog_name = _resolve_catalog_name(args.catalog)
-        payload = _load_stack_payload(catalog_name)
+        payload = _load_stack_payload(catalog.catalog_name)
         saved_defaults: dict[str, object] = {}
         if payload:
             defaults_value = payload.get("ecs_defaults")
@@ -688,7 +680,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if payload:
             updated = _merge_ecs_defaults(payload, cluster, service, container, command)
-            _write_stack_payload(catalog_name, updated)
+            _write_stack_payload(catalog.catalog_name, updated)
 
         if args.dry_run:
             print(_format_command(cmd))
@@ -725,6 +717,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return _run(args)
 
 
 if __name__ == "__main__":

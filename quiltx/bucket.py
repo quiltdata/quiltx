@@ -32,6 +32,7 @@ def resolve_bucket_session(
     profile: str | None,
     *,
     assume_yes: bool,
+    no_prompt: bool = False,
     prompt: Any = None,
     output: Any = None,
 ) -> tuple[Any, Any, str, str | None]:
@@ -39,6 +40,9 @@ def resolve_bucket_session(
 
     Returns (session, s3_client, region, resolved_profile). Session is None if
     the user declined or no profile could access the bucket.
+
+    When *no_prompt* is True, interactive prompts are suppressed; the function
+    returns ``(None, None, "", profile)`` rather than asking the user.
     """
     import sys as _sys
 
@@ -65,6 +69,13 @@ def resolve_bucket_session(
     match = find_profile_for_bucket(bucket, candidates)
     if match is None:
         print(f"No other configured profile can access bucket {bucket}.", file=err)
+        return None, None, "", profile
+
+    if no_prompt:
+        print(
+            f"Profile {profile or '<default>'} cannot access {bucket} and --no-prompt is set.",
+            file=err,
+        )
         return None, None, "", profile
 
     if assume_yes:

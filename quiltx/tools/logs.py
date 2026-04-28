@@ -473,74 +473,77 @@ def _follow_logs_dynamic(
             pass
 
 
+@stack_lib.catalog_command(auth=False)
+def _run(catalog: stack_lib.Catalog, args: Any) -> int:
+    payload = logs_lib.load_stack_payload(catalog.catalog_name)
+
+    # Create console for Rich output
+    console = Console(force_terminal=not args.no_color)
+
+    # Handle --list flag
+    if args.list:
+        _list_available_logs(console, payload)
+        return 0
+
+    # Get all log groups from payload
+    log_entries = payload.get("log_groups", [])
+    log_groups = _get_all_log_groups(log_entries)
+
+    if not log_groups:
+        console.print("[red]Error:[/red] No log groups found in stack payload")
+        console.print(
+            "\n[dim]Run 'quiltx logs --list' to see available log groups.[/dim]"
+        )
+        return 1
+
+    # Determine stream filters from positional arguments
+    stream_filters = args.streams if args.streams else None
+
+    region = payload.get("region")
+    if not region:
+        raise ValueError("Region missing from stack payload")
+
+    start_ms, end_ms = logs_lib.resolve_time_range(
+        args.since, args.until, args.minutes, args.hours, args.days, args.ago
+    )
+
+    logs_client = boto3.client("logs", region_name=region)
+
+    # Auto-enable wrap when stream filter is specified
+    wrap = args.wrap or bool(stream_filters)
+
+    # Handle follow mode vs static display
+    if args.follow:
+        _follow_logs_dynamic(
+            console,
+            logs_client,
+            log_groups,
+            start_ms,
+            args.filter,
+            payload,
+            wrap,
+            stream_filters,
+        )
+    else:
+        # Display static logs organized by group
+        _display_logs_by_group(
+            console,
+            logs_client,
+            log_groups,
+            start_ms,
+            end_ms,
+            args.filter,
+            args.limit,
+        )
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-
     try:
-        ctx = stack_lib.resolve_catalog_context(args.catalog)
-        payload = logs_lib.load_stack_payload(ctx.catalog_name)
-
-        # Create console for Rich output
-        console = Console(force_terminal=not args.no_color)
-
-        # Handle --list flag
-        if args.list:
-            _list_available_logs(console, payload)
-            return 0
-
-        # Get all log groups from payload
-        log_entries = payload.get("log_groups", [])
-        log_groups = _get_all_log_groups(log_entries)
-
-        if not log_groups:
-            console.print("[red]Error:[/red] No log groups found in stack payload")
-            console.print(
-                "\n[dim]Run 'quiltx logs --list' to see available log groups.[/dim]"
-            )
-            return 1
-
-        # Determine stream filters from positional arguments
-        stream_filters = args.streams if args.streams else None
-
-        region = payload.get("region")
-        if not region:
-            raise ValueError("Region missing from stack payload")
-
-        start_ms, end_ms = logs_lib.resolve_time_range(
-            args.since, args.until, args.minutes, args.hours, args.days, args.ago
-        )
-
-        logs_client = boto3.client("logs", region_name=region)
-
-        # Auto-enable wrap when stream filter is specified
-        wrap = args.wrap or bool(stream_filters)
-
-        # Handle follow mode vs static display
-        if args.follow:
-            _follow_logs_dynamic(
-                console,
-                logs_client,
-                log_groups,
-                start_ms,
-                args.filter,
-                payload,
-                wrap,
-                stream_filters,
-            )
-        else:
-            # Display static logs organized by group
-            _display_logs_by_group(
-                console,
-                logs_client,
-                log_groups,
-                start_ms,
-                end_ms,
-                args.filter,
-                args.limit,
-            )
-
-        return 0
+        return _run(args)
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

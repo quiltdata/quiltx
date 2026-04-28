@@ -9,6 +9,7 @@ import sys
 import boto3
 
 from quiltx import ecs as ecs_lib
+from quiltx import stack as stack_lib
 from quiltx.cli_common import add_catalog_args
 from quiltx.tools.ecs import shell
 
@@ -49,16 +50,13 @@ def _format_launch_failures(failures: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
+@stack_lib.catalog_command(auth=False)
+def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
-        catalog_name = shell._resolve_catalog_name(args.catalog)
-        payload = shell._load_stack_payload(catalog_name)
+        payload = shell._load_stack_payload(catalog.catalog_name)
         if not payload:
             raise ValueError(
-                f"No cached stack payload found for '{catalog_name}'. Run 'quiltx stack cfn' first."
+                f"No cached stack payload found for '{catalog.catalog_name}'. Run 'quiltx stack cfn' first."
             )
 
         stack_name = payload.get("stack_name")
@@ -139,3 +137,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return _run(args)
