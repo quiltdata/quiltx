@@ -132,8 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
         "s3_uri",
         help=(
             "S3 URI to reindex, e.g. 's3://my-bucket/some/prefix/'. "
-            "Use 's3://my-bucket/' to reindex the whole bucket (this still "
-            "preserves indices unless --wipe is also passed)."
+            "Use 's3://my-bucket/' to reindex the whole bucket (this wipes "
+            "and recreates the bucket's ES indices)."
         ),
     )
     reindex_parser.add_argument(
@@ -153,14 +153,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Number of sample keys to print in --dry-run mode (default: 10).",
-    )
-    reindex_parser.add_argument(
-        "--wipe",
-        action="store_true",
-        help=(
-            "Force a wipe + recreate of the bucket's ES indices. By default a "
-            "prefix reindex leaves indices in place."
-        ),
     )
 
     return parser
@@ -282,8 +274,6 @@ def _reindex_post(bucket_name: str, prefix: str, args: argparse.Namespace) -> in
         payload: dict[str, Any] = {}
         if prefix:
             payload["prefix"] = prefix
-        if args.wipe:
-            payload["wipe"] = True
 
         http = quilt3_session.get_session()
         response = http.post(url, json=payload)

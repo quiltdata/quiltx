@@ -1512,17 +1512,13 @@ def test_reindex_arg_parser_defaults() -> None:
     assert args.action == "reindex"
     assert args.s3_uri == "s3://b/p/"
     assert args.dry_run is False
-    assert args.wipe is False
     assert args.sample == 10
 
 
 def test_reindex_arg_parser_flags() -> None:
     parser = bucket_tool.build_parser()
-    args = parser.parse_args(
-        ["reindex", "s3://b/p/", "--dry-run", "--sample", "3", "--wipe"]
-    )
+    args = parser.parse_args(["reindex", "s3://b/p/", "--dry-run", "--sample", "3"])
     assert args.dry_run is True
-    assert args.wipe is True
     assert args.sample == 3
 
 
@@ -1615,7 +1611,7 @@ def test_reindex_post_sends_prefix(monkeypatch, capsys) -> None:
     assert "Enqueued reindex for s3://b/some/prefix/" in out
 
 
-def test_reindex_post_with_wipe_flag(monkeypatch) -> None:
+def test_reindex_post_normalizes_registry_url_trailing_slash(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class FakeResponse:
@@ -1638,11 +1634,10 @@ def test_reindex_post_with_wipe_flag(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
     monkeypatch.setitem(sys.modules, "quilt3.session", fake_session_module)
 
-    rc = bucket_tool.main(["reindex", "s3://b/p/", "--wipe"])
+    rc = bucket_tool.main(["reindex", "s3://b/p/"])
     assert rc == 0
-    # Trailing slash on registry url should be normalized.
     assert captured["url"] == "https://registry.example.com/api/admin/reindex/b"
-    assert captured["json"] == {"prefix": "p/", "wipe": True}
+    assert captured["json"] == {"prefix": "p/"}
 
 
 def test_reindex_post_no_prefix_omits_field(monkeypatch) -> None:
