@@ -1463,3 +1463,260 @@ def test_cmd_profile_no_matching_profile(monkeypatch, capsys) -> None:
     monkeypatch.setattr(bucket_tool.boto3, "Session", FakeSession)
     assert bucket_tool.main(["profile", "nope"]) == 1
     assert "No configured profile" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# `quiltx bucket reindex` tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_s3_uri_full() -> None:
+    assert bucket_tool.parse_s3_uri("s3://my-bucket/some/prefix/") == (
+        "my-bucket",
+        "some/prefix/",
+    )
+
+
+def test_parse_s3_uri_bucket_only() -> None:
+    # No trailing slash => empty prefix.
+    assert bucket_tool.parse_s3_uri("s3://my-bucket") == ("my-bucket", "")
+
+
+def test_parse_s3_uri_bucket_root_with_slash() -> None:
+    assert bucket_tool.parse_s3_uri("s3://my-bucket/") == ("my-bucket", "")
+
+
+def test_parse_s3_uri_bucket_with_key() -> None:
+    assert bucket_tool.parse_s3_uri("s3://my-bucket/x") == ("my-bucket", "x")
+
+
+def test_parse_s3_uri_rejects_non_s3() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        bucket_tool.parse_s3_uri("https://example.com/foo")
+
+
+def test_parse_s3_uri_rejects_empty_bucket() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        bucket_tool.parse_s3_uri("s3://")
+    with pytest.raises(ValueError):
+        bucket_tool.parse_s3_uri("s3:///foo")
+
+
+def test_reindex_arg_parser_defaults() -> None:
+    parser = bucket_tool.build_parser()
+    args = parser.parse_args(["reindex", "s3://b/p/"])
+    assert args.action == "reindex"
+    assert args.s3_uri == "s3://b/p/"
+    assert args.dry_run is False
+    assert args.sample == 10
+
+
+def test_reindex_arg_parser_flags() -> None:
+    parser = bucket_tool.build_parser()
+    args = parser.parse_args(["reindex", "s3://b/p/", "--dry-run", "--sample", "3"])
+    assert args.dry_run is True
+    assert args.sample == 3
+
+
+def test_reindex_dry_run_lists_keys(monkeypatch, capsys) -> None:
+    """Dry-run lists keys via list_object_versions and does NOT POST."""
+
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "b"},
+    )
+    s3_stubber.add_response(
+        "list_object_versions",
+        {
+            "Versions": [
+                {"Key": "p/one", "VersionId": "v1"},
+                {"Key": "p/two", "VersionId": "v2"},
+            ],
+            "DeleteMarkers": [
+                {"Key": "p/three", "VersionId": "v3"},
+            ],
+            "IsTruncated": False,
+        },
+        {"Bucket": "b", "Prefix": "p/"},
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name="us-west-2")
+    sts_client = _client("sts", region_name="us-west-2")
+    session = FakeSession(s3_client, sns_client, sts_client)
+    monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
+
+    # Make sure we never reach the registry POST.
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("dry-run must not import quilt3.session")
+
+    fake_quilt3_session = ModuleType("quilt3.session")
+    fake_quilt3_session.get_registry_url = _boom  # type: ignore[attr-defined]
+    fake_quilt3_session.get_session = _boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_quilt3_session)
+
+    rc = bucket_tool.main(["reindex", "s3://b/p/", "--dry-run"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Dry-run" in out
+    assert "Object versions found: 3" in out
+    assert "p/one" in out
+    assert "p/three" in out
+    assert "delete-marker" in out
+
+
+def test_reindex_post_sends_prefix(monkeypatch, capsys) -> None:
+    """Non-dry-run posts {"prefix": ...} to /api/admin/reindex/<bucket>."""
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        ok = True
+        text = "{}"
+
+        def json(self):
+            return {}
+
+    class FakeHttpSession:
+        def post(self, url, json=None, **_kwargs):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    fake_session_module = ModuleType("quilt3.session")
+    fake_session_module.get_registry_url = lambda: "https://registry.example.com"  # type: ignore[attr-defined]
+    fake_session_module.get_session = lambda: FakeHttpSession()  # type: ignore[attr-defined]
+
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_session_module)
+
+    rc = bucket_tool.main(["reindex", "s3://b/some/prefix/"])
+    assert rc == 0
+
+    assert captured["url"] == "https://registry.example.com/api/admin/reindex/b"
+    assert captured["json"] == {"prefix": "some/prefix/"}
+
+    out = capsys.readouterr().out
+    assert "Enqueued reindex for s3://b/some/prefix/" in out
+
+
+def test_reindex_post_normalizes_registry_url_trailing_slash(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        ok = True
+        text = "{}"
+
+    class FakeHttpSession:
+        def post(self, url, json=None, **_kwargs):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    fake_session_module = ModuleType("quilt3.session")
+    fake_session_module.get_registry_url = lambda: "https://registry.example.com/"  # type: ignore[attr-defined]
+    fake_session_module.get_session = lambda: FakeHttpSession()  # type: ignore[attr-defined]
+
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_session_module)
+
+    rc = bucket_tool.main(["reindex", "s3://b/p/"])
+    assert rc == 0
+    assert captured["url"] == "https://registry.example.com/api/admin/reindex/b"
+    assert captured["json"] == {"prefix": "p/"}
+
+
+def test_reindex_post_no_prefix_omits_field(monkeypatch) -> None:
+    """``s3://bucket/`` should POST an empty body (whole-bucket reindex)."""
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        ok = True
+        text = "{}"
+
+    class FakeHttpSession:
+        def post(self, url, json=None, **_kwargs):
+            captured["json"] = json
+            return FakeResponse()
+
+    fake_session_module = ModuleType("quilt3.session")
+    fake_session_module.get_registry_url = lambda: "https://registry.example.com"  # type: ignore[attr-defined]
+    fake_session_module.get_session = lambda: FakeHttpSession()  # type: ignore[attr-defined]
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_session_module)
+
+    rc = bucket_tool.main(["reindex", "s3://b/"])
+    assert rc == 0
+    assert captured["json"] == {}
+
+
+def test_reindex_post_409_returns_error(monkeypatch, capsys) -> None:
+    class FakeResponse:
+        status_code = 409
+        ok = False
+        text = "Indexing already in progress."
+
+    class FakeHttpSession:
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    fake_session_module = ModuleType("quilt3.session")
+    fake_session_module.get_registry_url = lambda: "https://registry.example.com"  # type: ignore[attr-defined]
+    fake_session_module.get_session = lambda: FakeHttpSession()  # type: ignore[attr-defined]
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_session_module)
+
+    rc = bucket_tool.main(["reindex", "s3://b/p/"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "already in progress" in err
+
+
+def test_reindex_post_404_returns_error(monkeypatch, capsys) -> None:
+    class FakeResponse:
+        status_code = 404
+        ok = False
+        text = "Bucket not found"
+
+    class FakeHttpSession:
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    fake_session_module = ModuleType("quilt3.session")
+    fake_session_module.get_registry_url = lambda: "https://registry.example.com"  # type: ignore[attr-defined]
+    fake_session_module.get_session = lambda: FakeHttpSession()  # type: ignore[attr-defined]
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_session_module)
+
+    rc = bucket_tool.main(["reindex", "s3://b/p/"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not registered in this catalog" in err
+
+
+def test_reindex_rejects_non_s3_uri(capsys) -> None:
+    rc = bucket_tool.main(["reindex", "https://nope.example.com/x"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "s3://" in err

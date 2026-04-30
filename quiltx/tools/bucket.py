@@ -118,6 +118,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test_parser.add_argument("bucket_name", help="S3 bucket name to test.")
 
+    reindex_parser = subparsers.add_parser(
+        "reindex",
+        prog="quiltx bucket reindex",
+        help=(
+            "Re-scan an S3 prefix on a registered bucket so that newly arrived "
+            "objects (added without S3 notifications) get into the search index. "
+            "Calls POST /api/admin/reindex/<bucket> with the prefix; the bucket's "
+            "existing ES indices are NOT wiped."
+        ),
+    )
+    reindex_parser.add_argument(
+        "s3_uri",
+        help=(
+            "S3 URI to reindex, e.g. 's3://my-bucket/some/prefix/'. "
+            "Use 's3://my-bucket/' to reindex the whole bucket (this wipes "
+            "and recreates the bucket's ES indices)."
+        ),
+    )
+    reindex_parser.add_argument(
+        "--profile",
+        help="AWS profile to use for the dry-run S3 listing.",
+    )
+    reindex_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "List a sample of keys under the prefix and print the count; "
+            "do NOT POST to the registry."
+        ),
+    )
+    reindex_parser.add_argument(
+        "--sample",
+        type=int,
+        default=10,
+        help="Number of sample keys to print in --dry-run mode (default: 10).",
+    )
+
     return parser
 
 
@@ -135,9 +172,141 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_profile(args)
     if args.action == "test":
         return _cmd_test(args)
+    if args.action == "reindex":
+        return _cmd_reindex(args)
 
     parser.print_help()
     return 1
+
+
+def parse_s3_uri(uri: str) -> tuple[str, str]:
+    """Parse an ``s3://bucket/prefix`` URI into ``(bucket, prefix)``.
+
+    Raises ``ValueError`` for malformed input.
+    """
+    if not uri.startswith("s3://"):
+        raise ValueError(
+            f"Expected an s3:// URI, got {uri!r}. "
+            "Example: s3://my-bucket/some/prefix/"
+        )
+    rest = uri[len("s3://") :]
+    if not rest:
+        raise ValueError("S3 URI is missing a bucket name.")
+    if "/" in rest:
+        bucket, prefix = rest.split("/", 1)
+    else:
+        bucket, prefix = rest, ""
+    if not bucket:
+        raise ValueError(f"S3 URI has an empty bucket name: {uri!r}")
+    return bucket, prefix
+
+
+def _cmd_reindex(args: argparse.Namespace) -> int:
+    try:
+        bucket_name, prefix = parse_s3_uri(args.s3_uri)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.dry_run:
+        return _reindex_dry_run(bucket_name, prefix, args)
+    return _reindex_post(bucket_name, prefix, args)
+
+
+def _reindex_dry_run(bucket_name: str, prefix: str, args: argparse.Namespace) -> int:
+    """List a sample of keys under *prefix* without POSTing to the registry."""
+    try:
+        session, s3_client, _bucket_region, _resolved_profile = (
+            bucket_lib.resolve_bucket_session(
+                bucket_name,
+                args.profile,
+                assume_yes=True,
+            )
+        )
+        if session is None:
+            return 1
+
+        paginator = s3_client.get_paginator("list_object_versions")
+        sample: list[str] = []
+        seen = 0
+        sample_limit = max(0, args.sample)
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            for entry in page.get("Versions") or []:
+                seen += 1
+                if len(sample) < sample_limit:
+                    sample.append(str(entry.get("Key", "")))
+            for entry in page.get("DeleteMarkers") or []:
+                seen += 1
+                if len(sample) < sample_limit:
+                    sample.append(str(entry.get("Key", "")) + "  (delete-marker)")
+
+        print(f"Dry-run: would reindex prefix {prefix!r} on bucket {bucket_name!r}.")
+        print(f"  Object versions found: {seen}")
+        if sample:
+            shown = min(sample_limit, len(sample))
+            print(f"  Sample keys ({shown}):")
+            for key in sample[:shown]:
+                print(f"    {key}")
+        elif seen == 0:
+            print("  (no object versions matched this prefix)")
+        else:
+            print("  (--sample 0: key display suppressed)")
+        return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+@auto_login
+def _reindex_post(bucket_name: str, prefix: str, args: argparse.Namespace) -> int:
+    try:
+        from quilt3 import session as quilt3_session
+
+        registry_url = quilt3_session.get_registry_url()
+        if not registry_url:
+            print(
+                "Error: no Quilt registry is configured. Run `quilt3 config` first.",
+                file=sys.stderr,
+            )
+            return 1
+
+        url = f"{registry_url.rstrip('/')}/api/admin/reindex/{bucket_name}"
+        payload: dict[str, Any] = {}
+        if prefix:
+            payload["prefix"] = prefix
+
+        http = quilt3_session.get_session()
+        response = http.post(url, json=payload)
+        if response.status_code == 409:
+            print(
+                f"Error: a reindex is already in progress for "
+                f"s3://{bucket_name}/{prefix} (HTTP 409).",
+                file=sys.stderr,
+            )
+            return 1
+        if response.status_code == 404:
+            print(
+                f"Error: bucket {bucket_name!r} is not registered in this catalog.",
+                file=sys.stderr,
+            )
+            return 1
+        if not response.ok:
+            print(
+                f"Error: registry returned HTTP {response.status_code}: {response.text}",
+                file=sys.stderr,
+            )
+            return 1
+
+        target = f"s3://{bucket_name}/{prefix}" if prefix else f"s3://{bucket_name}"
+        print(f"Enqueued reindex for {target}.")
+        if not prefix:
+            print("(no prefix supplied — full bucket reindex)")
+        return 0
+    except Exception as exc:
+        if "Authentication failed" in str(exc):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _ensure_stack_payload(
