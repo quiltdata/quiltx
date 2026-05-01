@@ -7,25 +7,18 @@ from unittest.mock import patch
 
 from quiltx import credentials
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _mock_no_keyring(monkeypatch):
-    """Patch credentials so _keyring_available() returns False."""
     monkeypatch.setattr(credentials, "_keyring_available", lambda: False)
 
 
 def _use_tmp_fallback(monkeypatch, tmp_path):
-    """Redirect the file-fallback and index paths to tmp_path."""
     monkeypatch.setattr(
         credentials, "_fallback_path", lambda: tmp_path / "credentials.json"
     )
     monkeypatch.setattr(
         credentials, "_index_path", lambda: tmp_path / "credentials_index.json"
     )
-    # Reset the warn flag so tests don't bleed into each other
     monkeypatch.setattr(credentials, "_FILE_FALLBACK_WARNED", False)
 
 
@@ -44,26 +37,44 @@ def test_file_fallback_set_and_get(tmp_path, monkeypatch, capsys):
     _mock_no_keyring(monkeypatch)
     _use_tmp_fallback(monkeypatch, tmp_path)
 
-    credentials.set("nightly.quilttest.com", "alice", "s3cr3t")
+    credentials.set("nightly.quilttest.com", "qk_test_value")
     result = credentials.get("nightly.quilttest.com")
     assert result is not None
-    assert result["username"] == "alice"
-    assert result["secret"] == "s3cr3t"
+    assert result["api_key"] == "qk_test_value"
+    # Paste-only bootstrap leaves metadata null
+    assert result.get("name") is None
+    assert result.get("expires_at") is None
 
     # Warning should have been printed
     captured = capsys.readouterr()
     assert "WARNING" in captured.err
 
 
+def test_file_fallback_set_with_metadata(tmp_path, monkeypatch):
+    _mock_no_keyring(monkeypatch)
+    _use_tmp_fallback(monkeypatch, tmp_path)
+
+    credentials.set(
+        "nightly.quilttest.com",
+        "qk_named",
+        name="ci-runner",
+        expires_at=1_800_000_000,
+    )
+    result = credentials.get("nightly.quilttest.com")
+    assert result is not None
+    assert result["api_key"] == "qk_named"
+    assert result["name"] == "ci-runner"
+    assert result["expires_at"] == 1_800_000_000
+
+
 def test_file_fallback_delete_idempotent(tmp_path, monkeypatch):
     _mock_no_keyring(monkeypatch)
     _use_tmp_fallback(monkeypatch, tmp_path)
 
-    credentials.set("nightly.quilttest.com", "alice", "s3cr3t")
+    credentials.set("nightly.quilttest.com", "qk_value")
     credentials.delete("nightly.quilttest.com")
     assert credentials.get("nightly.quilttest.com") is None
-    # Second delete is a no-op
-    credentials.delete("nightly.quilttest.com")
+    credentials.delete("nightly.quilttest.com")  # idempotent
 
 
 def test_file_fallback_has_credentials(tmp_path, monkeypatch):
@@ -71,7 +82,7 @@ def test_file_fallback_has_credentials(tmp_path, monkeypatch):
     _use_tmp_fallback(monkeypatch, tmp_path)
 
     assert not credentials.has_credentials("nightly.quilttest.com")
-    credentials.set("nightly.quilttest.com", "alice", "s3cr3t")
+    credentials.set("nightly.quilttest.com", "qk_value")
     assert credentials.has_credentials("nightly.quilttest.com")
 
 
@@ -79,34 +90,49 @@ def test_file_fallback_list(tmp_path, monkeypatch):
     _mock_no_keyring(monkeypatch)
     _use_tmp_fallback(monkeypatch, tmp_path)
 
-    credentials.set("a.example.com", "alice", "pass1")
-    credentials.set("b.example.com", "bob", "pass2")
+    credentials.set("a.example.com", "qk_a", name="alice-key")
+    credentials.set("b.example.com", "qk_b")
 
     entries = credentials.catalog_list()
     dns_list = [e[0] for e in entries]
     assert "a.example.com" in dns_list
     assert "b.example.com" in dns_list
-    # Secrets must not be exposed
-    for _, username, _ in entries:
-        assert username in {"alice", "bob"}
+    # Entries carry full metadata
+    by_dns = dict(entries)
+    assert by_dns["a.example.com"]["api_key"] == "qk_a"
+    assert by_dns["a.example.com"]["name"] == "alice-key"
 
 
 def test_public_aliases_match_internal_names():
-    """Spec calls the public API set() and list() — internal store/catalog_list are aliased."""
     assert credentials.set is credentials.store
     assert credentials.list is credentials.catalog_list
 
 
 def test_file_mode_600(tmp_path, monkeypatch):
-    """File-fallback credentials file should be mode 0600."""
     _mock_no_keyring(monkeypatch)
     _use_tmp_fallback(monkeypatch, tmp_path)
 
-    credentials.set("nightly.quilttest.com", "alice", "s3cr3t")
+    credentials.set("nightly.quilttest.com", "qk_value")
     cred_file = tmp_path / "credentials.json"
     assert cred_file.exists()
     mode = oct(cred_file.stat().st_mode)
     assert mode.endswith("600"), f"Expected 0600 mode, got {mode}"
+
+
+def test_legacy_username_secret_entry_ignored(tmp_path, monkeypatch):
+    """Old {username, secret} entries are not surfaced as API-key entries."""
+    _mock_no_keyring(monkeypatch)
+    _use_tmp_fallback(monkeypatch, tmp_path)
+
+    import json
+
+    path = tmp_path / "credentials.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"old.example.com": {"username": "u", "secret": "s"}}))
+
+    assert credentials.get("old.example.com") is None
+    assert not credentials.has_credentials("old.example.com")
+    assert credentials.catalog_list() == []
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +141,6 @@ def test_file_mode_600(tmp_path, monkeypatch):
 
 
 def test_keyring_list_via_index(tmp_path, monkeypatch):
-    """list() returns entries from the index when keyring is active."""
     monkeypatch.setattr(credentials, "_keyring_available", lambda: True)
     monkeypatch.setattr(
         credentials, "_index_path", lambda: tmp_path / "credentials_index.json"
@@ -137,7 +162,7 @@ def test_keyring_list_via_index(tmp_path, monkeypatch):
         patch("keyring.set_password", fake_set_password),
         patch("keyring.delete_password", fake_delete_password),
     ):
-        credentials.set("x.example.com", "charlie", "abc")
+        credentials.set("x.example.com", "qk_x")
         entries = credentials.catalog_list()
         assert any(e[0] == "x.example.com" for e in entries)
 

@@ -28,6 +28,11 @@ def _tmp_fallback(monkeypatch, tmp_path):
     monkeypatch.setattr(credentials, "_FILE_FALLBACK_WARNED", False)
 
 
+def _clear_env(monkeypatch):
+    monkeypatch.delenv("QUILTX_API_KEY", raising=False)
+    monkeypatch.delenv("QUILTX_NO_PROMPT", raising=False)
+
+
 def _fake_catalog(auth_required: bool = True) -> Catalog:
     return Catalog(
         catalog_name="test.example.com",
@@ -43,7 +48,6 @@ def _fake_catalog(auth_required: bool = True) -> Catalog:
 
 
 def test_ensure_auth_noop_when_not_required():
-    """ensure_auth() is a no-op when auth_required=False."""
     cat = _fake_catalog(auth_required=False)
     cat.ensure_auth()  # should not raise
 
@@ -54,119 +58,77 @@ def test_ensure_auth_noop_when_not_required():
 
 
 def test_ensure_auth_raises_no_credentials(tmp_path, monkeypatch):
-    """ensure_auth() raises when no credentials available in headless mode."""
     _no_keyring(monkeypatch)
     _tmp_fallback(monkeypatch, tmp_path)
-    monkeypatch.delenv("QUILTX_USERNAME", raising=False)
-    monkeypatch.delenv("QUILTX_PASSWORD", raising=False)
+    _clear_env(monkeypatch)
 
     cat = _fake_catalog(auth_required=True)
-    with pytest.raises(ValueError, match="No credentials available"):
+    with pytest.raises(ValueError, match="No API key available"):
         cat.ensure_auth()
 
 
 # ---------------------------------------------------------------------------
-# ensure_auth uses stored credentials
+# ensure_auth uses stored API key
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_auth_uses_keyring_credentials(tmp_path, monkeypatch):
-    """ensure_auth() retrieves credentials from keyring and binds quilt3."""
+def test_ensure_auth_uses_keyring_api_key(tmp_path, monkeypatch):
+    """ensure_auth() pulls API key from keyring and calls login_with_api_key."""
     _no_keyring(monkeypatch)
     _tmp_fallback(monkeypatch, tmp_path)
-    monkeypatch.delenv("QUILTX_USERNAME", raising=False)
-    monkeypatch.delenv("QUILTX_PASSWORD", raising=False)
+    _clear_env(monkeypatch)
 
-    # Store a fake refresh token (long enough to pass validate check)
-    fake_token = "eyJ" + "a" * 60  # looks like a JWT
-    credentials.store("test.example.com", "alice", fake_token)
+    credentials.store("test.example.com", "qk_stored")
 
-    validated = []
-    logged_in = []
-
-    def fake_validate(url, token):
-        validated.append((url, token))
-        return True  # treat as valid refresh token
-
-    def fake_login_with_token(token):
-        logged_in.append(token)
-
-    def fake_set_global_config(url, **kw):
-        pass
+    bound: list[str] = []
+    logged_in: list[str] = []
 
     cat = _fake_catalog(auth_required=True)
 
     with (
-        patch("quiltx.quilt_auth.validate_refresh_token", fake_validate),
-        patch("quiltx.quilt3_facade.login_with_token", fake_login_with_token),
-        patch("quiltx.quilt3_facade.set_global_config", fake_set_global_config),
+        patch(
+            "quiltx.quilt3_facade.bind_active_catalog",
+            lambda url: bound.append(url) or "TOKEN",
+        ),
+        patch(
+            "quiltx.quilt3_facade.login_with_api_key",
+            lambda key: logged_in.append(key),
+        ),
     ):
         cat.ensure_auth()
 
-    assert len(validated) == 1
-    assert len(logged_in) == 1
-    assert logged_in[0] == fake_token
+    assert bound == ["https://test.example.com"]
+    assert logged_in == ["qk_stored"]
 
 
 # ---------------------------------------------------------------------------
-# ensure_auth exchanges password for refresh token
+# ensure_auth(skip_keyring=True) bypasses stored entry
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_auth_exchanges_password_for_token(tmp_path, monkeypatch):
-    """When stored secret fails token validation, treat as password and acquire token."""
+def test_ensure_auth_skip_keyring_bypasses_stored(tmp_path, monkeypatch):
     _no_keyring(monkeypatch)
     _tmp_fallback(monkeypatch, tmp_path)
-    monkeypatch.delenv("QUILTX_USERNAME", raising=False)
-    monkeypatch.delenv("QUILTX_PASSWORD", raising=False)
+    _clear_env(monkeypatch)
 
-    credentials.store("test.example.com", "alice", "plaintext-password")
-
-    acquired = []
-    logged_in = []
-
-    def fake_validate(url, token):
-        return False  # password fails validation
-
-    def fake_acquire(url, username, password):
-        acquired.append((url, username, password))
-        return "new-refresh-token"
-
-    def fake_login_with_token(token):
-        logged_in.append(token)
-
-    def fake_set_global_config(url, **kw):
-        pass
+    credentials.store("test.example.com", "qk_stale")
 
     cat = _fake_catalog(auth_required=True)
 
-    with (
-        patch("quiltx.quilt_auth.validate_refresh_token", fake_validate),
-        patch("quiltx.quilt_auth.acquire_refresh_token", fake_acquire),
-        patch("quiltx.quilt3_facade.login_with_token", fake_login_with_token),
-        patch("quiltx.quilt3_facade.set_global_config", fake_set_global_config),
-    ):
-        cat.ensure_auth()
-
-    assert acquired == [("https://test.example.com", "alice", "plaintext-password")]
-    assert logged_in == ["new-refresh-token"]
-    # New token should be stored in keyring
-    stored = credentials.get("test.example.com")
-    assert stored is not None
-    assert stored["secret"] == "new-refresh-token"
+    with pytest.raises(ValueError, match="No API key available"):
+        cat.ensure_auth(skip_keyring=True)
 
 
 # ---------------------------------------------------------------------------
-# @catalog_command retry uses ensure_auth
+# @catalog_command retry uses ensure_auth(skip_keyring=True)
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_command_retry_uses_ensure_auth(monkeypatch):
-    """On auth failure, @catalog_command retries after ensure_auth."""
+def test_catalog_command_retry_skips_keyring(monkeypatch):
+    """On auth failure, the retry calls ensure_auth(skip_keyring=True)."""
     call_count = 0
-    ensure_auth_calls = []
+    ensure_auth_calls: list[dict] = []
 
-    # Create a catalog with auth_required=False to bypass real credential lookup
     cat = Catalog(
         catalog_name="retry.example.com",
         catalog_url="https://retry.example.com",
@@ -176,10 +138,11 @@ def test_catalog_command_retry_uses_ensure_auth(monkeypatch):
     monkeypatch.setattr(
         "quiltx.stack.resolve_catalog_context", lambda _catalog=None, **kw: cat
     )
-    # Track ensure_auth calls
-    monkeypatch.setattr(
-        Catalog, "ensure_auth", lambda self, args=None: ensure_auth_calls.append(1)
-    )
+
+    def fake_ensure_auth(self, args=None, *, skip_keyring=False):
+        ensure_auth_calls.append({"skip_keyring": skip_keyring})
+
+    monkeypatch.setattr(Catalog, "ensure_auth", fake_ensure_auth)
 
     @catalog_command
     def guarded(stack_arg: Catalog) -> str:
@@ -192,3 +155,5 @@ def test_catalog_command_retry_uses_ensure_auth(monkeypatch):
     result = guarded()
     assert result == "ok"
     assert call_count == 2
+    # First ensure_auth from invoke(); retry skips keyring.
+    assert any(c["skip_keyring"] for c in ensure_auth_calls)

@@ -1,12 +1,15 @@
-"""Per-DNS credential storage for quiltx.
+"""Per-DNS API-key storage for quiltx.
 
 Backed by the ``keyring`` package (cross-platform). On Linux without a
 keyring backend, falls back to a file at
 ``user_data_path("quiltx")/credentials.json`` with mode 0600 and a loud
 first-run warning.
 
-Storage shape (per keyring entry, JSON-encoded):
-    {"username": "<u>", "secret": "<password-or-refresh-token>"}
+Storage shape (per keyring entry, JSON-encoded), per spec [05 §3]:
+    {"api_key": "qk_...", "name": <str|null>, "expires_at": <unix-ts|null>}
+
+``name`` and ``expires_at`` are nullable — the paste-only bootstrap leaves
+them ``null``. Future ``quiltx catalog login --create`` may populate them.
 
 Service name in keyring: ``quiltx``
 Username key: canonical DNS (e.g. ``nightly.quilttest.com``)
@@ -17,13 +20,18 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
-from typing import Mapping
+from typing import TypedDict
 
 from platformdirs import user_data_path
 
 _KEYRING_SERVICE = "quiltx"
+
+
+class CredentialEntry(TypedDict, total=False):
+    api_key: str
+    name: str | None
+    expires_at: int | None
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +78,7 @@ def _warn_file_fallback() -> None:
         _FILE_FALLBACK_WARNED = True
 
 
-def _read_fallback() -> dict[str, dict[str, str]]:
+def _read_fallback() -> dict[str, CredentialEntry]:
     path = _fallback_path()
     if not path.exists():
         return {}
@@ -80,7 +88,7 @@ def _read_fallback() -> dict[str, dict[str, str]]:
         return {}
 
 
-def _write_fallback(data: dict[str, dict[str, str]]) -> None:
+def _write_fallback(data: dict[str, CredentialEntry]) -> None:
     path = _fallback_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -93,9 +101,9 @@ def _write_fallback(data: dict[str, dict[str, str]]) -> None:
 # ---------------------------------------------------------------------------
 # Index file for keyring-backed list()
 # ---------------------------------------------------------------------------
-# keyring has no enumerate-all API.  We maintain a lightweight
+# keyring has no enumerate-all API. We maintain a lightweight
 # user_data_path("quiltx")/credentials_index.json that tracks which DNS
-# names we've stored.  Written on set(), pruned on delete().
+# names we've stored. Written on set(), pruned on delete().
 
 
 def _index_path() -> Path:
@@ -140,7 +148,7 @@ def _remove_from_index(dns: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def get(dns: str) -> Mapping[str, str] | None:
+def get(dns: str) -> CredentialEntry | None:
     """Return stored credentials for *dns*, or None if not found."""
     if _keyring_available():
         import keyring
@@ -149,26 +157,43 @@ def get(dns: str) -> Mapping[str, str] | None:
         if raw is None:
             return None
         try:
-            return json.loads(raw)
+            entry = json.loads(raw)
         except json.JSONDecodeError:
             return None
+        if not isinstance(entry, dict) or "api_key" not in entry:
+            return None
+        return CredentialEntry(**entry)
     else:
         data = _read_fallback()
-        return data.get(dns)
+        entry = data.get(dns)
+        if entry is None or "api_key" not in entry:
+            return None
+        return entry
 
 
-def store(dns: str, username: str, secret: str) -> None:
-    """Store credentials for *dns*."""
-    payload = json.dumps({"username": username, "secret": secret})
+def store(
+    dns: str,
+    api_key: str,
+    *,
+    name: str | None = None,
+    expires_at: int | None = None,
+) -> None:
+    """Store *api_key* for *dns* with optional metadata."""
+    payload: CredentialEntry = {
+        "api_key": api_key,
+        "name": name,
+        "expires_at": expires_at,
+    }
+    serialised = json.dumps(payload)
     if _keyring_available():
         import keyring
 
-        keyring.set_password(_KEYRING_SERVICE, dns, payload)
+        keyring.set_password(_KEYRING_SERVICE, dns, serialised)
         _add_to_index(dns)
     else:
         _warn_file_fallback()
         data = _read_fallback()
-        data[dns] = {"username": username, "secret": secret}
+        data[dns] = payload
         _write_fallback(data)
 
 
@@ -190,21 +215,19 @@ def delete(dns: str) -> None:
             _write_fallback(data)
 
 
-def catalog_list() -> list[tuple[str, str, datetime | None]]:
-    """List known DNS entries as (dns, username, last_used).
-
-    ``last_used`` is always None for now — keyring backends don't expose it.
-    """
-    results: list[tuple[str, str, datetime | None]] = []
+def catalog_list() -> list[tuple[str, CredentialEntry]]:
+    """List known DNS entries as ``(dns, entry)``."""
+    results: list[tuple[str, CredentialEntry]] = []
     if _keyring_available():
         for dns in _read_index():
             entry = get(dns)
             if entry is not None:
-                results.append((dns, str(entry.get("username", "")), None))
+                results.append((dns, entry))
     else:
         data = _read_fallback()
-        for dns, creds in data.items():
-            results.append((dns, creds.get("username", ""), None))
+        for dns, entry in data.items():
+            if "api_key" in entry:
+                results.append((dns, entry))
     return results
 
 

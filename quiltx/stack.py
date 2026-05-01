@@ -44,10 +44,9 @@ class Catalog(CatalogContext):
     auth_required: bool = field(default=True)
     _admin: AdminClients | None = field(default=None, init=False, repr=False)
     _region: str | None = field(default=None, init=False, repr=False)
-    # API-path credentials passed via Catalog.from_dns(username=..., password=...).
+    # API-path API key passed via Catalog.from_dns(api_key=...).
     # Used as the first step of the API resolver ladder; never set on the CLI path.
-    _api_username: str | None = field(default=None, init=False, repr=False)
-    _api_password: str | None = field(default=None, init=False, repr=False)
+    _api_key: str | None = field(default=None, init=False, repr=False)
 
     @property
     def region(self) -> str:
@@ -83,82 +82,61 @@ class Catalog(CatalogContext):
     def payload(self) -> Mapping[str, Any] | None:
         return load_stack_payload(self.catalog_name)
 
-    def boto3_session(self) -> Any:
-        # Don't cache — credentials.json may rotate between calls.
-        self.ensure_auth()
-        from quiltx.quilt3_facade import default_boto3_session
+    def aws_session(self, *, profile: str | None = None) -> Any:
+        """Return a plain boto3 session for AWS operations on this catalog.
 
-        return default_boto3_session()
+        Per spec [06 §3.3]: never imports quilt3 and never reads
+        Quilt-issued AWS credentials from credentials.json.
+        """
+        import boto3
+
+        return boto3.Session(profile_name=profile, region_name=self._region)
 
     def cfn_client(self, region: str | None = None) -> Any:
-        try:
-            return self.boto3_session().client("cloudformation", region_name=region)
-        except Exception:
-            import boto3
+        import boto3
 
-            return boto3.client("cloudformation", region_name=region)
+        return boto3.client("cloudformation", region_name=region or self._region)
 
-    def ensure_auth(self, args: Any = None) -> None:
-        """Bind quilt3's process-global state to this catalog.
+    def ensure_auth(self, args: Any = None, *, skip_keyring: bool = False) -> None:
+        """Bind quilt3's in-process session to this catalog.
 
-        No-op when ``auth_required=False`` (AWS-only / bootstrap commands).
+        Per spec [05 §5] / [06 §3.1]:
+        1. Resolve a single API key from the resolver ladder.
+        2. Bind catalog URL via ContextVar override (no config.yml write).
+        3. Call login_with_api_key().
 
-        Resolution order (CLI path when ``args`` provided, API path otherwise):
-        1. Walk the credential resolver to obtain (username, secret).
-        2. If secret looks like a password, acquire a refresh token via
-           POST /api/login and replace the keyring entry.
-        3. Under _QUILT3_LOCK: set_global_config + login_with_token.
-        4. Persist the (possibly updated) refresh token.
+        ``skip_keyring`` is set by the retry envelope after an auth failure
+        so the resolver re-prompts instead of replaying the bad keyring entry
+        ([06 §5 step 3]).
         """
         if not self.auth_required:
             return
 
-        from quiltx import credentials as creds_module
-        from quiltx import quilt_auth
         from quiltx.auth import CredentialError, resolve_api, resolve_cli
         from quiltx.quilt3_facade import (
             _QUILT3_LOCK,
-            login_with_token,
-            set_global_config,
+            bind_active_catalog,
+            login_with_api_key,
         )
 
         if args is not None:
             try:
-                resolved = resolve_cli(self, args)
+                resolved = resolve_cli(self, args, skip_keyring=skip_keyring)
             except CredentialError as exc:
                 raise ValueError(str(exc)) from exc
         else:
             try:
                 resolved = resolve_api(
                     self,
-                    username=self._api_username,
-                    password=self._api_password,
+                    api_key=self._api_key,
+                    skip_keyring=skip_keyring,
                 )
             except CredentialError as exc:
                 raise ValueError(str(exc)) from exc
 
-        username = resolved.username
-        secret = resolved.secret
-
-        # Determine if secret is already a refresh token or still a password.
-        # Heuristic: refresh tokens returned by the Quilt registry are long
-        # JWT-like strings (>50 chars). Passwords are shorter on average but
-        # there's no reliable discriminator — so we probe: validate the token
-        # first, and if it fails we treat it as a password and acquire a new one.
-        refresh_token: str
-        if quilt_auth.validate_refresh_token(self.catalog_url, secret):
-            refresh_token = secret
-        else:
-            # Treat secret as a password and exchange it for a refresh token.
-            refresh_token = quilt_auth.acquire_refresh_token(
-                self.catalog_url, username, secret
-            )
-            # Replace the stored secret with the refresh token.
-            creds_module.store(self.catalog_name, username, refresh_token)
-
         with _QUILT3_LOCK:
-            set_global_config(self.catalog_url)
-            login_with_token(refresh_token)
+            bind_active_catalog(self.catalog_url)
+            login_with_api_key(resolved.api_key)
 
     @classmethod
     def from_dns(
@@ -167,14 +145,13 @@ class Catalog(CatalogContext):
         *,
         source: CatalogContextSource,
         auth_required: bool = True,
-        username: str | None = None,
-        password: str | None = None,
+        api_key: str | None = None,
     ) -> "Catalog":
         """Build a Catalog from a bare DNS name.
 
-        ``username`` / ``password`` are the Story 5 API-path credentials; they
-        feed step 1 of the API resolver ladder and are used lazily on the
-        first ``ensure_auth()`` call.
+        ``api_key`` is the Story 5 API-path credential; it feeds step 1 of
+        the API resolver ladder and is used lazily on the first
+        ``ensure_auth()`` call.
         """
         catalog = cls(
             catalog_name=dns,
@@ -182,10 +159,8 @@ class Catalog(CatalogContext):
             source=source,
             auth_required=auth_required,
         )
-        if username is not None:
-            object.__setattr__(catalog, "_api_username", username)
-        if password is not None:
-            object.__setattr__(catalog, "_api_password", password)
+        if api_key is not None:
+            object.__setattr__(catalog, "_api_key", api_key)
         return catalog
 
 
@@ -204,14 +179,19 @@ def _verbose_active(parsed_args: Any) -> bool:
 
 
 def _probe_auth_source(catalog: "Catalog", parsed_args: Any) -> str:
-    """Return a short label describing the credential source without exchanging tokens."""
-    from quiltx.auth import CredentialError, resolve_cli
+    """Return a short label describing the credential source.
 
-    try:
-        resolved = resolve_cli(catalog, parsed_args)
-        return resolved.source
-    except CredentialError:
-        return "none"
+    Pure inspection — never prompts, never writes to keyring.
+    """
+    from quiltx import credentials as creds_module
+
+    if getattr(parsed_args, "api_key", None):
+        return "flag"
+    if os.environ.get("QUILTX_API_KEY"):
+        return "env"
+    if creds_module.has_credentials(catalog.catalog_name):
+        return "keyring"
+    return "none"
 
 
 def _print_verbose_preflight(
@@ -294,9 +274,11 @@ def catalog_command(
                     f"Session expired for {catalog.catalog_name}. Re-authenticating...",
                     file=sys.stderr,
                 )
-                # Per-catalog retry: re-run ensure_auth to refresh credentials.
-                catalog.ensure_auth(parsed_args)
-                return invoke()
+                # Per-catalog retry: re-run ensure_auth, skipping the keyring
+                # entry that just failed so the resolver falls through to
+                # prompt / env / flag (spec 06 §5 step 3).
+                catalog.ensure_auth(parsed_args, skip_keyring=True)
+                return wrapped(catalog, *args, **kwargs)
 
         return wrapper
 

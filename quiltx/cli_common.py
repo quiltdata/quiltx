@@ -16,8 +16,7 @@ def add_catalog_args(
         --verbose   Enable verbose output              (store_true)
 
     When auth_required is True also adds:
-        --username  Catalog username
-        --password  Catalog password
+        --api-key   Catalog API key (qk_...)
     """
     parser.add_argument(
         "--catalog",
@@ -27,12 +26,10 @@ def add_catalog_args(
     )
     if auth_required:
         parser.add_argument(
-            "--username",
-            help="Catalog username for authentication.",
-        )
-        parser.add_argument(
-            "--password",
-            help="Catalog password for authentication.",
+            "--api-key",
+            dest="api_key",
+            metavar="QK_...",
+            help="Catalog API key (qk_...). Also accepted via QUILTX_API_KEY.",
         )
     parser.add_argument(
         "--no-prompt",

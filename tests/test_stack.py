@@ -122,7 +122,11 @@ def test_catalog_command_retries_after_auth_failure(monkeypatch) -> None:
 
     # The ensure_auth on retry is tested in test_catalog_command_active_auth.py;
     # here we just verify that retry happens (call_count == 2).
-    monkeypatch.setattr(stack.Catalog, "ensure_auth", lambda self, args=None: None)
+    monkeypatch.setattr(
+        stack.Catalog,
+        "ensure_auth",
+        lambda self, args=None, *, skip_keyring=False: None,
+    )
 
     result = guarded()
 

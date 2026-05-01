@@ -49,7 +49,7 @@ def test_default_no_arg_shows_current(tmp_path, monkeypatch, capsys):
 def test_default_set_dns(tmp_path, monkeypatch, capsys):
     """Passing a known DNS sets the default catalog."""
     _setup_no_keyring(monkeypatch, tmp_path)
-    credentials.set("nightly.quilttest.com", "alice", "pass")
+    credentials.set("nightly.quilttest.com", "qk_value")
 
     result = default_cmd.main(["nightly.quilttest.com"])
     assert result == 0
@@ -61,7 +61,7 @@ def test_default_set_dns(tmp_path, monkeypatch, capsys):
 def test_default_set_url_normalised(tmp_path, monkeypatch):
     """A full URL is normalised to DNS before storing."""
     _setup_no_keyring(monkeypatch, tmp_path)
-    credentials.set("nightly.quilttest.com", "alice", "pass")
+    credentials.set("nightly.quilttest.com", "qk_value")
 
     result = default_cmd.main(["https://nightly.quilttest.com/"])
     assert result == 0

@@ -356,9 +356,21 @@ def _lightweight_stack_payload(
     region: str,
     catalog_config: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Build an in-memory stack payload from the Quilt session (no CFN calls)."""
-    session = stack.boto3_session()
-    account_id = session.client("sts").get_caller_identity()["Account"]
+    """Build an in-memory stack payload from the ambient AWS chain (no CFN calls).
+
+    Per spec [06 §3.3]: do not import quilt3; use boto3.Session(region_name=...)
+    against the ambient AWS credential chain. If that chain has no credentials,
+    boto3 raises NoCredentialsError, which we surface with a hint to configure AWS.
+    """
+    session = stack.aws_session()
+    try:
+        account_id = session.client("sts").get_caller_identity()["Account"]
+    except Exception as exc:
+        raise RuntimeError(
+            f"AWS credentials unavailable for {catalog_name}: {exc}. "
+            "Configure AWS credentials (e.g. AWS_PROFILE, ~/.aws/credentials) "
+            f"or run `quiltx catalog stack --catalog {catalog_name}` first."
+        ) from exc
 
     return {
         "catalog_name": catalog_name,

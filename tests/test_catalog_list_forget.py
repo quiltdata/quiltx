@@ -38,19 +38,20 @@ def test_list_empty(tmp_path, monkeypatch, capsys):
 def test_list_shows_entries(tmp_path, monkeypatch, capsys):
     """Stored entries appear in list output without secrets."""
     _setup_no_keyring(monkeypatch, tmp_path)
-    credentials.set("alpha.example.com", "alice", "s3cr3t1")
-    credentials.set("beta.example.com", "bob", "s3cr3t2")
+    credentials.set("alpha.example.com", "qk_alpha", name="alice-key")
+    credentials.set("beta.example.com", "qk_beta")
 
     result = list_cmd.main([])
     assert result == 0
     captured = capsys.readouterr()
     assert "alpha.example.com" in captured.out
     assert "beta.example.com" in captured.out
-    assert "alice" in captured.out
-    assert "bob" in captured.out
-    # Secrets must not appear
-    assert "s3cr3t1" not in captured.out
-    assert "s3cr3t2" not in captured.out
+    assert "alice-key" in captured.out
+    # Beta has no name → renders UNKNOWN per [05 §7]
+    assert "UNKNOWN" in captured.out
+    # API keys must not appear in output
+    assert "qk_alpha" not in captured.out
+    assert "qk_beta" not in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +62,7 @@ def test_list_shows_entries(tmp_path, monkeypatch, capsys):
 def test_forget_removes_entry(tmp_path, monkeypatch, capsys):
     """forget removes the keyring entry and prints confirmation."""
     _setup_no_keyring(monkeypatch, tmp_path)
-    credentials.set("nightly.quilttest.com", "alice", "pass")
+    credentials.set("nightly.quilttest.com", "qk_pass")
 
     result = forget_cmd.main(["nightly.quilttest.com"])
     assert result == 0
@@ -82,7 +83,7 @@ def test_forget_idempotent(tmp_path, monkeypatch, capsys):
 def test_forget_url_normalised(tmp_path, monkeypatch):
     """Full URL is normalised before deletion."""
     _setup_no_keyring(monkeypatch, tmp_path)
-    credentials.set("nightly.quilttest.com", "alice", "pass")
+    credentials.set("nightly.quilttest.com", "qk_pass")
 
     result = forget_cmd.main(["https://nightly.quilttest.com/"])
     assert result == 0
@@ -101,7 +102,7 @@ def test_forget_http_rejected(tmp_path, monkeypatch, capsys):
 def test_forget_does_not_touch_default(tmp_path, monkeypatch):
     """Forgetting the default catalog does NOT auto-elect another."""
     _setup_no_keyring(monkeypatch, tmp_path)
-    credentials.set("nightly.quilttest.com", "alice", "pass")
+    credentials.set("nightly.quilttest.com", "qk_pass")
     userconfig.set_default_catalog("nightly.quilttest.com")
 
     forget_cmd.main(["nightly.quilttest.com"])

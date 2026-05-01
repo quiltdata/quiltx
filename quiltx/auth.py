@@ -1,21 +1,25 @@
-"""Credential resolver for quiltx.
+"""API-key resolver for quiltx.
 
-Returns ``(username, secret, source)`` given a catalog and context.
+Returns ``(api_key, source)`` given a catalog and context.
 
-CLI ladder:
-  1. --username / --password flags (must appear together)
-  2. QUILTX_USERNAME / QUILTX_PASSWORD env vars (both or neither)
-  3. keyring entry for catalog.catalog_name
+CLI ladder ([05 §4]):
+  1. --api-key flag
+  2. QUILTX_API_KEY env var
+  3. Keyring entry for catalog.catalog_name
   4. Interactive prompt (only if TTY + not --no-prompt + not QUILTX_NO_PROMPT)
   5. Error
 
 API ladder (no CLI args, no TTY):
-  1. Constructor kwargs (username/password passed to Catalog.from_dns)
-  2. QUILTX_USERNAME / QUILTX_PASSWORD env vars
-  3. keyring entry for catalog.catalog_name
+  1. Constructor kwarg (api_key passed to Catalog.from_dns)
+  2. QUILTX_API_KEY env var
+  3. Keyring entry for catalog.catalog_name
   4. Error
 
 ``source`` is one of: "flag", "env", "keyring", "prompt".
+
+When ``skip_keyring=True`` is passed, step 3 is skipped — used by the retry
+envelope in @catalog_command after an auth failure to force re-prompt
+([06 §5 step 3]).
 """
 
 from __future__ import annotations
@@ -34,8 +38,7 @@ CredentialSource = Literal["flag", "env", "keyring", "prompt"]
 
 
 class ResolvedCredentials(NamedTuple):
-    username: str
-    secret: str
+    api_key: str
     source: CredentialSource
 
 
@@ -52,80 +55,101 @@ def _no_prompt_active(args: object | None) -> bool:
     return False
 
 
-def resolve_cli(catalog: "Catalog", args: object | None = None) -> ResolvedCredentials:
-    """Resolve credentials for a CLI invocation.
+def _generate_url_for(catalog: "Catalog") -> str:
+    return f"{catalog.catalog_url.rstrip('/')}/profile/api-keys"
+
+
+def resolve_cli(
+    catalog: "Catalog",
+    args: object | None = None,
+    *,
+    skip_keyring: bool = False,
+) -> ResolvedCredentials:
+    """Resolve API key for a CLI invocation.
 
     ``args`` is the parsed argparse.Namespace (may be None).
+    ``skip_keyring`` is set by the retry envelope after an auth failure.
     """
     dns = catalog.catalog_name
 
-    # 1. Flags
-    username_flag = getattr(args, "username", None)
-    password_flag = getattr(args, "password", None)
-    if username_flag and password_flag:
-        return ResolvedCredentials(username_flag, password_flag, "flag")
+    # 1. Flag
+    api_key_flag = getattr(args, "api_key", None)
+    if api_key_flag:
+        return ResolvedCredentials(api_key_flag, "flag")
 
-    # 2. Env vars
-    env_user = os.environ.get("QUILTX_USERNAME")
-    env_pass = os.environ.get("QUILTX_PASSWORD")
-    if env_user and env_pass:
-        return ResolvedCredentials(env_user, env_pass, "env")
+    # 2. Env var
+    env_key = os.environ.get("QUILTX_API_KEY")
+    if env_key:
+        return ResolvedCredentials(env_key, "env")
 
-    # 3. Keyring
-    stored = credentials.get(dns)
-    if stored:
-        return ResolvedCredentials(stored["username"], stored["secret"], "keyring")
+    # 3. Keyring (skipped on retry after auth failure)
+    if not skip_keyring:
+        stored = credentials.get(dns)
+        if stored is not None:
+            return ResolvedCredentials(stored["api_key"], "keyring")
 
     # 4. Interactive prompt
     if _no_prompt_active(args) or not sys.stdin.isatty():
         raise CredentialError(
-            f"No credentials available for {dns}. "
-            "Provide --username and --password, set QUILTX_USERNAME / QUILTX_PASSWORD, "
+            f"No API key available for {dns}. "
+            "Provide --api-key, set QUILTX_API_KEY, "
             "or run interactively to be prompted."
         )
 
-    print(f"No stored credentials for {dns}.", file=sys.stderr)
+    if skip_keyring:
+        print(
+            f"Stored API key for {dns} was rejected.",
+            file=sys.stderr,
+        )
+    else:
+        print(f"No stored API key for {dns}.", file=sys.stderr)
+    print(
+        f"Generate one at {_generate_url_for(catalog)}",
+        file=sys.stderr,
+    )
     try:
-        username = input("Username: ")
-        secret = getpass.getpass("Password: ")
+        api_key = getpass.getpass("API key: ")
     except (KeyboardInterrupt, EOFError):
         print("\nAborted.", file=sys.stderr)
         raise CredentialError(f"Authentication aborted for {dns}.")
 
-    # Store for future runs
-    credentials.set(dns, username, secret)
-    return ResolvedCredentials(username, secret, "prompt")
+    if not api_key.strip():
+        raise CredentialError(f"Empty API key entered for {dns}.")
+
+    # Store for future runs (paste-only bootstrap leaves name/expires_at null)
+    credentials.set(dns, api_key)
+    return ResolvedCredentials(api_key, "prompt")
 
 
 def resolve_api(
     catalog: "Catalog",
     *,
-    username: str | None = None,
-    password: str | None = None,
+    api_key: str | None = None,
+    skip_keyring: bool = False,
 ) -> ResolvedCredentials:
-    """Resolve credentials for an API (non-CLI) invocation.
+    """Resolve API key for an API (non-CLI) invocation.
 
     No prompting — API consumers use kwargs, env vars, or keyring.
     """
     dns = catalog.catalog_name
 
-    # 1. Constructor kwargs
-    if username and password:
-        return ResolvedCredentials(username, password, "flag")
+    # 1. Constructor kwarg
+    if api_key:
+        return ResolvedCredentials(api_key, "flag")
 
-    # 2. Env vars
-    env_user = os.environ.get("QUILTX_USERNAME")
-    env_pass = os.environ.get("QUILTX_PASSWORD")
-    if env_user and env_pass:
-        return ResolvedCredentials(env_user, env_pass, "env")
+    # 2. Env var
+    env_key = os.environ.get("QUILTX_API_KEY")
+    if env_key:
+        return ResolvedCredentials(env_key, "env")
 
     # 3. Keyring
-    stored = credentials.get(dns)
-    if stored:
-        return ResolvedCredentials(stored["username"], stored["secret"], "keyring")
+    if not skip_keyring:
+        stored = credentials.get(dns)
+        if stored is not None:
+            return ResolvedCredentials(stored["api_key"], "keyring")
 
     raise CredentialError(
-        f"No credentials available for {dns}. "
-        "Pass username/password to Catalog.from_dns, set QUILTX_USERNAME / "
-        "QUILTX_PASSWORD, or run a CLI command first to store credentials."
+        f"No API key available for {dns}. "
+        "Pass api_key=... to Catalog.from_dns, set QUILTX_API_KEY, "
+        "or run a CLI command first to store one."
     )
