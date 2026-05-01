@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.12.0] - 2026-04-28
 
-This release reshapes `quiltx`'s identity and auth surface around a per-catalog model. quiltx no longer mutates the user's global `quilt3.config()` to do its work, and credentials are stored per-DNS instead of last-write-wins. Scripts that referenced the old `quiltx stack ...` surface or `--catalog-name` will fail at argparse time — there are no aliases (pre-1.0).
+This release reshapes `quiltx`'s identity and auth surface around a per-catalog model and switches the stored secret from username/password+refresh-token to a single `qk_...` API key per DNS. quiltx no longer mutates the user's global `quilt3.config()` to do its work, no longer consumes `quilt3`'s `credentials.json`/`auth.json`, and no longer relies on Quilt-minted AWS session credentials — AWS calls flow through the standard boto3 chain. Scripts that referenced the old `quiltx stack ...` surface, `--catalog-name`, or `--username`/`--password` will fail at argparse time — there are no aliases (pre-1.0).
 
 ### Added
 
@@ -20,11 +20,13 @@ This release reshapes `quiltx`'s identity and auth surface around a per-catalog 
   - `quiltx catalog forget <dns>` — delete keyring entry for a DNS. Idempotent. Does not touch the default catalog or stack payload cache.
   - `quiltx catalog acl` (renamed from `quiltx stack acl`).
   - `quiltx catalog stack` (renamed from `quiltx stack cfn`).
-- Per-DNS credential storage backed by the system keyring (Keychain / Credential Manager / Secret Service). Linux without a keyring backend falls back to mode-0600 JSON at `user_data_path("quiltx")/credentials.json` with a loud first-run warning.
-- Per-catalog auth seam: `Catalog.ensure_auth()` mints refresh tokens via the catalog's `/api/login` endpoint, scopes `quilt3` globals to one catalog at a time under a serialising lock, and isolates token refresh per-DNS. Auth-error retries re-prompt only the catalog that failed.
-- Universal CLI flags: `--username`, `--password`, `--no-prompt`, `--verbose`. Verbose preflight prints a four-line `catalog/source/auth/region` block to stderr.
-- Environment variables: `QUILTX_CATALOG`, `QUILTX_USERNAME`, `QUILTX_PASSWORD`, `QUILTX_NO_PROMPT`, `QUILTX_VERBOSE`.
-- Public API for embedding: `from quiltx import Catalog; Catalog.from_dns(dns, source="flag", username=..., password=...)`. Constructor does no I/O; admin/boto3 access is lazy.
+- Per-DNS credential storage backed by the system keyring (Keychain / Credential Manager / Secret Service). Storage shape is `{api_key, name?, expires_at?}`; legacy `{username, secret}` entries from earlier development snapshots are ignored on read. Linux without a keyring backend falls back to mode-0600 JSON at `user_data_path("quiltx")/credentials.json` with a loud first-run warning.
+- Per-catalog auth seam: `Catalog.ensure_auth()` resolves one `qk_...` API key, then under a serialising lock binds `quilt3` to that catalog (via a one-time `ContextVar`-backed monkey-patch on `quilt3.session.get_registry_url`, no `config.yml` writes) and calls `login_with_api_key()`. Per-DNS isolation; auth-error retries re-prompt only the catalog that failed via `ensure_auth(skip_keyring=True)`.
+- Universal CLI flags: `--api-key`, `--no-prompt`, `--verbose`. Verbose preflight prints a four-line `catalog/source/auth/region` block to stderr; `_probe_auth_source()` is read-only (no prompts, no writes).
+- Environment variables: `QUILTX_CATALOG`, `QUILTX_API_KEY`, `QUILTX_NO_PROMPT`, `QUILTX_VERBOSE`.
+- Public API for embedding: `from quiltx import Catalog; Catalog.from_dns(dns, source="flag", api_key=...)`. Constructor does no I/O; admin/AWS access is lazy.
+- `quiltx catalog list` renders `DNS / KEY NAME / VALID UNTIL / STATUS` columns. Status is derived from local `expires_at` only (no network probe): `ACTIVE` / `EXPIRES SOON` (<14 days) / `EXPIRED` / `UNKNOWN`.
+- `Catalog.aws_session(profile=...)` returns a plain `boto3.Session` from the standard AWS SDK chain — no `quilt3` import, no Quilt-minted credentials. `cfn_client()` and `bucket._lightweight_stack_payload()` likewise use ambient AWS chain and surface a clear error if no AWS creds are available.
 - `quiltx bucket add --no-prompt` requires `--yes` (or `--dry-run`); profile-fallback prompts are also suppressed in headless mode.
 
 ### Changed
@@ -38,6 +40,9 @@ This release reshapes `quiltx`'s identity and auth surface around a per-catalog 
 - `quiltx stack` namespace and all its subcommands (replaced by `quiltx catalog`).
 - `quiltx stack catalog` (the URL-setter that wrote to `quilt3.config()` — global-state mutation no longer fits the multi-catalog model).
 - `quiltx.config.set_catalog_url` and `get_catalog_url` (zero callers post-multi-auth).
+- `--username` / `--password` flags and `QUILTX_USERNAME` / `QUILTX_PASSWORD` env vars (replaced by `--api-key` / `QUILTX_API_KEY`).
+- `quiltx/quilt_auth.py` (`acquire_refresh_token`, `validate_refresh_token`), `quilt3_facade.login_with_token`, and `quilt3_facade.default_boto3_session` — quiltx no longer mints refresh tokens or consumes Quilt-rotated AWS session credentials. AWS calls go through the standard SDK chain.
+- `Catalog.boto3_session()` (replaced by `Catalog.aws_session(profile=...)`).
 
 ### Fixed
 
