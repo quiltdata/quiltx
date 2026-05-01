@@ -113,17 +113,6 @@ def login_global(url: str | None = None) -> None:
         quilt3.login(url)
 
 
-def login_with_token(refresh_token: str) -> None:
-    """DEPRECATED — refresh-token path; removed once §8.6 lands.
-
-    Kept temporarily so ensure_auth() still imports during the §8.1–§8.2
-    transition. New code MUST use login_with_api_key().
-    """
-    from quilt3.session import login_with_token as _login_with_token
-
-    _login_with_token(refresh_token)
-
-
 def login_with_api_key(api_key: str) -> None:
     """Bind quilt3's in-process session to *api_key*.
 
@@ -133,16 +122,6 @@ def login_with_api_key(api_key: str) -> None:
     from quilt3.session import login_with_api_key as _login_with_api_key
 
     _login_with_api_key(api_key)
-
-
-def default_boto3_session() -> object:
-    """DEPRECATED — Quilt-minted AWS creds path; removed in §8.4.
-
-    Kept temporarily so Catalog.boto3_session() still imports.
-    """
-    from quilt3.session import get_boto3_session
-
-    return get_boto3_session()
 
 
 def admin_modules() -> AdminClients:
