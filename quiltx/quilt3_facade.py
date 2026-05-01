@@ -11,10 +11,10 @@ Implementation note: every function uses a local ``import quilt3`` so that
 test monkeypatches that replace ``sys.modules["quilt3"]`` take effect
 correctly, matching the pattern used before this facade existed.
 
-Threading note: ``_QUILT3_LOCK`` serialises the set_global_config +
-login_with_token + immediate quilt3 call sequence. This is a tripwire against
-accidental reentrancy (two Catalog admin operations interleaving in one call
-stack) — not a multi-thread feature.
+Threading note: ``_QUILT3_LOCK`` serialises the registry-URL rebind +
+login_with_api_key + immediate quilt3 call sequence. This is a tripwire
+against accidental reentrancy (two Catalog admin operations interleaving
+in one call stack) — not a multi-thread feature.
 """
 
 from __future__ import annotations
@@ -61,18 +61,32 @@ def login_global(url: str | None = None) -> None:
 
 
 def login_with_token(refresh_token: str) -> None:
-    """Exchange a refresh token for an access token and bind quilt3's session.
+    """DEPRECATED — refresh-token path; removed once §8.6 lands.
 
-    Calls ``quilt3.session.login_with_token(refresh_token)``.
-    Must be called after ``set_global_config`` so quilt3 knows which registry
-    URL to key the auth.json entry under.
+    Kept temporarily so ensure_auth() still imports during the §8.1–§8.2
+    transition. New code MUST use login_with_api_key().
     """
     from quilt3.session import login_with_token as _login_with_token
 
     _login_with_token(refresh_token)
 
 
+def login_with_api_key(api_key: str) -> None:
+    """Bind quilt3's in-process session to *api_key*.
+
+    Calls ``quilt3.session.login_with_api_key(api_key)``. Writes nothing to
+    disk — the key lives in a module-level global inside quilt3.session.
+    """
+    from quilt3.session import login_with_api_key as _login_with_api_key
+
+    _login_with_api_key(api_key)
+
+
 def default_boto3_session() -> object:
+    """DEPRECATED — Quilt-minted AWS creds path; removed in §8.4.
+
+    Kept temporarily so Catalog.boto3_session() still imports.
+    """
     from quilt3.session import get_boto3_session
 
     return get_boto3_session()
