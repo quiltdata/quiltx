@@ -601,7 +601,9 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
         clusters, services = _extract_ecs_resources(payload)
         if args.list:
             if not payload:
-                raise ValueError("No stack payload found. Run 'quiltx stack' first.")
+                raise ValueError(
+                    "No stack payload found. Run 'quiltx catalog stack <dns>' first."
+                )
             _render_resource_list(console, clusters, services)
             return 0
 
@@ -616,7 +618,8 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
         elif not cluster:
             if not payload:
                 raise ValueError(
-                    "No cluster provided and no stack payload found. Run 'quiltx stack' or pass --cluster."
+                    "No cluster provided and no stack payload found. "
+                    "Run 'quiltx catalog stack <dns>' or pass --cluster."
                 )
             default_cluster = _default_cluster_from_resources(clusters)
             if default_cluster:

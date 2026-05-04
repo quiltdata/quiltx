@@ -77,7 +77,8 @@ def _cluster_from_stack_payload(stack_payload: Mapping[str, object]) -> str:
                 return physical_id
 
     raise ValueError(
-        "Could not determine ECS cluster from cached stack payload. Run 'quiltx stack cfn' first."
+        "Could not determine ECS cluster from cached stack payload. "
+        "Run 'quiltx catalog stack <dns>' to refresh the cache."
     )
 
 
@@ -112,7 +113,8 @@ def get_network_config(
 
     if not registry_service:
         raise ValueError(
-            "Could not find RegistryService in cached stack payload. Run 'quiltx stack cfn' first."
+            "Could not find RegistryService in cached stack payload. "
+            "Run 'quiltx catalog stack <dns>' to refresh the cache."
         )
 
     response = ecs_client.describe_services(
@@ -217,7 +219,8 @@ def run_migration_for_catalog(
     stack_payload = stack_lib.load_stack_payload(catalog_name)
     if not stack_payload:
         raise ValueError(
-            f"No cached stack payload found for '{catalog_name}'. Run 'quiltx stack cfn' first."
+            f"No cached stack payload for {catalog_name}. "
+            f"Run 'quiltx catalog stack {catalog_name}' first."
         )
 
     stack_name = _coerce_str(stack_payload.get("stack_name"))

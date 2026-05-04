@@ -56,7 +56,8 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
         payload = shell._load_stack_payload(catalog.catalog_name)
         if not payload:
             raise ValueError(
-                f"No cached stack payload found for '{catalog.catalog_name}'. Run 'quiltx stack cfn' first."
+                f"No cached stack payload for {catalog.catalog_name}. "
+                f"Run 'quiltx catalog stack {catalog.catalog_name}' first."
             )
 
         stack_name = payload.get("stack_name")
@@ -73,7 +74,8 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
         cluster = shell._default_cluster_from_resources(clusters, stack_name)
         if not cluster:
             raise ValueError(
-                "Could not determine ECS cluster from cached stack payload. Run 'quiltx stack cfn' first."
+                "Could not determine ECS cluster from cached stack payload. "
+                "Run 'quiltx catalog stack <dns>' to refresh the cache."
             )
 
         ecs_client = boto3.client("ecs", region_name=region)

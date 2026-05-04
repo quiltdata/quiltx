@@ -189,7 +189,17 @@ class Catalog(CatalogContext):
 T = TypeVar("T")
 
 
-def _is_auth_error(exc: Exception) -> bool:
+def is_auth_error(exc: BaseException) -> bool:
+    """Return True if *exc* is the quilt3 sentinel for an auth-rejected call.
+
+    Used to decide whether to bubble up to ``catalog_command``'s re-prompt
+    loop (Story 8 per-catalog re-auth) versus rendering an inline error.
+
+    Match is on ``str(exc)`` rather than exception type because quilt3 raises
+    bare ``Exception("Authentication failed")`` from ``quilt3.session.login``
+    on a rejected key. If quilt3 ever introduces a typed error class, prefer
+    that here and treat the substring as a fallback.
+    """
     return "Authentication failed" in str(exc)
 
 
@@ -293,7 +303,7 @@ def catalog_command(
             try:
                 return invoke()
             except Exception as exc:
-                if not _is_auth_error(exc):
+                if not is_auth_error(exc):
                     raise
                 print(
                     f"Session expired for {catalog.catalog_name}. Re-authenticating...",
@@ -697,12 +707,12 @@ def ensure_min_version(payload: Mapping[str, Any] | None, min_version: str) -> b
     Returns True if payload has required version or higher.
     Returns False if payload is None, missing quiltx_version, or has lower version.
 
-    Tools should check this and prompt user to run 'quiltx stack' if False.
+    Tools should check this and prompt user to run 'quiltx catalog stack <dns>' if False.
 
     Example:
         payload = load_stack_payload(catalog_name)
         if not ensure_min_version(payload, "0.1.3"):
-            print("Stack data outdated. Run 'quiltx stack' to refresh.")
+            print("Stack data outdated. Run 'quiltx catalog stack <dns>' to refresh.")
             return 1
     """
     if not payload:

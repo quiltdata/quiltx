@@ -617,10 +617,10 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
         bucket_tool.stack_lib, "write_stack_payload", lambda *a, **kw: None
     )
 
-    # Should fail later (no S3 stub), but NOT with "Run 'quiltx stack' first"
+    # Should fail later (no S3 stub), but NOT with the missing-payload guidance.
     assert bucket_tool.main(["add", "bucket", "--dry-run"]) == 1
     captured = capsys.readouterr()
-    assert "Run 'quiltx stack' first" not in captured.err
+    assert "quiltx catalog stack" not in captured.err
     assert "Discovering stack" in captured.out
 
 

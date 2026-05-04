@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "reindex":
             return _cmd_reindex(args)
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -563,7 +563,7 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             control_account_id=control_account_id,
         )
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -597,7 +597,7 @@ def _cmd_remove(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         )
         return 0
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -623,7 +623,7 @@ def _cmd_list(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         console.print(table)
         return 0
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -707,7 +707,7 @@ def _verify_bucket_registration_and_access(
         print(f"OK: search index is populated ({len(results)}+ result[s])")
         return 0
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         control_line = (
             f"  - Quilt control account: {control_account_id}"
@@ -738,11 +738,13 @@ def _verify_bucket_registration_and_access(
 
 def _load_control_account_id(stack_payload: Mapping[str, Any] | None) -> str:
     if not stack_payload:
-        raise ValueError("No cached stack metadata found. Run 'quiltx stack' first.")
+        raise ValueError(
+            "No cached stack metadata found. Run 'quiltx catalog stack <dns>' first."
+        )
     account_id = stack_payload.get("account_id")
     if not account_id:
         raise ValueError(
-            "Cached stack metadata is missing account_id. Run 'quiltx stack' first."
+            "Cached stack metadata is missing account_id. Run 'quiltx catalog stack <dns>' first."
         )
     return str(account_id)
 

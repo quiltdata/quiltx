@@ -90,8 +90,21 @@ def _read_fallback() -> dict[str, CredentialEntry]:
 
 def _write_fallback(data: dict[str, CredentialEntry]) -> None:
     path = _fallback_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Tighten parent dir mode in case it pre-existed at a looser umask.
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    payload = json.dumps(data, indent=2).encode("utf-8")
+    # Open with mode 0o600 from the start so the secret never sits at the
+    # default umask between create and chmod (TOCTOU window on shared hosts).
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    # If the file pre-existed at looser perms (older quiltx), tighten it now.
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -178,7 +191,21 @@ def store(
     name: str | None = None,
     expires_at: int | None = None,
 ) -> None:
-    """Store *api_key* for *dns* with optional metadata."""
+    """Store *api_key* for *dns* with optional metadata.
+
+    Validates the ``qk_`` prefix per spec [05 §3] (matches quilt3's own
+    ``session.py`` prefix check). Raises ``ValueError`` for malformed input
+    so a typo or paste of the wrong string never lands in the keyring.
+    """
+    api_key = api_key.strip()
+    if not api_key:
+        raise ValueError("API key is empty")
+    if not api_key.startswith("qk_"):
+        raise ValueError(
+            "API key does not start with 'qk_'. Quilt API keys begin with "
+            "'qk_' — paste the secret shown after creating a key in the "
+            "catalog UI under Profile → API Keys."
+        )
     payload: CredentialEntry = {
         "api_key": api_key,
         "name": name,

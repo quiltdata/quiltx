@@ -102,23 +102,6 @@ def current_global_config() -> Mapping | None:
     return quilt3.config()
 
 
-def set_global_config(url: str, **kw: object) -> object:
-    # TODO: remove after §4 lands — once per-instance auth is live, no code
-    # path writes the global config.
-    import quilt3
-
-    return quilt3.config(url, **kw)
-
-
-def login_global(url: str | None = None) -> None:
-    import quilt3
-
-    if url is None:
-        quilt3.login()
-    else:
-        quilt3.login(url)
-
-
 def login_with_api_key(api_key: str) -> None:
     """Bind quilt3's in-process session to *api_key*.
 

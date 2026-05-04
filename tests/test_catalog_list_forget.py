@@ -54,6 +54,40 @@ def test_list_shows_entries(tmp_path, monkeypatch, capsys):
     assert "qk_beta" not in captured.out
 
 
+def test_list_never_renders_secret_value(tmp_path, monkeypatch, capsys):
+    """Pinning test for spec [05 §7]: no column ever surfaces the secret.
+
+    Uses a distinctive long secret (with the ``qk_`` prefix and tail) plus
+    an entry whose name and expires_at exercise every rendered column.
+    Asserts no substring of the secret leaks into stdout/stderr — covers
+    both the 'qk_' prefix path and the post-prefix payload.
+    """
+    _setup_no_keyring(monkeypatch, tmp_path)
+    secret = "qk_" + "S3CR3T" * 8  # 51 chars, distinctive non-prefix tail
+    credentials.set(
+        "rendered.example.com",
+        secret,
+        name="ci-runner",
+        expires_at=int(2_000_000_000),  # 2033-05-18, → "ACTIVE"
+    )
+    credentials.set("expired.example.com", "qk_" + "X" * 32, expires_at=1)
+    credentials.set("nameless.example.com", "qk_" + "Y" * 32)
+
+    result = list_cmd.main([])
+    assert result == 0
+    captured = capsys.readouterr()
+
+    for stream in (captured.out, captured.err):
+        # Whole secrets
+        assert secret not in stream
+        assert "qk_" + "X" * 32 not in stream
+        assert "qk_" + "Y" * 32 not in stream
+        # Distinctive non-prefix tails (defence-in-depth: even partial leaks fail)
+        assert "S3CR3T" not in stream
+        assert "X" * 32 not in stream
+        assert "Y" * 32 not in stream
+
+
 # ---------------------------------------------------------------------------
 # catalog forget
 # ---------------------------------------------------------------------------

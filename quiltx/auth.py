@@ -113,8 +113,13 @@ def resolve_cli(
         print("\nAborted.", file=sys.stderr)
         raise CredentialError(f"Authentication aborted for {dns}.")
 
-    if not api_key.strip():
+    api_key = api_key.strip()
+    if not api_key:
         raise CredentialError(f"Empty API key entered for {dns}.")
+    if not api_key.startswith("qk_"):
+        raise CredentialError(
+            f"Invalid API key for {dns}: Quilt API keys begin with 'qk_'."
+        )
 
     # Store for future runs (paste-only bootstrap leaves name/expires_at null)
     credentials.set(dns, api_key)

@@ -332,7 +332,7 @@ def add_bucket(
     and bucket event notifications, then registers the bucket
     in the Quilt catalog.
 
-    Requires a cached stack payload (run ``quiltx stack`` first).
+    Requires a cached stack payload (run ``quiltx catalog stack <dns>`` first).
 
     Args:
         bucket: S3 bucket name.
@@ -351,11 +351,17 @@ def add_bucket(
 
     payload = stack.payload
     if not payload:
-        raise ValueError("No cached stack metadata. Run 'quiltx stack' first.")
+        raise ValueError(
+            "No cached stack metadata. "
+            "Run 'quiltx catalog stack <dns>' to populate the cache."
+        )
 
     control_account_id = payload.get("account_id")
     if not control_account_id:
-        raise ValueError("Stack metadata missing account_id. Run 'quiltx stack' first.")
+        raise ValueError(
+            "Stack metadata missing account_id. "
+            "Run 'quiltx catalog stack <dns>' to refresh the cache."
+        )
     control_account_id = str(control_account_id)
 
     principal_list = list(principals) if principals else []
