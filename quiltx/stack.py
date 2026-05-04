@@ -49,6 +49,10 @@ class Catalog(CatalogContext):
     _api_key: str | None = field(default=None, init=False, repr=False)
     # ContextVar token returned by bind_active_catalog; reset on __exit__.
     _bind_token: Any = field(default=None, init=False, repr=False)
+    # True after a successful ensure_auth(); short-circuits redundant
+    # lock/login work on every .admin access. Cleared by skip_keyring=True
+    # so the Story 8 retry path always re-runs the resolver and login.
+    _authenticated: bool = field(default=False, init=False, repr=False)
 
     def __enter__(self) -> "Catalog":
         return self
@@ -125,6 +129,13 @@ class Catalog(CatalogContext):
         if not self.auth_required:
             return
 
+        # Idempotency guard: avoid redundant lock acquisitions and
+        # login_with_api_key calls on repeated .admin accesses (e.g.
+        # acl.fetch_current_state hits .admin five times). The retry path
+        # passes skip_keyring=True, which we treat as a forced re-auth.
+        if self._authenticated and not skip_keyring:
+            return
+
         from quiltx.auth import CredentialError, resolve_api, resolve_cli
         from quiltx.quilt3_facade import (
             _QUILT3_LOCK,
@@ -152,6 +163,7 @@ class Catalog(CatalogContext):
             if self._bind_token is None:
                 object.__setattr__(self, "_bind_token", token)
             login_with_api_key(resolved.api_key)
+            object.__setattr__(self, "_authenticated", True)
 
     @classmethod
     def from_dns(

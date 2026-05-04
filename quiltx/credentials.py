@@ -17,6 +17,7 @@ Username key: canonical DNS (e.g. ``nightly.quilttest.com``)
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sys
@@ -39,8 +40,15 @@ class CredentialEntry(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=None)
 def _keyring_available() -> bool:
-    """Return True if a real (non-fail) keyring backend is active."""
+    """Return True if a real (non-fail) keyring backend is active.
+
+    Cached because the backend cannot change at runtime and
+    ``keyring.get_keyring()`` may trigger D-Bus / OS-keychain
+    initialization on first call (per-op overhead is undesirable
+    since this is consulted on every get/store/delete/list).
+    """
     try:
         import keyring
 
@@ -138,7 +146,14 @@ def _read_index() -> list[str]:
 
 def _write_index(entries: list[str]) -> None:
     path = _index_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Tighten parent dir mode in case it pre-existed at a looser umask:
+    # the index leaks DNS names (not secrets), but on a shared host that is
+    # still better kept private. Mirrors the pattern in _write_fallback.
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     path.write_text(json.dumps(entries), encoding="utf-8")
 
 
