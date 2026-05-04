@@ -475,7 +475,15 @@ def _follow_logs_dynamic(
 
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: Any) -> int:
-    payload = logs_lib.load_stack_payload(catalog.catalog_name)
+    try:
+        payload = logs_lib.load_stack_payload(catalog.catalog_name)
+    except FileNotFoundError:
+        print(
+            f"No cached stack payload for {catalog.catalog_name}. "
+            f"Run quiltx catalog stack {catalog.catalog_name} first.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Create console for Rich output
     console = Console(force_terminal=not args.no_color)

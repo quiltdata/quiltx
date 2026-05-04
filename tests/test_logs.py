@@ -10,6 +10,8 @@ from botocore.stub import Stubber
 
 from quiltx import logs
 from quiltx import stack
+from quiltx.tools import logs as logs_tool
+from tests.conftest import make_fake_catalog
 
 
 def test_parse_time_epoch_seconds() -> None:
@@ -179,3 +181,23 @@ def test_format_event_structured_warning() -> None:
     structured = logs.format_event_structured(event)
     assert structured["level"] == "WARN"
     assert "Memory usage high" in structured["message"]
+
+
+def test_logs_emits_canonical_error_when_stack_payload_missing(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """quiltx logs must emit the canonical 'No cached stack payload' message
+    and exit non-zero when stack.json is absent — Story 9/10 acceptance."""
+    monkeypatch.setattr(stack, "user_data_path", lambda *_a, **_kw: tmp_path)
+    fake = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **_kw: fake,
+    )
+
+    rc = logs_tool.main(["--catalog", "nightly.quilttest.com"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "No cached stack payload for nightly.quilttest.com" in err
+    assert "quiltx catalog stack" in err

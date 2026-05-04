@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from quiltx import acl as acl_lib
 from quiltx import stack as stack_lib
+from quiltx.cli_common import add_catalog_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
             "'policies:' and 'roles:' blocks."
         ),
     )
+    add_catalog_args(parser, auth_required=True)
     parser.add_argument(
         "config_file",
         nargs="?",
@@ -37,11 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show planned changes without applying them.",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Show detailed information about each change.",
     )
     parser.add_argument(
         "--store-last-login-context",

@@ -22,7 +22,6 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket",
         description="Register S3 buckets with the configured Quilt catalog.",
     )
-    add_catalog_args(parser, auth_required=False)
     subparsers = parser.add_subparsers(
         dest="action",
         title="actions",
@@ -34,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket add",
         help="Register a bucket and configure bucket/SNS notifications.",
     )
+    add_catalog_args(add_parser, auth_required=True)
     add_parser.add_argument("bucket_name", help="S3 bucket name to register.")
     add_parser.add_argument(
         "--title",
@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket remove",
         help="Unregister a bucket from the Quilt catalog.",
     )
+    add_catalog_args(remove_parser, auth_required=True)
     remove_parser.add_argument("bucket_name", help="S3 bucket name to unregister.")
     remove_parser.add_argument(
         "--yes",
@@ -92,11 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    subparsers.add_parser(
+    list_parser = subparsers.add_parser(
         "list",
         prog="quiltx bucket list",
         help="List buckets registered in the catalog.",
     )
+    add_catalog_args(list_parser, auth_required=True)
 
     profile_parser = subparsers.add_parser(
         "profile",
@@ -116,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket test",
         help="Verify the control account can read the bucket (tests cross-account policy).",
     )
+    add_catalog_args(test_parser, auth_required=True)
     test_parser.add_argument("bucket_name", help="S3 bucket name to test.")
 
     reindex_parser = subparsers.add_parser(
@@ -128,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
             "existing ES indices are NOT wiped."
         ),
     )
+    add_catalog_args(reindex_parser, auth_required=True)
     reindex_parser.add_argument(
         "s3_uri",
         help=(
@@ -168,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "remove":
             return _cmd_remove(args)
         if args.action == "list":
-            return _cmd_list()
+            return _cmd_list(args)
         if args.action == "profile":
             return _cmd_profile(args)
         if args.action == "test":
@@ -600,7 +604,7 @@ def _cmd_remove(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
 
 
 @stack_lib.catalog_command
-def _cmd_list(stack: stack_lib.Catalog) -> int:
+def _cmd_list(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         buckets = stack.admin.buckets.list()
         console = Console()

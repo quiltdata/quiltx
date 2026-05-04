@@ -1367,8 +1367,7 @@ def test_cmd_add_no_prompt_without_yes_exits_early(monkeypatch, capsys) -> None:
         "resolve_catalog_context",
         lambda _catalog=None, **kw: cat,
     )
-    # --no-prompt is a top-level flag; must come before the subcommand.
-    result = bucket_tool.main(["--no-prompt", "add", "bucket"])
+    result = bucket_tool.main(["add", "bucket", "--no-prompt"])
     assert result == 1
     err = capsys.readouterr().err
     assert "--no-prompt" in err
@@ -1383,7 +1382,7 @@ def test_cmd_add_no_prompt_with_dry_run_requires_yes(monkeypatch, capsys) -> Non
         "resolve_catalog_context",
         lambda _catalog=None, **kw: cat,
     )
-    result = bucket_tool.main(["--no-prompt", "add", "bucket", "--dry-run"])
+    result = bucket_tool.main(["add", "bucket", "--no-prompt", "--dry-run"])
     assert result == 1
     assert "--yes" in capsys.readouterr().err
 
@@ -1590,6 +1589,36 @@ def test_reindex_arg_parser_flags() -> None:
     args = parser.parse_args(["reindex", "s3://b/p/", "--dry-run", "--sample", "3"])
     assert args.dry_run is True
     assert args.sample == 3
+
+
+def test_bucket_subcommands_accept_catalog_and_api_key() -> None:
+    """Story 2 headless ladder: every auth-required bucket subcommand
+    must accept --catalog and --api-key."""
+    parser = bucket_tool.build_parser()
+    cases: list[tuple[str, list[str]]] = [
+        ("add", ["my-bucket"]),
+        ("remove", ["my-bucket"]),
+        ("list", []),
+        ("test", ["my-bucket"]),
+        ("reindex", ["s3://my-bucket/"]),
+    ]
+    for action, extra in cases:
+        args = parser.parse_args(
+            [action, "--catalog", "customer-acme", "--api-key", "qk_test", *extra]
+        )
+        assert args.catalog == "customer-acme", action
+        assert args.api_key == "qk_test", action
+
+
+def test_bucket_profile_does_not_accept_api_key() -> None:
+    """`bucket profile` is AWS-side only — Quilt auth flags do not apply."""
+    import pytest
+
+    parser = bucket_tool.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["profile", "--api-key", "qk_test"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["profile", "--catalog", "x"])
 
 
 def test_reindex_dry_run_lists_keys(monkeypatch, capsys) -> None:

@@ -736,3 +736,22 @@ def _current_state_for_config(config: acl.AclConfig) -> acl.CurrentState:
         sso_config_text=sso_config_text,
         default_role_name=desired_state.default_role_name,
     )
+
+
+def test_acl_parser_accepts_catalog_and_api_key_flags() -> None:
+    """Story 2 literal: `quiltx catalog acl --catalog X --api-key qk_... apply ...`."""
+    parser = acl_tool.build_parser()
+    args = parser.parse_args(
+        [
+            "--catalog",
+            "customer-acme",
+            "--api-key",
+            "qk_test",
+            "--no-prompt",
+            "config.yaml",
+        ]
+    )
+    assert args.catalog == "customer-acme"
+    assert args.api_key == "qk_test"
+    assert args.no_prompt is True
+    assert args.config_file == "config.yaml"
