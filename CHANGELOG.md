@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.12.0] - 2026-04-28
+## [0.13.0] - 2026-05-04
 
 This release reshapes `quiltx`'s identity and auth surface around a per-catalog model and switches the stored secret from username/password+refresh-token to a single `qk_...` API key per DNS. quiltx no longer mutates the user's global `quilt3.config()` to do its work, no longer consumes `quilt3`'s `credentials.json`/`auth.json`, and no longer relies on Quilt-minted AWS session credentials — AWS calls flow through the standard boto3 chain. Scripts that referenced the old `quiltx stack ...` surface, `--catalog-name`, or `--username`/`--password` will fail at argparse time — there are no aliases (pre-1.0).
 
