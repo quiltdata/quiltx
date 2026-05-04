@@ -78,6 +78,17 @@ def test_resolve_catalog_context_env_var(tmp_path, monkeypatch) -> None:
     assert ctx.source == "env"
 
 
+def test_resolve_catalog_context_insecure_localhost() -> None:
+    ctx = stack.resolve_catalog_context("localhost", insecure=True)
+    assert ctx.catalog_name == "localhost"
+    assert ctx.catalog_url == "http://localhost"
+
+
+def test_resolve_catalog_context_insecure_rejects_non_localhost() -> None:
+    with pytest.raises(ValueError, match="--insecure is only supported for localhost"):
+        stack.resolve_catalog_context("example.com", insecure=True)
+
+
 def test_resolve_catalog_context_raises_without_config(tmp_path, monkeypatch) -> None:
     from quiltx import userconfig
 

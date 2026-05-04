@@ -31,6 +31,16 @@ def add_catalog_args(
             metavar="QK_...",
             help="Catalog API key (qk_...). Also accepted via QUILTX_API_KEY.",
         )
+        parser.add_argument(
+            "--insecure",
+            action="store_true",
+            default=False,
+            help=(
+                "Allow http:// transport to localhost for testing local "
+                "catalog builds. Refused for any non-localhost target. "
+                "Never persisted."
+            ),
+        )
     parser.add_argument(
         "--no-prompt",
         action="store_true",

@@ -81,3 +81,62 @@ def test_rejects_empty_string() -> None:
 def test_rejects_whitespace_only() -> None:
     with pytest.raises(ValueError, match="required"):
         normalize_dns("   ")
+
+
+def test_insecure_accepts_localhost() -> None:
+    assert normalize_dns("localhost", insecure=True) == "localhost"
+
+
+def test_insecure_accepts_http_localhost() -> None:
+    assert normalize_dns("http://localhost", insecure=True) == "localhost"
+
+
+def test_insecure_accepts_http_localhost_trailing_slash() -> None:
+    assert normalize_dns("http://localhost/", insecure=True) == "localhost"
+
+
+def test_insecure_rejects_non_localhost() -> None:
+    with pytest.raises(ValueError, match="--insecure is only supported for localhost"):
+        normalize_dns("example.com", insecure=True)
+
+
+def test_insecure_rejects_http_non_localhost() -> None:
+    with pytest.raises(ValueError, match="http://"):
+        normalize_dns("http://example.com", insecure=True)
+
+
+def test_http_rejected_without_insecure() -> None:
+    with pytest.raises(ValueError, match="http:// is not supported"):
+        normalize_dns("http://localhost")
+
+
+def test_is_localhost() -> None:
+    from quiltx.identity import is_localhost
+
+    assert is_localhost("localhost") is True
+    assert is_localhost("LOCALHOST") is True
+    assert is_localhost(" localhost ") is True
+    assert is_localhost("127.0.0.1") is False
+    assert is_localhost("foo.local") is False
+    assert is_localhost("example.com") is False
+
+
+def test_build_catalog_url_https_default() -> None:
+    from quiltx.identity import build_catalog_url
+
+    assert build_catalog_url("example.com") == "https://example.com"
+
+
+def test_build_catalog_url_insecure_localhost() -> None:
+    from quiltx.identity import build_catalog_url
+
+    assert build_catalog_url("localhost", insecure=True) == "http://localhost"
+
+
+def test_build_catalog_url_insecure_non_localhost_falls_back_to_https() -> None:
+    """build_catalog_url itself does not validate; normalize_dns enforces the
+    localhost-only rule. Defense-in-depth: even if a caller passes
+    insecure=True for a non-localhost DNS, the URL stays https."""
+    from quiltx.identity import build_catalog_url
+
+    assert build_catalog_url("example.com", insecure=True) == "https://example.com"

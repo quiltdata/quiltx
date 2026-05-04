@@ -10,24 +10,35 @@ Quilt extension toolkit for working with [Quilt](https://quiltdata.com) catalogs
 # See available tools
 uvx quiltx
 
-# Configure a Quilt catalog
-uvx quiltx stack catalog https://open.quiltdata.com
+# Sign in to a catalog: mints a qk_... API key from your username/password,
+# stores it in your system keyring, and sets it as the default catalog.
+uvx quiltx catalog login --catalog open.quiltdata.com --username you@example.com
+uvx quiltx catalog default open.quiltdata.com
 
 # Get help for any tool
 uvx quiltx <tool> --help
 ```
 
+`quiltx catalog login` accepts either `--username` / `--password` (admin
+catalogs) or `--api-key qk_...` (paste an existing key, or the only path
+for SSO-only catalogs — see below). Both DNS names (`open.quiltdata.com`)
+and full URLs (`https://open.quiltdata.com/`) are accepted as `--catalog`
+arguments and normalized to the bare DNS.
+
 ### Tools
 
 - **bucket** — Register cross-account S3 buckets with Quilt (policy, SNS, notifications)
+- **catalog** — Manage Quilt catalogs:
+  - **catalog login** — Mint and store a `qk_...` API key from username/password (or paste one with `--api-key`)
+  - **catalog default** — Read, set, or clear the default catalog (auto-runs `login` when the DNS has no stored key)
+  - **catalog list** — List catalogs with stored credentials
+  - **catalog forget** — Delete the keyring entry for a catalog
+  - **catalog acl** — Declarative access-control-list (ACL) reconciliation from YAML
+  - **catalog stack** — Discover the Quilt CloudFormation stack and cache metadata
 - **ecs** — ECS task tools:
   - **ecs shell** — Interactive shell access to running ECS tasks via Session Manager
   - **ecs run-migration** — Re-run the registry migration task for a stack
 - **logs** — Display and tail CloudWatch logs for the configured catalog
-- **stack** — Manage Quilt stack:
-  - **stack acl** — Declarative access-control-list (ACL) reconciliation from YAML
-  - **stack catalog** — Configure and display Quilt catalog settings
-  - **stack cfn** — Discover the Quilt CloudFormation stack and cache metadata
 
 ### Python API
 
@@ -42,9 +53,9 @@ uv tool install -U quiltx
 quiltx --list
 ```
 
-## Stack ACL
+## Catalog ACL
 
-`quiltx stack acl` declaratively manages a Quilt stack's access control lists
+`quiltx catalog acl` declaratively manages a Quilt stack's access control lists
 (ACLs) from a single YAML file with exactly two top-level blocks:
 `policies:` and `roles:`. Policy audiences synthesize cumulative managed roles,
 while static roles compose named policies and optional inline bucket grants.
@@ -82,38 +93,62 @@ names and who receives which cumulative grants.
 
 ```bash
 # Show current server ACL state
-uvx quiltx stack acl
+uvx quiltx catalog acl
 
 # Preview changes (dry run)
-uvx quiltx stack acl config.yml --dry-run
+uvx quiltx catalog acl config.yml --dry-run
 
 # Preview with full detail
-uvx quiltx stack acl config.yml --dry-run --verbose
+uvx quiltx catalog acl config.yml --dry-run --verbose
 
 # Apply changes (with confirmation prompt)
-uvx quiltx stack acl config.yml
+uvx quiltx catalog acl config.yml
 
 # Apply without prompting
-uvx quiltx stack acl config.yml --yes
+uvx quiltx catalog acl config.yml --yes
 ```
 
-## Catalogs behind corporate TLS proxies
+## SSO-only catalogs
 
-If `quiltx stack catalog <url>` fails with `CERTIFICATE_VERIFY_FAILED` (common
-on networks with TLS-inspection proxies or self-signed catalog certs), point
-Python at your organization's CA bundle:
+`quiltx catalog login --username --password` only works on catalogs that
+accept username/password at `/api/login`. SSO-only catalogs reject U/P with
+the catalog's own error (e.g. "SSO is required"). In that case:
+
+1. Open the catalog UI in your browser and mint an API key from the
+   account/keys page.
+2. Paste it with `--api-key`:
 
 ```bash
-# Preferred: trust your corporate root CA
-uvx quiltx stack catalog https://quilt.example.com --ca-bundle /path/to/corp-root.pem
-
-# Escape hatch: skip TLS verification (trusted networks only)
-uvx quiltx stack catalog https://quilt.example.com --insecure
+uvx quiltx catalog login --catalog quilt.example.com --api-key qk_...
 ```
 
-`--ca-bundle` also exports `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` for the
-current process. To make the override stick across other `quiltx` subcommands,
-export `SSL_CERT_FILE=/path/to/corp-root.pem` in your shell profile.
+## Corporate TLS proxies
+
+If catalog requests fail with `CERTIFICATE_VERIFY_FAILED` (common on
+networks with TLS-inspection proxies or self-signed catalog certs), point
+Python at your organization's CA bundle by exporting one of the standard
+environment variables before running quiltx:
+
+```bash
+export SSL_CERT_FILE=/path/to/corp-root.pem
+# or: export REQUESTS_CA_BUNDLE=/path/to/corp-root.pem
+
+uvx quiltx catalog login --catalog quilt.example.com --username you@example.com
+```
+
+## Local catalog testing (`--insecure`)
+
+When developing against a local catalog build, pass `--insecure` to allow
+plain `http://localhost`:
+
+```bash
+uvx quiltx catalog login --catalog localhost --insecure --username admin
+uvx quiltx catalog acl --catalog localhost --insecure config.yml
+```
+
+`--insecure` is **only** accepted when the catalog DNS resolves to
+`localhost`; any other target is rejected. The flag is never persisted —
+it must be passed on every command that hits the catalog.
 
 ## ECS
 

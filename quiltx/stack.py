@@ -146,16 +146,23 @@ class Catalog(CatalogContext):
         source: CatalogContextSource,
         auth_required: bool = True,
         api_key: str | None = None,
+        insecure: bool = False,
     ) -> "Catalog":
         """Build a Catalog from a bare DNS name.
 
         ``api_key`` is the Story 5 API-path credential; it feeds step 1 of
         the API resolver ladder and is used lazily on the first
         ``ensure_auth()`` call.
+
+        ``insecure=True`` is a localhost-only escape hatch that switches the
+        catalog URL to ``http://localhost`` for testing local catalog builds.
+        Refused for any non-localhost target.
         """
+        from quiltx.identity import build_catalog_url
+
         catalog = cls(
             catalog_name=dns,
-            catalog_url=f"https://{dns}",
+            catalog_url=build_catalog_url(dns, insecure=insecure),
             source=source,
             auth_required=auth_required,
         )
@@ -252,7 +259,10 @@ def catalog_command(
         def wrapper(*args: Any, **kwargs: Any) -> T:
             parsed_args = args[0] if args else kwargs.get("args")
             catalog_arg = getattr(parsed_args, "catalog", None)
-            catalog = resolve_catalog_context(catalog_arg, auth_required=auth)
+            insecure = bool(getattr(parsed_args, "insecure", False))
+            catalog = resolve_catalog_context(
+                catalog_arg, auth_required=auth, insecure=insecure
+            )
 
             if _verbose_active(parsed_args):
                 _print_verbose_preflight(catalog, parsed_args, auth, bootstrap)
@@ -334,6 +344,7 @@ def resolve_catalog_context(
     catalog: str | None = None,
     *,
     auth_required: bool = True,
+    insecure: bool = False,
 ) -> Catalog:
     """Resolve the target catalog identity.
 
@@ -342,16 +353,25 @@ def resolve_catalog_context(
     2. QUILTX_CATALOG env var
     3. quiltx default catalog (userconfig, with quilt3.config() bootstrap)
     4. Error
+
+    ``insecure=True`` selects http://localhost transport (rejected by
+    ``normalize_dns`` for any non-localhost target).
     """
     if catalog:
         return Catalog.from_dns(
-            normalize_dns(catalog), source="flag", auth_required=auth_required
+            normalize_dns(catalog, insecure=insecure),
+            source="flag",
+            auth_required=auth_required,
+            insecure=insecure,
         )
 
     env_catalog = os.environ.get("QUILTX_CATALOG")
     if env_catalog:
         return Catalog.from_dns(
-            normalize_dns(env_catalog), source="env", auth_required=auth_required
+            normalize_dns(env_catalog, insecure=insecure),
+            source="env",
+            auth_required=auth_required,
+            insecure=insecure,
         )
 
     dns = _lookup_default_dns()
@@ -361,7 +381,14 @@ def resolve_catalog_context(
             "Pass --catalog or run `quiltx catalog default <dns>`."
         )
 
-    return Catalog.from_dns(dns, source="default", auth_required=auth_required)
+    if insecure:
+        # Sanity: --insecure with the userconfig default is only valid if
+        # that default is localhost. normalize_dns enforces this.
+        normalize_dns(dns, insecure=True)
+
+    return Catalog.from_dns(
+        dns, source="default", auth_required=auth_required, insecure=insecure
+    )
 
 
 def fetch_region(

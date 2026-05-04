@@ -68,14 +68,32 @@ def test_default_set_url_normalised(tmp_path, monkeypatch):
     assert userconfig.get_default_catalog() == "nightly.quilttest.com"
 
 
-def test_default_set_unknown_catalog_rejected(tmp_path, monkeypatch, capsys):
-    """Setting default to an unknown catalog (no credentials) is rejected."""
+def test_default_set_unknown_catalog_triggers_login(tmp_path, monkeypatch, capsys):
+    """Setting default to an unknown DNS delegates to `catalog login` (B.3:
+    auth on first config validates that the catalog is reachable)."""
     _setup_no_keyring(monkeypatch, tmp_path)
 
-    result = default_cmd.main(["unknown.example.com"])
-    assert result == 1
+    # Headless with no auth flags: login errors out with exit 2.
+    result = default_cmd.main(["--no-prompt", "unknown.example.com"])
+    assert result == 2
     captured = capsys.readouterr()
-    assert "not a known catalog" in captured.err
+    assert "Logging in" in captured.err
+    assert "--username" in captured.err or "--api-key" in captured.err
+
+
+def test_default_set_unknown_catalog_with_api_key_succeeds(
+    tmp_path, monkeypatch, capsys
+):
+    """When --api-key is provided for an unknown DNS, the login flow stores it
+    and `default` proceeds."""
+    _setup_no_keyring(monkeypatch, tmp_path)
+
+    result = default_cmd.main(
+        ["--no-prompt", "unknown.example.com", "--api-key", "qk_paste"]
+    )
+    assert result == 0
+    assert userconfig.get_default_catalog() == "unknown.example.com"
+    assert credentials.get("unknown.example.com") is not None
 
 
 def test_default_set_http_rejected(tmp_path, monkeypatch, capsys):

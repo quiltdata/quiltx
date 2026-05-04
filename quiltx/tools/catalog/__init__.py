@@ -11,6 +11,7 @@ SUBCOMMANDS = {
     "default": "quiltx.tools.catalog.default",
     "forget": "quiltx.tools.catalog.forget",
     "list": "quiltx.tools.catalog.list_",
+    "login": "quiltx.tools.catalog.login",
     "stack": "quiltx.tools.catalog.stack",
 }
 
@@ -45,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "list",
         help="List known catalogs (keyring entries).",
+        add_help=False,
+    )
+    subparsers.add_parser(
+        "login",
+        help="Mint and store a qk_... API key from username/password.",
         add_help=False,
     )
     subparsers.add_parser(
