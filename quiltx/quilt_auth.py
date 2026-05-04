@@ -168,6 +168,23 @@ def create_api_key(
     )
 
 
+_VALIDATE_QUERY = "query apiKeysList { apiKeysList(input: {}) { apiKeys { id } } }"
+
+
+def validate_api_key(catalog_url: str, api_key: str) -> None:
+    """Round-trip the catalog with *api_key* to confirm it is accepted.
+
+    Runs a minimal authenticated GraphQL query. Returns on success;
+    raises CatalogAuthError on transport failure, on a 401/403 from the
+    catalog, or on any GraphQL ``errors`` payload.
+    """
+    url = catalog_url.rstrip("/") + "/graphql"
+    payload = {"query": _VALIDATE_QUERY, "operationName": "apiKeysList"}
+    response = _post_json(url, payload, bearer=api_key)
+    if response.get("errors"):
+        raise CatalogAuthError(f"Catalog rejected API key: {response['errors']}")
+
+
 def bootstrap_api_key(
     catalog_url: str,
     *,

@@ -16,14 +16,37 @@ def _setup_no_keyring(monkeypatch, tmp_path):
     monkeypatch.setattr(credentials, "_warn_file_fallback", lambda: None)
 
 
-def test_login_with_api_key_paste_stores_immediately(tmp_path, monkeypatch, capsys):
+def test_login_with_api_key_paste_validates_and_stores(tmp_path, monkeypatch, capsys):
     _setup_no_keyring(monkeypatch, tmp_path)
+    validate_calls: list[tuple[str, str]] = []
+
+    def fake_validate(catalog_url, api_key):
+        validate_calls.append((catalog_url, api_key))
+
+    monkeypatch.setattr(quilt_auth, "validate_api_key", fake_validate)
+
     rc = login_cmd.main(
         ["--catalog", "nightly.quilttest.com", "--api-key", "qk_pasted"]
     )
     assert rc == 0
+    assert validate_calls == [("https://nightly.quilttest.com", "qk_pasted")]
     stored = credentials.get("nightly.quilttest.com")
     assert stored is not None and stored["api_key"] == "qk_pasted"
+
+
+def test_login_with_api_key_paste_rejected_by_catalog(tmp_path, monkeypatch, capsys):
+    """Bad paste: catalog rejects the key. Don't store it; error non-zero."""
+    _setup_no_keyring(monkeypatch, tmp_path)
+
+    def fake_validate(catalog_url, api_key):
+        raise quilt_auth.CatalogAuthError("Catalog rejected API key: 401")
+
+    monkeypatch.setattr(quilt_auth, "validate_api_key", fake_validate)
+
+    rc = login_cmd.main(["--catalog", "nightly.quilttest.com", "--api-key", "qk_bogus"])
+    assert rc == 1
+    assert "rejected" in capsys.readouterr().err
+    assert credentials.get("nightly.quilttest.com") is None
 
 
 def test_login_rejects_api_key_without_qk_prefix(tmp_path, monkeypatch, capsys):

@@ -84,9 +84,14 @@ def test_default_set_unknown_catalog_triggers_login(tmp_path, monkeypatch, capsy
 def test_default_set_unknown_catalog_with_api_key_succeeds(
     tmp_path, monkeypatch, capsys
 ):
-    """When --api-key is provided for an unknown DNS, the login flow stores it
-    and `default` proceeds."""
+    """When --api-key is provided for an unknown DNS, the login flow validates
+    it against the catalog and stores it; `default` then proceeds."""
     _setup_no_keyring(monkeypatch, tmp_path)
+    from quiltx import quilt_auth
+
+    monkeypatch.setattr(
+        quilt_auth, "validate_api_key", lambda catalog_url, api_key: None
+    )
 
     result = default_cmd.main(
         ["--no-prompt", "unknown.example.com", "--api-key", "qk_paste"]

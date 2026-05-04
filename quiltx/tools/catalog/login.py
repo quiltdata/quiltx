@@ -126,12 +126,19 @@ def main(argv: list[str] | None = None) -> int:
 
     catalog_url = build_catalog_url(dns, insecure=args.insecure)
 
-    # Path 1: explicit --api-key (paste). No network round-trip; the prefix
-    # check is the only validation. The first real command that uses the
-    # key will fail loudly if it is rejected by the catalog.
+    # Path 1: explicit --api-key (paste). Validate against the catalog
+    # before persisting so a bad paste does not silently land in the
+    # keyring and surface as a confusing auth error on the next command.
     if args.api_key:
         if not args.api_key.startswith("qk_"):
             print("Error: API key must start with the 'qk_' prefix.", file=sys.stderr)
+            return 1
+        try:
+            quilt_auth.validate_api_key(catalog_url, args.api_key)
+        except quilt_auth.CatalogAuthError as exc:
+            print(
+                f"Error: pasted API key was rejected by {dns}: {exc}", file=sys.stderr
+            )
             return 1
         credentials.store(dns, args.api_key, name=None, expires_at=None)
         print(f"Stored API key for {dns}.")

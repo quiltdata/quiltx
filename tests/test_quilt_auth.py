@@ -151,6 +151,47 @@ def test_create_api_key_graphql_top_level_errors(monkeypatch) -> None:
         )
 
 
+def test_validate_api_key_happy(monkeypatch) -> None:
+    stub, calls = _make_post_json_stub(
+        {
+            "https://catalog.example.com/graphql": {
+                "data": {"apiKeysList": {"apiKeys": []}}
+            }
+        }
+    )
+    monkeypatch.setattr(quilt_auth, "_post_json", stub)
+    quilt_auth.validate_api_key("https://catalog.example.com", "qk_test")
+    assert calls[0]["bearer"] == "qk_test"
+
+
+def test_validate_api_key_rejected(monkeypatch) -> None:
+    stub, _ = _make_post_json_stub(
+        {
+            "https://catalog.example.com/graphql": {
+                "errors": [{"message": "Unauthorized"}]
+            }
+        }
+    )
+    monkeypatch.setattr(quilt_auth, "_post_json", stub)
+    with pytest.raises(quilt_auth.CatalogAuthError, match="rejected API key"):
+        quilt_auth.validate_api_key("https://catalog.example.com", "qk_bad")
+
+
+def test_validate_api_key_transport_error_propagates(monkeypatch) -> None:
+    """A 401 from the catalog (auth_request failure) surfaces as CatalogAuthError."""
+    stub, _ = _make_post_json_stub(
+        {
+            "https://catalog.example.com/graphql": quilt_auth.CatalogAuthError(
+                "Auth request to https://catalog.example.com/graphql failed (401): "
+                "Unauthorized"
+            )
+        }
+    )
+    monkeypatch.setattr(quilt_auth, "_post_json", stub)
+    with pytest.raises(quilt_auth.CatalogAuthError, match="401"):
+        quilt_auth.validate_api_key("https://catalog.example.com", "qk_bad")
+
+
 def test_bootstrap_api_key_full_chain(monkeypatch) -> None:
     """End-to-end: U/P -> refresh -> access -> qk_ secret."""
     stub, calls = _make_post_json_stub(
