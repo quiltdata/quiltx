@@ -39,6 +39,32 @@ _ACTIVE_CATALOG_URL: ContextVar[str | None] = ContextVar(
     "quiltx_active_catalog_url", default=None
 )
 
+# Cache of catalog_url -> registry_url, populated lazily from
+# <catalog>/config.json. Quilt3 calls get_registry_url repeatedly, and we
+# don't want to refetch config.json on every call.
+_REGISTRY_URL_CACHE: dict[str, str] = {}
+
+
+def _resolve_registry_for_active_catalog(catalog_url: str) -> str:
+    """Map *catalog_url* to its registry URL via config.json (cached).
+
+    Catalog DNS typically serves only the SPA; the registry API lives at
+    a separate host advertised by ``<catalog>/config.json``. If lookup
+    fails (e.g. localhost dev stack with no config.json or no
+    registryUrl), fall back to the catalog URL itself.
+    """
+    cached = _REGISTRY_URL_CACHE.get(catalog_url)
+    if cached is not None:
+        return cached
+    from quiltx.quilt_auth import CatalogAuthError, resolve_registry_url
+
+    try:
+        resolved = resolve_registry_url(catalog_url)
+    except CatalogAuthError:
+        resolved = catalog_url.rstrip("/")
+    _REGISTRY_URL_CACHE[catalog_url] = resolved
+    return resolved
+
 
 def _install_registry_url_patch() -> None:
     from quilt3 import session as _session
@@ -48,7 +74,7 @@ def _install_registry_url_patch() -> None:
     def get_registry_url() -> str:
         override = _ACTIVE_CATALOG_URL.get()
         if override is not None:
-            return override
+            return _resolve_registry_for_active_catalog(override)
         return original()
 
     _session.get_registry_url = get_registry_url
