@@ -47,6 +47,19 @@ class Catalog(CatalogContext):
     # API-path API key passed via Catalog.from_dns(api_key=...).
     # Used as the first step of the API resolver ladder; never set on the CLI path.
     _api_key: str | None = field(default=None, init=False, repr=False)
+    # ContextVar token returned by bind_active_catalog; reset on __exit__.
+    _bind_token: Any = field(default=None, init=False, repr=False)
+
+    def __enter__(self) -> "Catalog":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        token = self._bind_token
+        if token is not None:
+            from quiltx.quilt3_facade import reset_active_catalog
+
+            object.__setattr__(self, "_bind_token", None)
+            reset_active_catalog(token)
 
     @property
     def region(self) -> str:
@@ -135,7 +148,9 @@ class Catalog(CatalogContext):
                 raise ValueError(str(exc)) from exc
 
         with _QUILT3_LOCK:
-            bind_active_catalog(self.catalog_url)
+            token = bind_active_catalog(self.catalog_url)
+            if self._bind_token is None:
+                object.__setattr__(self, "_bind_token", token)
             login_with_api_key(resolved.api_key)
 
     @classmethod

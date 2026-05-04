@@ -20,9 +20,10 @@ in one call stack) — not a multi-thread feature.
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Iterator, Mapping
 
 # Lock held during the bind-and-call sequence in Catalog.ensure_auth / admin.
 # See §4.4 in the spec.
@@ -30,55 +31,60 @@ _QUILT3_LOCK = threading.Lock()
 
 # Per spec [05 §5]: rebind quilt3.session.get_registry_url to return the
 # active catalog URL without writing config.yml. The ContextVar makes this
-# thread/async-safe; the monkey-patch is installed lazily on first bind().
+# task-safe; the monkey-patch is installed once at module import.
+#
+# Tracking issue for an upstream supported hook (which would let us delete
+# this monkey-patch entirely): quiltdata/quilt#4878.
 _ACTIVE_CATALOG_URL: ContextVar[str | None] = ContextVar(
     "quiltx_active_catalog_url", default=None
 )
-_PATCH_INSTALLED = False
-_PATCH_LOCK = threading.Lock()
 
 
 def _install_registry_url_patch() -> None:
-    """Replace ``quilt3.session.get_registry_url`` with a ContextVar-aware version.
+    from quilt3 import session as _session
 
-    Idempotent. Called once on first bind_active_catalog() / login_with_api_key()
-    invocation. The original function is preserved as a fallback for when no
-    catalog is bound (e.g. quilt3.config()-driven flows).
-    """
-    global _PATCH_INSTALLED
-    if _PATCH_INSTALLED:
-        return
-    with _PATCH_LOCK:
-        if _PATCH_INSTALLED:
-            return
-        from quilt3 import session as _session
+    original = _session.get_registry_url
 
-        original = _session.get_registry_url
+    def get_registry_url() -> str:
+        override = _ACTIVE_CATALOG_URL.get()
+        if override is not None:
+            return override
+        return original()
 
-        def get_registry_url() -> str:
-            override = _ACTIVE_CATALOG_URL.get()
-            if override is not None:
-                return override
-            return original()
+    _session.get_registry_url = get_registry_url
 
-        _session.get_registry_url = get_registry_url
-        _PATCH_INSTALLED = True
+
+_install_registry_url_patch()
 
 
 def bind_active_catalog(catalog_url: str):
-    """Install a process-local override so quilt3 sees *catalog_url*.
+    """Set the active catalog URL for this task; return a reset token.
 
-    Returns the ContextVar token from the caller can use to reset() the
-    binding (e.g. in tests or nested operations). Production code generally
-    leaves the binding in place for the lifetime of the command.
+    Embedders should prefer ``use_catalog()`` or ``Catalog`` as a context
+    manager so the binding is cleaned up automatically. Direct callers are
+    responsible for calling ``reset_active_catalog(token)`` when done.
     """
-    _install_registry_url_patch()
     return _ACTIVE_CATALOG_URL.set(catalog_url)
 
 
 def reset_active_catalog(token) -> None:
     """Reset the ContextVar binding to its previous state."""
     _ACTIVE_CATALOG_URL.reset(token)
+
+
+@contextmanager
+def use_catalog(catalog_url: str) -> Iterator[None]:
+    """Scope the active-catalog binding to a ``with`` block.
+
+    Embedder-friendly wrapper around bind/reset. Inside the block, any
+    quilt3 call that resolves ``session.get_registry_url`` sees
+    *catalog_url*; on exit the previous binding is restored.
+    """
+    token = _ACTIVE_CATALOG_URL.set(catalog_url)
+    try:
+        yield
+    finally:
+        _ACTIVE_CATALOG_URL.reset(token)
 
 
 @dataclass
