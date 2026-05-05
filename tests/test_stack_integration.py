@@ -33,11 +33,16 @@ def test_stack_discovers_nightly_quilttest() -> None:
         pytest.skip("No AWS credentials available.")
 
     cfn_client = session.client("cloudformation")
-    stack_info = stack_lib.find_matching_stack(str(catalog_url), cfn_client=cfn_client)
+    stack_ctx = stack_lib.Catalog(
+        catalog_name=stack_lib.extract_catalog_name(config),
+        catalog_url=str(catalog_url),
+        source="global-config",
+    )
+    stack_info = stack_lib.find_matching_stack(stack_ctx, cfn_client=cfn_client)
 
     assert stack_info["StackName"] == "quilt-staging"
 
     log_groups = stack_lib.list_log_group_resources(
-        stack_info["StackName"], cfn_client=cfn_client
+        stack_ctx, stack_info["StackName"], cfn_client=cfn_client
     )
     assert log_groups

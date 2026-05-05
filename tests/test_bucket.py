@@ -6,8 +6,8 @@ import json
 import contextlib
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import boto3
 from botocore.stub import Stubber
@@ -15,6 +15,8 @@ from botocore.stub import Stubber
 from quiltx import bucket as bucket_lib
 from quiltx.bucket import AddBucketResult, add_bucket
 from quiltx.tools import bucket as bucket_tool
+
+from tests.conftest import make_fake_catalog
 
 
 def _client(service_name: str, region_name: str = "us-east-1"):
@@ -24,6 +26,15 @@ def _client(service_name: str, region_name: str = "us-east-1"):
         aws_access_key_id="test",
         aws_secret_access_key="test",
         aws_session_token="test",
+    )
+
+
+def _install_stack_context(monkeypatch, catalog_name: str = "demo") -> None:
+    cat = make_fake_catalog(catalog_name)
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
     )
 
 
@@ -389,6 +400,10 @@ def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls
 
     admin_module = ModuleType("quilt3.admin")
     admin_module.buckets = admin_buckets
+    admin_module.policies = SimpleNamespace()
+    admin_module.roles = SimpleNamespace()
+    admin_module.sso_config = SimpleNamespace()
+    admin_module.users = SimpleNamespace()
     quilt3_module = ModuleType("quilt3")
     quilt3_module.admin = admin_module
     quilt3_module.Bucket = FakeQuiltBucket
@@ -435,7 +450,7 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
 
     session = FakeSession(s3_client, sns_client, sts_client)
     monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -497,7 +512,7 @@ def test_add_skip_already_registered(monkeypatch, capsys) -> None:
 
     session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
     monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -525,7 +540,7 @@ def test_add_skip_post_test_when_no_test_flag(monkeypatch) -> None:
 
     session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
     monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -546,9 +561,11 @@ def test_add_skip_post_test_when_no_test_flag(monkeypatch) -> None:
 
 def test_add_no_config(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
-        bucket_tool,
-        "get_catalog_config",
-        lambda: (_ for _ in ()).throw(ValueError("No Quilt catalog configured")),
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: (_ for _ in ()).throw(
+            ValueError("No Quilt catalog configured")
+        ),
     )
 
     assert bucket_tool.main(["add", "bucket", "--dry-run"]) == 1
@@ -571,7 +588,7 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
             "outputs": [],
         }
 
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib, "load_stack_payload", _load_stack_payload
     )
@@ -581,27 +598,29 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
         lambda url: {"region": "us-east-1"},
     )
     monkeypatch.setattr(
-        bucket_tool.stack_lib, "resolve_region", lambda config, cc: "us-east-1"
+        bucket_tool.stack_lib, "fetch_region", lambda ctx, cc: "us-east-1"
     )
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "find_matching_stack",
-        lambda url, region: {
+        lambda stack, region: {
             "StackName": "quilt",
             "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/quilt/abc",
         },
     )
     monkeypatch.setattr(
-        bucket_tool.stack_lib, "list_log_group_resources", lambda name, region: []
+        bucket_tool.stack_lib,
+        "list_log_group_resources",
+        lambda stack, name, region: [],
     )
     monkeypatch.setattr(
         bucket_tool.stack_lib, "write_stack_payload", lambda *a, **kw: None
     )
 
-    # Should fail later (no S3 stub), but NOT with "Run 'quiltx stack' first"
+    # Should fail later (no S3 stub), but NOT with the missing-payload guidance.
     assert bucket_tool.main(["add", "bucket", "--dry-run"]) == 1
     captured = capsys.readouterr()
-    assert "Run 'quiltx stack' first" not in captured.err
+    assert "quiltx catalog stack" not in captured.err
     assert "Discovering stack" in captured.out
 
 
@@ -745,7 +764,7 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
         "Session",
         lambda profile_name=None: FakeSession(s3_client, sns_client, sts_client),
     )
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -906,7 +925,7 @@ def test_add_creates_sns(monkeypatch) -> None:
         "Session",
         lambda profile_name=None: FakeSession(s3_client, sns_client, sts_client),
     )
-    monkeypatch.setattr(bucket_tool, "get_catalog_config", lambda: {"catalog": "demo"})
+    _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
@@ -939,6 +958,7 @@ def test_add_creates_sns(monkeypatch) -> None:
 
 
 def test_list(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
     _install_fake_quilt3(
         monkeypatch,
         listed=[
@@ -958,6 +978,7 @@ def test_list(monkeypatch, capsys) -> None:
 
 
 def test_test_checks_registration_and_read_access(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
     _install_fake_quilt3(
         monkeypatch,
         listed=[FakeBucket("bucket-a", "Bucket A")],
@@ -970,6 +991,7 @@ def test_test_checks_registration_and_read_access(monkeypatch, capsys) -> None:
 
 
 def test_test_fails_when_bucket_not_registered(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
     _install_fake_quilt3(monkeypatch, listed=[FakeBucket("other", "Other")])
 
     assert bucket_tool.main(["test", "bucket-a"]) == 1
@@ -1043,35 +1065,46 @@ def test_sns_topic_source_labels_known_topic_names() -> None:
 
 
 def _stub_stack_and_config(monkeypatch, *, payload=None):
-    """Patch get_catalog_config and stack helpers for add_bucket tests."""
-    monkeypatch.setattr(
-        "quiltx.bucket.get_catalog_config",
-        lambda: {"catalog": "demo", "navigator_url": "https://demo.example.com"},
+    """Build a stack fixture for add_bucket tests."""
+    return bucket_tool.stack_lib.Catalog(
+        catalog_name="demo",
+        catalog_url="https://demo.example.com",
+        source="global-config",
+        auth_required=False,
     )
+
+
+def _default_stack_payload() -> dict[str, object]:
+    return {
+        "account_id": "123456789012",
+        "outputs": [
+            {
+                "OutputKey": "RegistryRoleARN",
+                "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+            }
+        ],
+    }
+
+
+def _stack_for_add_bucket(
+    monkeypatch, *, payload: dict[str, object] | None = None
+) -> Any:
+    stack = _stub_stack_and_config(monkeypatch)
     monkeypatch.setattr(
-        "quiltx.bucket.stack_lib.extract_catalog_name",
-        lambda config: "demo",
+        type(stack),
+        "payload",
+        property(
+            lambda _stack: _default_stack_payload() if payload is None else payload
+        ),
     )
-    monkeypatch.setattr(
-        "quiltx.bucket.stack_lib.load_stack_payload",
-        lambda catalog_name: payload
-        or {
-            "account_id": "123456789012",
-            "outputs": [
-                {
-                    "OutputKey": "RegistryRoleARN",
-                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
-                }
-            ],
-        },
-    )
+    return stack
 
 
 def test_add_bucket_already_registered(monkeypatch) -> None:
-    _stub_stack_and_config(monkeypatch)
+    stack = _stack_for_add_bucket(monkeypatch)
     _install_fake_quilt3(monkeypatch, get_result=FakeBucket("bucket", "My Bucket"))
 
-    result = add_bucket("bucket")
+    result = add_bucket(stack, "bucket")
     assert result == AddBucketResult(
         bucket="bucket",
         title="My Bucket",
@@ -1204,14 +1237,14 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
 
     add_calls: list[dict[str, str]] = []
     _install_fake_quilt3(monkeypatch, add_calls=add_calls)
-    _stub_stack_and_config(monkeypatch)
+    stack = _stack_for_add_bucket(monkeypatch)
 
     session = FakeSession(s3_client, sns_client, sts_client)
     import boto3 as _boto3
 
     monkeypatch.setattr(_boto3, "Session", lambda profile_name=None: session)
 
-    result = add_bucket("bucket", title="Demo Bucket")
+    result = add_bucket(stack, "bucket", title="Demo Bucket")
     assert result == AddBucketResult(
         bucket="bucket",
         title="Demo Bucket",
@@ -1235,15 +1268,11 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
 
 
 def test_add_bucket_no_stack_payload(monkeypatch) -> None:
-    _stub_stack_and_config(monkeypatch, payload=None)
-    monkeypatch.setattr(
-        "quiltx.bucket.stack_lib.load_stack_payload",
-        lambda catalog_name: None,
-    )
+    stack = _stack_for_add_bucket(monkeypatch, payload={})
     _install_fake_quilt3(monkeypatch)
 
     try:
-        add_bucket("bucket")
+        add_bucket(stack, "bucket")
     except ValueError as exc:
         assert "stack" in str(exc).lower()
     else:
@@ -1251,10 +1280,10 @@ def test_add_bucket_no_stack_payload(monkeypatch) -> None:
 
 
 def test_add_bucket_defaults_title_to_bucket_name(monkeypatch) -> None:
-    _stub_stack_and_config(monkeypatch)
+    stack = _stack_for_add_bucket(monkeypatch)
     _install_fake_quilt3(monkeypatch, get_result=FakeBucket("my-data", "my-data"))
 
-    result = add_bucket("my-data")
+    result = add_bucket(stack, "my-data")
     assert result.title == "my-data"
     assert result.already_registered is True
 
@@ -1305,6 +1334,12 @@ def test_resolve_principals_arg_splits_comma_separated() -> None:
 
 
 def test_cmd_add_principal_bare_flag_prints_guidance(monkeypatch, capsys) -> None:
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
     assert bucket_tool.main(["add", "bucket", "--principal"]) == 0
     captured = capsys.readouterr()
     assert "--principal" in captured.out
@@ -1313,9 +1348,43 @@ def test_cmd_add_principal_bare_flag_prints_guidance(monkeypatch, capsys) -> Non
 
 
 def test_cmd_add_principal_rejects_non_arn(monkeypatch, capsys) -> None:
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
     assert bucket_tool.main(["add", "bucket", "--principal", "not-an-arn"]) == 1
     captured = capsys.readouterr()
     assert "must be an IAM role ARN" in captured.err
+
+
+def test_cmd_add_no_prompt_without_yes_exits_early(monkeypatch, capsys) -> None:
+    """--no-prompt without --yes prints an error and returns 1 before any AWS calls."""
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
+    result = bucket_tool.main(["add", "bucket", "--no-prompt"])
+    assert result == 1
+    err = capsys.readouterr().err
+    assert "--no-prompt" in err
+    assert "--yes" in err
+
+
+def test_cmd_add_no_prompt_with_dry_run_requires_yes(monkeypatch, capsys) -> None:
+    """--no-prompt guard checks --yes regardless of --dry-run."""
+    cat = make_fake_catalog("nightly.quilttest.com")
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: cat,
+    )
+    result = bucket_tool.main(["add", "bucket", "--no-prompt", "--dry-run"])
+    assert result == 1
+    assert "--yes" in capsys.readouterr().err
 
 
 def test_cmd_profile_lists_profiles(monkeypatch, capsys) -> None:
@@ -1522,6 +1591,36 @@ def test_reindex_arg_parser_flags() -> None:
     assert args.sample == 3
 
 
+def test_bucket_subcommands_accept_catalog_and_api_key() -> None:
+    """Story 2 headless ladder: every auth-required bucket subcommand
+    must accept --catalog and --api-key."""
+    parser = bucket_tool.build_parser()
+    cases: list[tuple[str, list[str]]] = [
+        ("add", ["my-bucket"]),
+        ("remove", ["my-bucket"]),
+        ("list", []),
+        ("test", ["my-bucket"]),
+        ("reindex", ["s3://my-bucket/"]),
+    ]
+    for action, extra in cases:
+        args = parser.parse_args(
+            [action, "--catalog", "customer-acme", "--api-key", "qk_test", *extra]
+        )
+        assert args.catalog == "customer-acme", action
+        assert args.api_key == "qk_test", action
+
+
+def test_bucket_profile_does_not_accept_api_key() -> None:
+    """`bucket profile` is AWS-side only — Quilt auth flags do not apply."""
+    import pytest
+
+    parser = bucket_tool.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["profile", "--api-key", "qk_test"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["profile", "--catalog", "x"])
+
+
 def test_reindex_dry_run_lists_keys(monkeypatch, capsys) -> None:
     """Dry-run lists keys via list_object_versions and does NOT POST."""
 
@@ -1576,6 +1675,7 @@ def test_reindex_dry_run_lists_keys(monkeypatch, capsys) -> None:
 def test_reindex_post_sends_prefix(monkeypatch, capsys) -> None:
     """Non-dry-run posts {"prefix": ...} to /api/admin/reindex/<bucket>."""
 
+    _install_stack_context(monkeypatch)
     captured: dict[str, object] = {}
 
     class FakeResponse:
@@ -1612,6 +1712,7 @@ def test_reindex_post_sends_prefix(monkeypatch, capsys) -> None:
 
 
 def test_reindex_post_normalizes_registry_url_trailing_slash(monkeypatch) -> None:
+    _install_stack_context(monkeypatch)
     captured: dict[str, object] = {}
 
     class FakeResponse:
@@ -1642,6 +1743,7 @@ def test_reindex_post_normalizes_registry_url_trailing_slash(monkeypatch) -> Non
 
 def test_reindex_post_no_prefix_omits_field(monkeypatch) -> None:
     """``s3://bucket/`` should POST an empty body (whole-bucket reindex)."""
+    _install_stack_context(monkeypatch)
     captured: dict[str, object] = {}
 
     class FakeResponse:
@@ -1668,6 +1770,8 @@ def test_reindex_post_no_prefix_omits_field(monkeypatch) -> None:
 
 
 def test_reindex_post_409_returns_error(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+
     class FakeResponse:
         status_code = 409
         ok = False
@@ -1692,6 +1796,8 @@ def test_reindex_post_409_returns_error(monkeypatch, capsys) -> None:
 
 
 def test_reindex_post_404_returns_error(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+
     class FakeResponse:
         status_code = 404
         ok = False

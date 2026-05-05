@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from platformdirs import user_data_path
+from quiltx import stack as stack_lib
 
-
-def load_stack_payload(catalog_name: str) -> Mapping[str, Any]:
-    payload_path = user_data_path("quiltx") / catalog_name / "stack.json"
-    if not payload_path.exists():
-        raise FileNotFoundError(f"Missing stack payload at {payload_path}")
-    return json.loads(payload_path.read_text())
+load_stack_payload = stack_lib.require_stack_payload
 
 
 def parse_time(value: str) -> datetime:

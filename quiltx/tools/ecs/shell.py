@@ -7,18 +7,16 @@ import json
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import boto3
-from platformdirs import user_data_path
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.table import Table
 
 from quiltx import stack as stack_lib
-from quiltx.utils import get_hostname
+from quiltx.cli_common import add_catalog_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,10 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--region",
         help="AWS region (defaults to AWS SDK configuration).",
     )
-    parser.add_argument(
-        "--catalog",
-        help="Catalog name or URL used to locate stack payload.",
-    )
+    add_catalog_args(parser, auth_required=False)
     parser.add_argument(
         "--list",
         action="store_true",
@@ -137,33 +132,12 @@ https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-wor
     console.print(Markdown(message))
 
 
-def _stack_payload_path(catalog_name: str) -> Path:
-    return user_data_path("quiltx") / catalog_name / "stack.json"
-
-
 def _load_stack_payload(catalog_name: str) -> Mapping[str, object] | None:
     return stack_lib.load_stack_payload(catalog_name)
 
 
 def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> None:
-    payload_path = _stack_payload_path(catalog_name)
-    payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-
-
-def _resolve_catalog_name(catalog_arg: str | None) -> str:
-    if catalog_arg:
-        return get_hostname(catalog_arg)
-    try:
-        import quilt3
-
-        config = quilt3.config()
-        if config:
-            return stack_lib.extract_catalog_name(config)
-    except Exception:
-        pass
-    raise ValueError(
-        "No Quilt catalog configured. Run 'quiltx config' or pass --catalog."
-    )
+    stack_lib.write_stack_payload(catalog_name, payload)
 
 
 def _prompt_resource(
@@ -462,7 +436,7 @@ def _print_execute_command_not_enabled_error(
     if service:
         console.print("\n[bold]Quick Fix:[/bold]")
         console.print(
-            f"I can enable Execute Command on the service and restart it for you.\n"
+            "I can enable Execute Command on the service and restart it for you.\n"
         )
 
         should_enable = auto_enable
@@ -596,14 +570,11 @@ def _format_command(cmd: Iterable[str]) -> str:
     return " ".join(cmd)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
+@stack_lib.catalog_command(auth=False)
+def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         console = Console()
-        catalog_name = _resolve_catalog_name(args.catalog)
-        payload = _load_stack_payload(catalog_name)
+        payload = _load_stack_payload(catalog.catalog_name)
         saved_defaults: dict[str, object] = {}
         if payload:
             defaults_value = payload.get("ecs_defaults")
@@ -630,7 +601,9 @@ def main(argv: list[str] | None = None) -> int:
         clusters, services = _extract_ecs_resources(payload)
         if args.list:
             if not payload:
-                raise ValueError("No stack payload found. Run 'quiltx stack' first.")
+                raise ValueError(
+                    "No stack payload found. Run 'quiltx catalog stack <dns>' first."
+                )
             _render_resource_list(console, clusters, services)
             return 0
 
@@ -645,7 +618,8 @@ def main(argv: list[str] | None = None) -> int:
         elif not cluster:
             if not payload:
                 raise ValueError(
-                    "No cluster provided and no stack payload found. Run 'quiltx stack' or pass --cluster."
+                    "No cluster provided and no stack payload found. "
+                    "Run 'quiltx catalog stack <dns>' or pass --cluster."
                 )
             default_cluster = _default_cluster_from_resources(clusters)
             if default_cluster:
@@ -709,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if payload:
             updated = _merge_ecs_defaults(payload, cluster, service, container, command)
-            _write_stack_payload(catalog_name, updated)
+            _write_stack_payload(catalog.catalog_name, updated)
 
         if args.dry_run:
             print(_format_command(cmd))
@@ -746,6 +720,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return _run(args)
 
 
 if __name__ == "__main__":

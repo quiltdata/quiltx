@@ -7,7 +7,6 @@ import pkgutil
 import sys
 from importlib import import_module
 from pathlib import Path
-from typing import NoReturn
 
 
 def _discover_tools() -> dict[str, str]:
@@ -37,7 +36,7 @@ def run_tool(tool_name: str, args: list[str]) -> int:
     """Run a specific tool with given arguments."""
     if tool_name not in TOOLS:
         print(f"Error: Unknown tool '{tool_name}'", file=sys.stderr)
-        print(f"Run 'quiltx --list' to see available tools", file=sys.stderr)
+        print("Run 'quiltx --list' to see available tools", file=sys.stderr)
         return 1
 
     module_path = TOOLS[tool_name]

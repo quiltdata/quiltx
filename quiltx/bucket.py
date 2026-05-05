@@ -9,7 +9,6 @@ from typing import Any, Mapping, Sequence
 from botocore.exceptions import ClientError
 
 from quiltx import stack as stack_lib
-from quiltx.config import get_catalog_config
 from quiltx.utils import get_bucket_region
 
 
@@ -33,6 +32,7 @@ def resolve_bucket_session(
     profile: str | None,
     *,
     assume_yes: bool,
+    no_prompt: bool = False,
     prompt: Any = None,
     output: Any = None,
 ) -> tuple[Any, Any, str, str | None]:
@@ -40,6 +40,9 @@ def resolve_bucket_session(
 
     Returns (session, s3_client, region, resolved_profile). Session is None if
     the user declined or no profile could access the bucket.
+
+    When *no_prompt* is True, interactive prompts are suppressed; the function
+    returns ``(None, None, "", profile)`` rather than asking the user.
     """
     import sys as _sys
 
@@ -66,6 +69,13 @@ def resolve_bucket_session(
     match = find_profile_for_bucket(bucket, candidates)
     if match is None:
         print(f"No other configured profile can access bucket {bucket}.", file=err)
+        return None, None, "", profile
+
+    if no_prompt:
+        print(
+            f"Profile {profile or '<default>'} cannot access {bucket} and --no-prompt is set.",
+            file=err,
+        )
         return None, None, "", profile
 
     if assume_yes:
@@ -309,6 +319,7 @@ class AddBucketResult:
 
 
 def add_bucket(
+    stack: stack_lib.Catalog,
     bucket: str,
     *,
     title: str | None = None,
@@ -321,7 +332,7 @@ def add_bucket(
     and bucket event notifications, then registers the bucket
     in the Quilt catalog.
 
-    Requires a cached stack payload (run ``quiltx stack`` first).
+    Requires a cached stack payload (run ``quiltx catalog stack <dns>`` first).
 
     Args:
         bucket: S3 bucket name.
@@ -337,17 +348,20 @@ def add_bucket(
         ValueError: If no catalog is configured or stack metadata is missing.
     """
     import boto3
-    from quilt3.admin import buckets as admin_buckets
 
-    config = get_catalog_config()
-    catalog_name = stack_lib.extract_catalog_name(config)
-    payload = stack_lib.load_stack_payload(catalog_name)
+    payload = stack.payload
     if not payload:
-        raise ValueError("No cached stack metadata. Run 'quiltx stack' first.")
+        raise ValueError(
+            "No cached stack metadata. "
+            "Run 'quiltx catalog stack <dns>' to populate the cache."
+        )
 
     control_account_id = payload.get("account_id")
     if not control_account_id:
-        raise ValueError("Stack metadata missing account_id. Run 'quiltx stack' first.")
+        raise ValueError(
+            "Stack metadata missing account_id. "
+            "Run 'quiltx catalog stack <dns>' to refresh the cache."
+        )
     control_account_id = str(control_account_id)
 
     principal_list = list(principals) if principals else []
@@ -358,7 +372,7 @@ def add_bucket(
     bucket_title = title or bucket
 
     # Check if already registered
-    existing = admin_buckets.get(bucket)
+    existing = stack.admin.buckets.get(bucket)
     if existing is not None:
         return AddBucketResult(
             bucket=bucket,
@@ -397,7 +411,7 @@ def add_bucket(
     configure_bucket_notifications(bucket, sns_topic_arn, s3_client=s3_client)
 
     # Register in Quilt catalog
-    admin_buckets.add(
+    stack.admin.buckets.add(
         name=bucket,
         title=bucket_title,
         sns_notification_arn=sns_topic_arn,

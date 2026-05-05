@@ -22,9 +22,9 @@ def test_config_not_top_level() -> None:
     assert "config" not in cli.TOOLS
 
 
-def test_stack_is_top_level() -> None:
-    """Test that stack is a top-level tool."""
-    assert "stack" in cli.TOOLS
+def test_catalog_is_top_level() -> None:
+    """Test that catalog is a top-level tool."""
+    assert "catalog" in cli.TOOLS
 
 
 def test_run_tool_unknown(capsys) -> None:
@@ -56,15 +56,15 @@ def test_main_shows_tools(capsys) -> None:
     assert any(tool in captured.out for tool in cli.TOOLS.keys())
 
 
-def test_stack_no_subcommand(capsys) -> None:
-    """Test that 'quiltx stack' with no subcommand shows help."""
-    result = cli.main(["stack"])
+def test_catalog_no_subcommand(capsys) -> None:
+    """Test that 'quiltx catalog' with no subcommand shows help."""
+    result = cli.main(["catalog"])
     assert result == 1
 
     captured = capsys.readouterr()
     assert "acl" in captured.out
-    assert "catalog" in captured.out
-    assert "cfn" in captured.out
+    assert "stack" in captured.out
+    assert "default" in captured.out
 
 
 def test_ecs_no_subcommand(capsys) -> None:
@@ -77,10 +77,10 @@ def test_ecs_no_subcommand(capsys) -> None:
     assert "run-migration" in captured.out
 
 
-def test_stack_acl_help() -> None:
-    """Test that 'quiltx stack acl --help' works."""
+def test_catalog_acl_help() -> None:
+    """Test that 'quiltx catalog acl --help' works."""
     with pytest.raises(SystemExit) as exc_info:
-        cli.main(["stack", "acl", "--help"])
+        cli.main(["catalog", "acl", "--help"])
     assert exc_info.value.code == 0
 
 
@@ -98,17 +98,10 @@ def test_ecs_run_migration_help() -> None:
     assert exc_info.value.code == 0
 
 
-def test_stack_catalog_help() -> None:
-    """Test that 'quiltx stack catalog --help' works."""
+def test_catalog_stack_help() -> None:
+    """Test that 'quiltx catalog stack --help' works."""
     with pytest.raises(SystemExit) as exc_info:
-        cli.main(["stack", "catalog", "--help"])
-    assert exc_info.value.code == 0
-
-
-def test_stack_cfn_help() -> None:
-    """Test that 'quiltx stack cfn --help' works."""
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main(["stack", "cfn", "--help"])
+        cli.main(["catalog", "stack", "--help"])
     assert exc_info.value.code == 0
 
 

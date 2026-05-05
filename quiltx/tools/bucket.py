@@ -14,8 +14,7 @@ from rich.table import Table
 
 from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
-from quiltx.config import auto_login, get_catalog_config
-from quiltx.utils import get_bucket_region
+from quiltx.cli_common import add_catalog_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket add",
         help="Register a bucket and configure bucket/SNS notifications.",
     )
+    add_catalog_args(add_parser, auth_required=True)
     add_parser.add_argument("bucket_name", help="S3 bucket name to register.")
     add_parser.add_argument(
         "--title",
@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket remove",
         help="Unregister a bucket from the Quilt catalog.",
     )
+    add_catalog_args(remove_parser, auth_required=True)
     remove_parser.add_argument("bucket_name", help="S3 bucket name to unregister.")
     remove_parser.add_argument(
         "--yes",
@@ -92,11 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    subparsers.add_parser(
+    list_parser = subparsers.add_parser(
         "list",
         prog="quiltx bucket list",
         help="List buckets registered in the catalog.",
     )
+    add_catalog_args(list_parser, auth_required=True)
 
     profile_parser = subparsers.add_parser(
         "profile",
@@ -116,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx bucket test",
         help="Verify the control account can read the bucket (tests cross-account policy).",
     )
+    add_catalog_args(test_parser, auth_required=True)
     test_parser.add_argument("bucket_name", help="S3 bucket name to test.")
 
     reindex_parser = subparsers.add_parser(
@@ -128,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
             "existing ES indices are NOT wiped."
         ),
     )
+    add_catalog_args(reindex_parser, auth_required=True)
     reindex_parser.add_argument(
         "s3_uri",
         help=(
@@ -162,18 +166,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.action == "add":
-        return _cmd_add(args)
-    if args.action == "remove":
-        return _cmd_remove(args)
-    if args.action == "list":
-        return _cmd_list()
-    if args.action == "profile":
-        return _cmd_profile(args)
-    if args.action == "test":
-        return _cmd_test(args)
-    if args.action == "reindex":
-        return _cmd_reindex(args)
+    try:
+        if args.action == "add":
+            return _cmd_add(args)
+        if args.action == "remove":
+            return _cmd_remove(args)
+        if args.action == "list":
+            return _cmd_list(args)
+        if args.action == "profile":
+            return _cmd_profile(args)
+        if args.action == "test":
+            return _cmd_test(args)
+        if args.action == "reindex":
+            return _cmd_reindex(args)
+    except Exception as exc:
+        if stack_lib.is_auth_error(exc):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     parser.print_help()
     return 1
@@ -210,132 +220,125 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         return _reindex_dry_run(bucket_name, prefix, args)
-    return _reindex_post(bucket_name, prefix, args)
+    return _reindex_post(args, bucket_name, prefix)
 
 
 def _reindex_dry_run(bucket_name: str, prefix: str, args: argparse.Namespace) -> int:
     """List a sample of keys under *prefix* without POSTing to the registry."""
-    try:
-        session, s3_client, _bucket_region, _resolved_profile = (
-            bucket_lib.resolve_bucket_session(
-                bucket_name,
-                args.profile,
-                assume_yes=True,
-            )
+    session, s3_client, _bucket_region, _resolved_profile = (
+        bucket_lib.resolve_bucket_session(
+            bucket_name,
+            args.profile,
+            assume_yes=True,
         )
-        if session is None:
-            return 1
-
-        paginator = s3_client.get_paginator("list_object_versions")
-        sample: list[str] = []
-        seen = 0
-        sample_limit = max(0, args.sample)
-        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
-            for entry in page.get("Versions") or []:
-                seen += 1
-                if len(sample) < sample_limit:
-                    sample.append(str(entry.get("Key", "")))
-            for entry in page.get("DeleteMarkers") or []:
-                seen += 1
-                if len(sample) < sample_limit:
-                    sample.append(str(entry.get("Key", "")) + "  (delete-marker)")
-
-        print(f"Dry-run: would reindex prefix {prefix!r} on bucket {bucket_name!r}.")
-        print(f"  Object versions found: {seen}")
-        if sample:
-            shown = min(sample_limit, len(sample))
-            print(f"  Sample keys ({shown}):")
-            for key in sample[:shown]:
-                print(f"    {key}")
-        elif seen == 0:
-            print("  (no object versions matched this prefix)")
-        else:
-            print("  (--sample 0: key display suppressed)")
-        return 0
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    )
+    if session is None:
         return 1
 
+    paginator = s3_client.get_paginator("list_object_versions")
+    sample: list[str] = []
+    seen = 0
+    sample_limit = max(0, args.sample)
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for entry in page.get("Versions") or []:
+            seen += 1
+            if len(sample) < sample_limit:
+                sample.append(str(entry.get("Key", "")))
+        for entry in page.get("DeleteMarkers") or []:
+            seen += 1
+            if len(sample) < sample_limit:
+                sample.append(str(entry.get("Key", "")) + "  (delete-marker)")
 
-@auto_login
-def _reindex_post(bucket_name: str, prefix: str, args: argparse.Namespace) -> int:
-    try:
-        from quilt3 import session as quilt3_session
+    print(f"Dry-run: would reindex prefix {prefix!r} on bucket {bucket_name!r}.")
+    print(f"  Object versions found: {seen}")
+    if sample:
+        shown = min(sample_limit, len(sample))
+        print(f"  Sample keys ({shown}):")
+        for key in sample[:shown]:
+            print(f"    {key}")
+    elif seen == 0:
+        print("  (no object versions matched this prefix)")
+    else:
+        print("  (--sample 0: key display suppressed)")
+    return 0
 
-        registry_url = quilt3_session.get_registry_url()
-        if not registry_url:
-            print(
-                "Error: no Quilt registry is configured. Run `quilt3 config` first.",
-                file=sys.stderr,
-            )
-            return 1
 
-        url = f"{registry_url.rstrip('/')}/api/admin/reindex/{bucket_name}"
-        payload: dict[str, Any] = {}
-        if prefix:
-            payload["prefix"] = prefix
+@stack_lib.catalog_command
+def _reindex_post(
+    stack: stack_lib.Catalog,
+    args: argparse.Namespace,
+    bucket_name: str,
+    prefix: str,
+) -> int:
+    from quilt3 import session as quilt3_session
 
-        http = quilt3_session.get_session()
-        response = http.post(url, json=payload)
-        if response.status_code == 409:
-            print(
-                f"Error: a reindex is already in progress for "
-                f"s3://{bucket_name}/{prefix} (HTTP 409).",
-                file=sys.stderr,
-            )
-            return 1
-        if response.status_code == 404:
-            print(
-                f"Error: bucket {bucket_name!r} is not registered in this catalog.",
-                file=sys.stderr,
-            )
-            return 1
-        if not response.ok:
-            print(
-                f"Error: registry returned HTTP {response.status_code}: {response.text}",
-                file=sys.stderr,
-            )
-            return 1
-
-        target = f"s3://{bucket_name}/{prefix}" if prefix else f"s3://{bucket_name}"
-        print(f"Enqueued reindex for {target}.")
-        if not prefix:
-            print("(no prefix supplied — full bucket reindex)")
-        return 0
-    except Exception as exc:
-        if "Authentication failed" in str(exc):
-            raise
-        print(f"Error: {exc}", file=sys.stderr)
+    registry_url = quilt3_session.get_registry_url()
+    if not registry_url:
+        print(
+            "Error: no Quilt registry is configured. Run `quilt3 config` first.",
+            file=sys.stderr,
+        )
         return 1
 
+    url = f"{registry_url.rstrip('/')}/api/admin/reindex/{bucket_name}"
+    payload: dict[str, Any] = {}
+    if prefix:
+        payload["prefix"] = prefix
 
-def _ensure_stack_payload(
-    config: Mapping[str, Any], catalog_name: str
-) -> Mapping[str, Any]:
+    http = quilt3_session.get_session()
+    response = http.post(url, json=payload)
+    if response.status_code == 409:
+        print(
+            f"Error: a reindex is already in progress for "
+            f"s3://{bucket_name}/{prefix} (HTTP 409).",
+            file=sys.stderr,
+        )
+        return 1
+    if response.status_code == 404:
+        print(
+            f"Error: bucket {bucket_name!r} is not registered in this catalog.",
+            file=sys.stderr,
+        )
+        return 1
+    if not response.ok:
+        print(
+            f"Error: registry returned HTTP {response.status_code}: {response.text}",
+            file=sys.stderr,
+        )
+        return 1
+
+    target = f"s3://{bucket_name}/{prefix}" if prefix else f"s3://{bucket_name}"
+    print(f"Enqueued reindex for {target}.")
+    if not prefix:
+        print("(no prefix supplied — full bucket reindex)")
+    return 0
+
+
+def _ensure_stack_payload(stack: stack_lib.Catalog) -> Mapping[str, Any]:
     """Load cached stack payload, or derive a lightweight one from the Quilt session."""
-    payload = stack_lib.load_stack_payload(catalog_name)
+    payload = stack_lib.load_stack_payload(stack.catalog_name)
     if payload is not None:
         return payload
 
-    catalog_url = str(config.get("navigator_url") or f"https://{catalog_name}")
-    catalog_config = stack_lib.fetch_catalog_config(catalog_url)
-    region = stack_lib.resolve_region(config, catalog_config)
+    catalog_config = stack_lib.fetch_catalog_config(stack.catalog_url)
+    region = stack_lib.fetch_region(stack, catalog_config)
 
-    print(f"Discovering stack for {catalog_name}...")
+    print(f"Discovering stack for {stack.catalog_name}...")
     try:
-        stack_info = stack_lib.find_matching_stack(catalog_url, region=region)
+        stack_info = stack_lib.find_matching_stack(stack, region=region)
         log_groups = stack_lib.list_log_group_resources(
-            stack_info["StackName"], region=region
+            stack, stack_info["StackName"], region=region
         )
-        stack_lib.write_stack_payload(
-            catalog_name,
-            catalog_url,
+        payload = stack_lib.build_stack_payload(
+            stack.catalog_name,
+            stack.catalog_url,
             region,
             stack_info,
             log_groups,
             catalog_config=catalog_config,
         )
-        cached = stack_lib.load_stack_payload(catalog_name)
+        stack_lib.write_stack_payload(stack.catalog_name, payload)
+        cached = stack_lib.load_stack_payload(stack.catalog_name)
         if cached is not None:
             return cached
     except Exception as exc:
@@ -345,20 +348,33 @@ def _ensure_stack_payload(
             file=sys.stderr,
         )
 
-    return _lightweight_stack_payload(catalog_name, catalog_url, region, catalog_config)
+    return _lightweight_stack_payload(
+        stack, stack.catalog_name, stack.catalog_url, region, catalog_config
+    )
 
 
 def _lightweight_stack_payload(
+    stack: stack_lib.Catalog,
     catalog_name: str,
     catalog_url: str,
     region: str,
     catalog_config: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Build an in-memory stack payload from the Quilt session (no CFN calls)."""
-    from quilt3.session import get_boto3_session
+    """Build an in-memory stack payload from the ambient AWS chain (no CFN calls).
 
-    session = get_boto3_session()
-    account_id = session.client("sts").get_caller_identity()["Account"]
+    Per spec [06 §3.3]: do not import quilt3; use boto3.Session(region_name=...)
+    against the ambient AWS credential chain. If that chain has no credentials,
+    boto3 raises NoCredentialsError, which we surface with a hint to configure AWS.
+    """
+    session = stack.aws_session()
+    try:
+        account_id = session.client("sts").get_caller_identity()["Account"]
+    except Exception as exc:
+        raise RuntimeError(
+            f"AWS credentials unavailable for {catalog_name}: {exc}. "
+            "Configure AWS credentials (e.g. AWS_PROFILE, ~/.aws/credentials) "
+            f"or run `quiltx catalog stack --catalog {catalog_name}` first."
+        ) from exc
 
     return {
         "catalog_name": catalog_name,
@@ -376,9 +392,16 @@ def _lightweight_stack_payload(
     }
 
 
-@auto_login
-def _cmd_add(args: argparse.Namespace) -> int:
+@stack_lib.catalog_command
+def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
+        if getattr(args, "no_prompt", False) and not getattr(args, "yes", False):
+            print(
+                "Error: --no-prompt requires --yes (or --dry-run) to avoid interactive prompts.",
+                file=sys.stderr,
+            )
+            return 1
+
         principals, show_guidance = _resolve_principals_arg(args.principal)
         if show_guidance:
             _print_principal_guidance()
@@ -391,19 +414,21 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-        config = get_catalog_config()
-        catalog_name = stack_lib.extract_catalog_name(config)
-        stack_payload = _ensure_stack_payload(config, catalog_name)
+        catalog_name = stack.catalog_name
+        stack_payload = _ensure_stack_payload(stack)
         control_account_id = _load_control_account_id(stack_payload)
         effective_principals = principals or [f"arn:aws:iam::{control_account_id}:root"]
         principal_source = "--principal" if principals else "account root (default)"
         stack_name = _stack_payload_value(stack_payload, "stack_name", "") or None
         control_region = _stack_payload_value(stack_payload, "region", "unknown")
-        catalog_url = str(config.get("navigator_url") or catalog_name)
+        catalog_url = stack.catalog_url
 
         session, s3_client, bucket_region, resolved_profile = (
             bucket_lib.resolve_bucket_session(
-                args.bucket_name, args.profile, assume_yes=args.yes
+                args.bucket_name,
+                args.profile,
+                assume_yes=args.yes,
+                no_prompt=getattr(args, "no_prompt", False),
             )
         )
         if session is None:
@@ -411,9 +436,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         args.profile = resolved_profile
         sns_client = session.client("sns", region_name=bucket_region)
 
-        from quilt3.admin import buckets as admin_buckets
-
-        existing_bucket = admin_buckets.get(args.bucket_name)
+        existing_bucket = stack.admin.buckets.get(args.bucket_name)
         if existing_bucket is not None and not args.force:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
@@ -426,6 +449,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
             if args.no_test:
                 return 0
             return _verify_bucket_registration_and_access(
+                stack,
                 args.bucket_name,
                 control_account_id=control_account_id,
             )
@@ -439,7 +463,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
                 "removing and re-adding (--force) so Quilt re-subscribes SQS."
             )
-            admin_buckets.remove(args.bucket_name)
+            stack.admin.buckets.remove(args.bucket_name)
             existing_bucket = None
 
         bucket_policy = bucket_lib.get_bucket_policy(
@@ -520,7 +544,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         )
 
         bucket_title = args.title or prior_title or args.bucket_name
-        admin_buckets.add(
+        stack.admin.buckets.add(
             name=args.bucket_name,
             title=bucket_title,
             sns_notification_arn=sns_topic_arn,
@@ -534,22 +558,21 @@ def _cmd_add(args: argparse.Namespace) -> int:
             return 0
         print()
         return _verify_bucket_registration_and_access(
+            stack,
             args.bucket_name,
             control_account_id=control_account_id,
         )
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
 
-@auto_login
-def _cmd_remove(args: argparse.Namespace) -> int:
+@stack_lib.catalog_command
+def _cmd_remove(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
-        from quilt3.admin import buckets as admin_buckets
-
-        existing = admin_buckets.get(args.bucket_name)
+        existing = stack.admin.buckets.get(args.bucket_name)
         if existing is None:
             print(f"Bucket {args.bucket_name}: not registered in Quilt; nothing to do.")
             return 0
@@ -566,7 +589,7 @@ def _cmd_remove(args: argparse.Namespace) -> int:
                 print("Aborted.")
                 return 1
 
-        admin_buckets.remove(args.bucket_name)
+        stack.admin.buckets.remove(args.bucket_name)
         print(f"Removed bucket {args.bucket_name} from the Quilt catalog.")
         print(
             "Note: S3 bucket policy, SNS topic, and bucket notifications were left "
@@ -574,18 +597,16 @@ def _cmd_remove(args: argparse.Namespace) -> int:
         )
         return 0
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
 
-@auto_login
-def _cmd_list() -> int:
+@stack_lib.catalog_command
+def _cmd_list(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
-        from quilt3.admin import buckets as admin_buckets
-
-        buckets = admin_buckets.list()
+        buckets = stack.admin.buckets.list()
         console = Console()
         table = Table(show_header=True, header_style="bold cyan")
         table.add_column("Name", style="green")
@@ -602,7 +623,7 @@ def _cmd_list() -> int:
         console.print(table)
         return 0
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -630,29 +651,32 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_test(args: argparse.Namespace) -> int:
-    return _verify_bucket_registration_and_access(args.bucket_name)
+@stack_lib.catalog_command
+def _cmd_test(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
+    return _verify_bucket_registration_and_access(stack, args.bucket_name)
 
 
-@auto_login
 def _verify_bucket_registration_and_access(
-    bucket_name: str, *, control_account_id: str | None = None
+    stack: stack_lib.Catalog, bucket_name: str, *, control_account_id: str | None = None
 ) -> int:
-    import quilt3
-    from quilt3.admin import buckets as admin_buckets
+    from quiltx.quilt3_facade import make_bucket
 
     bucket_uri = f"s3://{bucket_name}"
     registered = None
     stage = "registration lookup"
     try:
         registered = next(
-            (bucket for bucket in admin_buckets.list() if bucket.name == bucket_name),
+            (
+                bucket
+                for bucket in stack.admin.buckets.list()
+                if bucket.name == bucket_name
+            ),
             None,
         )
         if registered is None:
             raise ValueError(f"{bucket_name} is not registered in Quilt")
 
-        b = quilt3.Bucket(bucket_uri)
+        b: Any = make_bucket(bucket_uri)
 
         stage = "ls() via control account"
         # If the cross-account / managed-policy grant is wrong, this raises
@@ -683,7 +707,7 @@ def _verify_bucket_registration_and_access(
         print(f"OK: search index is populated ({len(results)}+ result[s])")
         return 0
     except Exception as exc:
-        if "Authentication failed" in str(exc):
+        if stack_lib.is_auth_error(exc):
             raise
         control_line = (
             f"  - Quilt control account: {control_account_id}"
@@ -714,11 +738,13 @@ def _verify_bucket_registration_and_access(
 
 def _load_control_account_id(stack_payload: Mapping[str, Any] | None) -> str:
     if not stack_payload:
-        raise ValueError("No cached stack metadata found. Run 'quiltx stack' first.")
+        raise ValueError(
+            "No cached stack metadata found. Run 'quiltx catalog stack <dns>' first."
+        )
     account_id = stack_payload.get("account_id")
     if not account_id:
         raise ValueError(
-            "Cached stack metadata is missing account_id. Run 'quiltx stack' first."
+            "Cached stack metadata is missing account_id. Run 'quiltx catalog stack <dns>' first."
         )
     return str(account_id)
 

@@ -11,7 +11,9 @@ import pytest
 import yaml
 
 from quiltx import acl
-from quiltx.tools.stack import acl as acl_tool
+from quiltx.tools.catalog import acl as acl_tool
+
+from tests.conftest import make_fake_catalog
 
 
 @dataclass
@@ -42,6 +44,37 @@ class FakeRole:
 class FakeBucket:
     name: str
     title: str
+
+
+def _fake_stack(
+    *,
+    payload: dict[str, Any] | None = None,
+    buckets: Any = None,
+    policies: Any = None,
+    roles: Any = None,
+    sso_config: Any = None,
+    users: Any = None,
+) -> Any:
+    return make_fake_catalog(
+        "catalog",
+        payload=payload,
+        buckets=buckets,
+        policies=policies,
+        roles=roles,
+        sso_config=sso_config,
+        users=users,
+    )
+
+
+def _install_acl_tool_stack(monkeypatch, stack: Any | None = None) -> Any:
+    fake_stack = stack or _fake_stack()
+    monkeypatch.setattr(
+        acl_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: fake_stack,
+    )
+    monkeypatch.setattr(acl_tool.stack_lib, "current_stack_header", lambda _stack: None)
+    return fake_stack
 
 
 def test_parse_acl_config_accepts_minimal_valid_config(tmp_path: Path) -> None:
@@ -484,31 +517,20 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         calls.append(("sso_set", yaml.safe_load(text)["default_role"]))
         return SimpleNamespace(text=text)
 
-    monkeypatch.setattr(acl, "admin_buckets", SimpleNamespace(add=bucket_add))
-    # Force the simple (non-cross-account) bucket add path in apply_acl.
-    monkeypatch.setattr(
-        "quiltx.config.get_catalog_config",
-        lambda: (_ for _ in ()).throw(RuntimeError("no config in test")),
-    )
-    monkeypatch.setattr(
-        acl,
-        "admin_policies",
-        SimpleNamespace(
+    stack = _fake_stack(
+        buckets=SimpleNamespace(add=bucket_add),
+        policies=SimpleNamespace(
             create_managed=policy_create,
             update_managed=lambda *args, **kwargs: None,
             delete=lambda title: calls.append(("policy_delete", title)),
         ),
-    )
-    monkeypatch.setattr(
-        acl,
-        "admin_roles",
-        SimpleNamespace(
+        roles=SimpleNamespace(
             create_managed=role_create,
             update_managed=lambda *args, **kwargs: None,
             delete=lambda name: calls.append(("role_delete", name)),
         ),
+        sso_config=SimpleNamespace(set=sso_set),
     )
-    monkeypatch.setattr(acl, "admin_sso_config", SimpleNamespace(set=sso_set))
 
     diff = acl.AclDiff(
         buckets_to_add=["bucket-a"],
@@ -537,7 +559,7 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
     )
     current = _empty_current_state()
 
-    acl.apply_acl(diff, current)
+    acl.apply_acl(stack, diff, current)
 
     assert calls == [
         ("bucket_add", "bucket-a", "bucket-a"),
@@ -557,24 +579,18 @@ def test_apply_acl_uses_cross_account_registration_when_stack_available(
     calls: list[tuple[Any, ...]] = []
 
     def fake_register(
-        bucket: str, control_account_id: str, *, assume_yes: bool
+        stack: Any, bucket: str, control_account_id: str, *, assume_yes: bool
     ) -> None:
         calls.append(("register", bucket, control_account_id, assume_yes))
 
     monkeypatch.setattr(acl, "_register_bucket_with_retry", fake_register)
-    monkeypatch.setattr(
-        acl, "admin_buckets", SimpleNamespace(add=lambda *a, **kw: None)
-    )
-    monkeypatch.setattr(
-        "quiltx.config.get_catalog_config", lambda: {"navigator_url": "https://x"}
-    )
-    monkeypatch.setattr("quiltx.stack.extract_catalog_name", lambda _config: "catalog")
-    monkeypatch.setattr(
-        "quiltx.stack.load_stack_payload", lambda _name: {"account_id": "111"}
+    stack = _fake_stack(
+        payload={"account_id": "111"},
+        buckets=SimpleNamespace(add=lambda *a, **kw: None),
     )
 
     diff = acl.AclDiff(buckets_to_add=["bucket-a"])
-    acl.apply_acl(diff, _empty_current_state(), assume_yes=True)
+    acl.apply_acl(stack, diff, _empty_current_state(), assume_yes=True)
 
     assert calls == [("register", "bucket-a", "111", True)]
 
@@ -582,13 +598,14 @@ def test_apply_acl_uses_cross_account_registration_when_stack_available(
 def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:
     diff = acl.AclDiff(buckets_to_add=["bucket-a"])
     current = _empty_current_state()
+    _install_acl_tool_stack(monkeypatch)
 
     monkeypatch.setattr(
         acl_tool.acl_lib,
         "parse_acl_config",
         lambda path: acl.AclConfig(policies=[], roles={}),
     )
-    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
     monkeypatch.setattr(acl_tool.acl_lib, "compute_diff", lambda desired, state: diff)
     monkeypatch.setattr(
         acl_tool.acl_lib,
@@ -607,13 +624,14 @@ def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:
 def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
     current = _empty_current_state()
     applied: list[str] = []
+    _install_acl_tool_stack(monkeypatch)
 
     monkeypatch.setattr(
         acl_tool.acl_lib,
         "parse_acl_config",
         lambda path: acl.AclConfig(policies=[], roles={}),
     )
-    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
     monkeypatch.setattr(
         acl_tool.acl_lib,
         "compute_diff",
@@ -646,7 +664,8 @@ def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
 def test_acl_tool_no_config_shows_current_state(monkeypatch, capsys) -> None:
     current = _empty_current_state()
     current.buckets["bucket-a"] = FakeBucket(name="bucket-a", title="bucket-a")
-    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda: current)
+    _install_acl_tool_stack(monkeypatch)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
 
     result = acl_tool.main([])
 
@@ -717,3 +736,22 @@ def _current_state_for_config(config: acl.AclConfig) -> acl.CurrentState:
         sso_config_text=sso_config_text,
         default_role_name=desired_state.default_role_name,
     )
+
+
+def test_acl_parser_accepts_catalog_and_api_key_flags() -> None:
+    """Story 2 literal: `quiltx catalog acl --catalog X --api-key qk_... apply ...`."""
+    parser = acl_tool.build_parser()
+    args = parser.parse_args(
+        [
+            "--catalog",
+            "customer-acme",
+            "--api-key",
+            "qk_test",
+            "--no-prompt",
+            "config.yaml",
+        ]
+    )
+    assert args.catalog == "customer-acme"
+    assert args.api_key == "qk_test"
+    assert args.no_prompt is True
+    assert args.config_file == "config.yaml"
