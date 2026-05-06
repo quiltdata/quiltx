@@ -682,12 +682,12 @@ def _verify_bucket_registration_and_access(
         if registered is None:
             raise ValueError(f"{bucket_name} is not registered in Quilt")
 
-        b: Any = make_bucket(bucket_uri)
-
-        stage = "ls() via control account"
-        # If the cross-account / managed-policy grant is wrong, this raises
-        # AccessDenied.
-        list(b.ls())
+        # Direct S3 access check (b.ls()) intentionally skipped: it ran with
+        # the user's locally-cached Quilt STS credentials, which may be stale
+        # or scoped by a role that doesn't grant access to this bucket. That
+        # produced false-negative AccessDenied errors after legitimate
+        # bucket-add operations. See issue tracker for "stale credentials
+        # prevent direct verification".
 
         stage = "search index probe"
         # Confirm the catalog's search index actually has entries for this
@@ -695,6 +695,7 @@ def _verify_bucket_registration_and_access(
         # Retry briefly since the initial scan can lag a freshly added bucket.
         import time as _time
 
+        b: Any = make_bucket(bucket_uri)
         results: list[Any] = []
         for attempt in range(6):
             results = b.search("*", limit=1)
@@ -709,7 +710,6 @@ def _verify_bucket_registration_and_access(
             )
 
         print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
-        print(f"OK: control account can read {bucket_uri}")
         print(f"OK: search index is populated ({len(results)}+ result[s])")
         return 0
     except Exception as exc:
@@ -727,10 +727,7 @@ def _verify_bucket_registration_and_access(
                 "this stack's SQS queues, or initial scan has not completed"
             )
         else:
-            cause = (
-                "  - likely cause: no managed Quilt policy currently grants "
-                "the control-account role s3 access to this bucket"
-            )
+            cause = "  - likely cause: registration lookup failed"
         lines = [
             f"FAILED: bucket {bucket_name} verification failed at {stage}.",
             f"  - registered in Quilt: {registered_tag}",

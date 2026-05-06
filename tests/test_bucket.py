@@ -1173,7 +1173,7 @@ def test_test_checks_registration_and_read_access(monkeypatch, capsys) -> None:
     assert bucket_tool.main(["test", "bucket-a"]) == 0
     captured = capsys.readouterr()
     assert "OK: bucket-a is registered in Quilt as Bucket A" in captured.out
-    assert "OK: control account can read s3://bucket-a" in captured.out
+    assert "OK: search index is populated" in captured.out
 
 
 def test_test_fails_when_bucket_not_registered(monkeypatch, capsys) -> None:
