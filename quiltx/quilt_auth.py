@@ -276,3 +276,38 @@ def bootstrap_api_key(
     return create_api_key(
         registry_url, access_token, name=name, expires_in_days=expires_in_days
     )
+
+
+def bootstrap_api_key_from_refresh_token(
+    catalog_url: str,
+    *,
+    refresh_token: str,
+    name: str,
+    expires_in_days: int,
+) -> dict[str, Any]:
+    """Mint a qk_... API key from an already-acquired refresh_token.
+
+    Used by the browser-based login flow: the user authenticates via SSO in
+    a browser tab opened at ``<registry>/login`` and pastes back the code
+    that page displays — that code IS the refresh_token.
+    """
+    registry_url = resolve_registry_url(catalog_url)
+    access_token = exchange_refresh_token_for_access_token(registry_url, refresh_token)
+    return create_api_key(
+        registry_url, access_token, name=name, expires_in_days=expires_in_days
+    )
+
+
+def open_browser(url: str) -> bool:
+    """Open *url* in the user's default browser. Returns True on success."""
+    import webbrowser
+
+    try:
+        return webbrowser.open(url, new=1, autoraise=True)
+    except Exception:
+        return False
+
+
+def browser_login_url(catalog_url: str) -> str:
+    """Return the registry's web login URL (SSO entry + paste-back code page)."""
+    return resolve_registry_url(catalog_url).rstrip("/") + "/login"

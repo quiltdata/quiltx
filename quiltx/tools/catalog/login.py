@@ -1,10 +1,17 @@
 """quiltx catalog login: mint a qk_... API key and store it.
 
-Bootstrap flow: username/password → catalog refresh_token → access_token →
-GraphQL ``apiKeyCreate`` → qk_... secret → keyring. SSO-only catalogs
-reject U/P at /api/login; the catalog's own error message is surfaced
-verbatim and the command exits non-zero so the user can paste a
-manually-issued key via --api-key instead.
+Three paths (in priority order):
+
+1. ``--api-key qk_...`` — paste an existing key; validated, then stored.
+2. ``--username`` (and/or ``--password``, or interactive prompt with
+   ``--no-browser``) — POST to ``/api/login``, then exchange refresh_token
+   → access_token → GraphQL ``apiKeyCreate``. SSO-only catalogs reject
+   this path at ``/api/login``.
+3. **Default** (interactive TTY, no ``--username``/``--api-key``,
+   ``--no-browser`` not set): browser flow. Open ``<registry>/login`` in
+   the user's browser, prompt them to paste back the code shown on that
+   page (the refresh_token), then mint the API key. Works with any auth
+   backend the catalog supports — including SSO.
 """
 
 from __future__ import annotations
@@ -44,9 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="quiltx catalog login",
         description=(
-            "Mint a qk_... API key from username/password and store it in "
-            "the system keyring. Use --api-key to skip the bootstrap and "
-            "store an existing key directly."
+            "Mint a qk_... API key and store it in the system keyring. "
+            "Default: open the catalog login page in a browser, then paste "
+            "back the code shown there (works with SSO). Use --username for "
+            "username/password bootstrap, or --api-key to store an existing "
+            "key directly."
         ),
     )
     add_catalog_args(parser, auth_required=True)
@@ -59,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Catalog admin password. If --username is given without --password "
             "in interactive mode, you will be prompted."
+        ),
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help=(
+            "Disable the default browser-based login flow; fall back to "
+            "interactive username/password prompts."
         ),
     )
     parser.add_argument(
@@ -76,6 +93,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="API key expiration window in days (1-365). Default: 365.",
     )
     return parser
+
+
+def _bootstrap_from_browser(
+    catalog_url: str,
+    dns: str,
+    *,
+    name: str,
+    expires_in_days: int,
+) -> dict[str, object]:
+    """Browser-based login: open <registry>/login, prompt for paste-back code."""
+    login_url = quilt_auth.browser_login_url(catalog_url)
+    print(f"Opening {login_url} in your browser...")
+    print(f"If that didn't work, visit: {login_url}")
+    quilt_auth.open_browser(login_url)
+    print()
+    try:
+        refresh_token = input("Paste the code from the page here: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\nAborted.", file=sys.stderr)
+        raise SystemExit(1)
+    if not refresh_token:
+        print("Error: no code provided.", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        return quilt_auth.bootstrap_api_key_from_refresh_token(
+            catalog_url,
+            refresh_token=refresh_token,
+            name=name,
+            expires_in_days=expires_in_days,
+        )
+    except quilt_auth.CatalogAuthError as exc:
+        print(f"Error: catalog rejected the code from {dns}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def _bootstrap_from_credentials(
@@ -144,16 +194,49 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Stored API key for {dns}.")
         return 0
 
-    # Path 2/3: U/P bootstrap, either from flags or from interactive prompt.
-    username = args.username
-    password = args.password
     interactive = not args.no_prompt and sys.stdin.isatty()
+    name = args.key_name or _default_key_name()
 
-    if username is None:
+    # Path 2: explicit username (and/or password) — U/P bootstrap, with
+    # interactive password prompt when omitted on a TTY.
+    if args.username is not None:
+        username = args.username
+        password = args.password
+        if password is None:
+            if not interactive:
+                print(
+                    "Error: --password is required when --username is set headlessly.",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                password = getpass.getpass(f"Password for {username}@{dns}: ")
+            except (KeyboardInterrupt, EOFError):
+                print("\nAborted.", file=sys.stderr)
+                return 1
+        result = _bootstrap_from_credentials(
+            catalog_url,
+            username=username,
+            password=password,
+            name=name,
+            expires_in_days=args.expires_in_days,
+        )
+
+    # Path 3 (default on a TTY without --username): browser flow.
+    elif interactive and not args.no_browser:
+        result = _bootstrap_from_browser(
+            catalog_url,
+            dns,
+            name=name,
+            expires_in_days=args.expires_in_days,
+        )
+
+    # Path 4: --no-browser (or no TTY): fall back to interactive U/P prompt.
+    else:
         if not interactive:
             print(
-                "Error: --username is required (or pass --api-key, or run "
-                "interactively).",
+                "Error: --username, --api-key, or interactive TTY is "
+                "required (browser flow needs a TTY for paste-back).",
                 file=sys.stderr,
             )
             return 2
@@ -165,28 +248,18 @@ def main(argv: list[str] | None = None) -> int:
         if not username:
             print("Error: username is required.", file=sys.stderr)
             return 1
-
-    if password is None:
-        if not interactive:
-            print(
-                "Error: --password is required when --username is set " "headlessly.",
-                file=sys.stderr,
-            )
-            return 2
         try:
             password = getpass.getpass(f"Password for {username}@{dns}: ")
         except (KeyboardInterrupt, EOFError):
             print("\nAborted.", file=sys.stderr)
             return 1
-
-    name = args.key_name or _default_key_name()
-    result = _bootstrap_from_credentials(
-        catalog_url,
-        username=username,
-        password=password,
-        name=name,
-        expires_in_days=args.expires_in_days,
-    )
+        result = _bootstrap_from_credentials(
+            catalog_url,
+            username=username,
+            password=password,
+            name=name,
+            expires_in_days=args.expires_in_days,
+        )
 
     secret = str(result["secret"])
     expires_at = _parse_expires_at(result.get("expires_at"))

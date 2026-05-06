@@ -173,6 +173,76 @@ def test_login_insecure_localhost_uses_http_url(tmp_path, monkeypatch):
     assert captured_url == ["http://localhost"]
 
 
+def test_login_browser_flow_default_on_tty(tmp_path, monkeypatch, capsys):
+    """No --username, no --api-key, on a TTY: open browser and accept paste."""
+    _setup_no_keyring(monkeypatch, tmp_path)
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    opened: list[str] = []
+    monkeypatch.setattr(
+        login_cmd.quilt_auth,
+        "open_browser",
+        lambda url: opened.append(url) or True,
+    )
+    monkeypatch.setattr(
+        login_cmd.quilt_auth,
+        "browser_login_url",
+        lambda _catalog_url: "https://nightly.quilttest.com/login",
+    )
+    monkeypatch.setattr("builtins.input", lambda *_a, **_kw: "rt_pasted")
+
+    bootstrap_calls: list[dict] = []
+
+    def fake_bootstrap(catalog_url, *, refresh_token, name, expires_in_days):
+        bootstrap_calls.append(
+            {
+                "url": catalog_url,
+                "refresh_token": refresh_token,
+                "name": name,
+                "expires_in_days": expires_in_days,
+            }
+        )
+        return {
+            "secret": "qk_browser",
+            "name": name,
+            "expires_at": "2027-05-04T00:00:00Z",
+        }
+
+    monkeypatch.setattr(
+        quilt_auth, "bootstrap_api_key_from_refresh_token", fake_bootstrap
+    )
+
+    rc = login_cmd.main(["--catalog", "nightly.quilttest.com"])
+    assert rc == 0
+    assert opened == ["https://nightly.quilttest.com/login"]
+    assert bootstrap_calls[0]["refresh_token"] == "rt_pasted"
+    stored = credentials.get("nightly.quilttest.com")
+    assert stored is not None
+    assert stored["api_key"] == "qk_browser"
+
+
+def test_login_no_browser_falls_back_to_username_prompt(tmp_path, monkeypatch, capsys):
+    """--no-browser on a TTY without --username: prompt for U/P instead."""
+    _setup_no_keyring(monkeypatch, tmp_path)
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    inputs = iter(["admin"])
+    monkeypatch.setattr("builtins.input", lambda *_a, **_kw: next(inputs))
+    monkeypatch.setattr(login_cmd.getpass, "getpass", lambda *_a, **_kw: "hunter2")
+
+    captured: list[dict] = []
+
+    def fake_bootstrap(catalog_url, *, username, password, name, expires_in_days):
+        captured.append({"user": username, "password": password})
+        return {"secret": "qk_up", "name": name, "expires_at": None}
+
+    monkeypatch.setattr(quilt_auth, "bootstrap_api_key", fake_bootstrap)
+
+    rc = login_cmd.main(["--catalog", "nightly.quilttest.com", "--no-browser"])
+    assert rc == 0
+    assert captured == [{"user": "admin", "password": "hunter2"}]
+
+
 def test_login_insecure_rejected_for_non_localhost(tmp_path, monkeypatch, capsys):
     _setup_no_keyring(monkeypatch, tmp_path)
     rc = login_cmd.main(
