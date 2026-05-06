@@ -745,6 +745,139 @@ def _current_state_for_config(config: acl.AclConfig) -> acl.CurrentState:
     )
 
 
+def test_apply_acl_prunes_sso_config_when_role_create_fails(monkeypatch) -> None:
+    """If one role fails to create, SSO still gets the surviving roles applied."""
+    sso_calls: list[Any] = []
+
+    def role_create(name: str, policies: list[str]) -> FakeRole:
+        if name == "exec":
+            raise RuntimeError("Internal Server Error")
+        return FakeRole(id=f"id-{name}", name=name, policies=[], permissions=[])
+
+    def sso_set(text: str) -> SimpleNamespace:
+        sso_calls.append(yaml.safe_load(text))
+        return SimpleNamespace(text=text)
+
+    stack = _fake_stack(
+        buckets=SimpleNamespace(add=lambda *args, **kwargs: None),
+        policies=SimpleNamespace(
+            create_managed=lambda title, *, permissions: FakePolicy(
+                id=f"id-{title}",
+                title=title,
+                managed=True,
+                permissions=permissions,
+                roles=[],
+            ),
+            update_managed=lambda *args, **kwargs: None,
+            delete=lambda title: None,
+        ),
+        roles=SimpleNamespace(
+            create_managed=role_create,
+            update_managed=lambda *args, **kwargs: None,
+            delete=lambda name: None,
+        ),
+        sso_config=SimpleNamespace(set=sso_set),
+    )
+
+    diff = acl.AclDiff(
+        policies_to_create=[
+            acl.PolicyUpdate(title="public", permissions=[]),
+            acl.PolicyUpdate(title="exec", permissions=[]),
+        ],
+        roles_to_create=[
+            acl.RoleUpdate(name="public", policy_titles=["public"]),
+            acl.RoleUpdate(name="exec", policy_titles=["exec"]),
+        ],
+        sso_config_text=yaml.safe_dump(
+            {
+                "version": "1.0",
+                "default_role": "exec",
+                "mappings": [
+                    {"roles": ["public"], "schema": {}},
+                    {"roles": ["exec"], "schema": {}, "admin": True},
+                ],
+            },
+            sort_keys=False,
+        ),
+        sso_needs_update=True,
+    )
+
+    warnings = acl.apply_acl(stack, diff, _empty_current_state())
+
+    assert len(sso_calls) == 1, "SSO config should still have been applied"
+    applied = sso_calls[0]
+    # `exec` mapping and default_role pruned; `public` mapping survives.
+    assert "default_role" not in applied
+    assert applied["mappings"] == [{"roles": ["public"], "schema": {}}]
+    assert any("pruned to skip missing roles" in w for w in warnings)
+    assert any("exec" in w for w in warnings)
+
+
+def test_prune_sso_config_drops_mappings_referencing_missing_roles() -> None:
+    config_text = yaml.safe_dump(
+        {
+            "version": "1.0",
+            "union_roles": True,
+            "default_role": "internal_public",
+            "mappings": [
+                {"roles": ["public"], "schema": {}},
+                {"roles": ["internal_public"], "schema": {}},
+                {"roles": ["exec"], "schema": {}, "admin": True},
+            ],
+        },
+        sort_keys=False,
+    )
+
+    pruned, dropped = acl._prune_sso_config_for_missing_roles(
+        config_text, available_roles={"public"}
+    )
+
+    assert dropped == {"internal_public", "exec"}
+    assert pruned is not None
+    payload = yaml.safe_load(pruned)
+    # Only the surviving mapping remains; default_role and the two missing
+    # role mappings are gone, but `public` still gets its SSO grant.
+    assert "default_role" not in payload
+    assert payload["mappings"] == [{"roles": ["public"], "schema": {}}]
+
+
+def test_prune_sso_config_returns_none_when_nothing_left_to_apply() -> None:
+    config_text = yaml.safe_dump(
+        {
+            "version": "1.0",
+            "default_role": "internal_public",
+            "mappings": [{"roles": ["exec"], "schema": {}}],
+        },
+        sort_keys=False,
+    )
+
+    pruned, dropped = acl._prune_sso_config_for_missing_roles(
+        config_text, available_roles=set()
+    )
+
+    assert pruned is None
+    assert dropped == {"internal_public", "exec"}
+
+
+def test_prune_sso_config_preserves_config_when_all_roles_exist() -> None:
+    config_text = yaml.safe_dump(
+        {
+            "version": "1.0",
+            "default_role": "public",
+            "mappings": [{"roles": ["public"], "schema": {}}],
+        },
+        sort_keys=False,
+    )
+
+    pruned, dropped = acl._prune_sso_config_for_missing_roles(
+        config_text, available_roles={"public"}
+    )
+
+    assert dropped == set()
+    assert pruned is not None
+    assert yaml.safe_load(pruned)["default_role"] == "public"
+
+
 def test_acl_parser_accepts_catalog_and_api_key_flags() -> None:
     """Story 2 literal: `quiltx catalog acl --catalog X --api-key qk_... apply ...`."""
     parser = acl_tool.build_parser()

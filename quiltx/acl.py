@@ -540,6 +540,42 @@ def _register_bucket_with_retry(
     )
 
 
+def _prune_sso_config_for_missing_roles(
+    config_text: str, available_roles: set[str]
+) -> tuple[str | None, set[str]]:
+    """Drop SSO mappings (and default_role) that reference unavailable roles.
+
+    The registry rejects the whole SSO config with RolesNotFound when even one
+    referenced role is missing. Pruning lets us still apply the mappings whose
+    roles do exist server-side. Returns ``(pruned_yaml, dropped_role_names)``;
+    pruned_yaml is None when nothing meaningful is left to apply.
+    """
+    payload = yaml.safe_load(config_text)
+    if not isinstance(payload, dict):
+        return config_text, set()
+
+    dropped: set[str] = set()
+    pruned_mappings: list[Any] = []
+    for entry in payload.get("mappings") or []:
+        roles = entry.get("roles") or []
+        missing = [r for r in roles if r not in available_roles]
+        if missing:
+            dropped.update(missing)
+            continue
+        pruned_mappings.append(entry)
+    payload["mappings"] = pruned_mappings
+
+    default_role = payload.get("default_role")
+    if default_role and default_role not in available_roles:
+        dropped.add(default_role)
+        payload.pop("default_role", None)
+
+    if not pruned_mappings and "default_role" not in payload:
+        return None, dropped
+
+    return yaml.safe_dump(payload, sort_keys=False), dropped
+
+
 def apply_acl(
     stack: stack_lib.Catalog,
     diff: AclDiff,
@@ -552,6 +588,7 @@ def apply_acl(
 
     warnings = list(diff.warnings)
     failed_buckets: set[str] = set()
+    failed_roles: set[str] = set()
 
     control_account_id: str | None = None
     if diff.buckets_to_add:
@@ -660,11 +697,13 @@ def apply_acl(
             print(
                 f"  ! role {role.name}: unknown policy {exc.args[0]!r}", file=sys.stderr
             )
+            failed_roles.add(role.name)
             continue
         except Exception as exc:
             detail = format_exception(exc)
             warnings.append(f"Role '{role.name}' could not be created: {detail}")
             print(f"  ! role {role.name}: {detail}", file=sys.stderr)
+            failed_roles.add(role.name)
             continue
         print(f"  + role {role.name}")
 
@@ -692,15 +731,41 @@ def apply_acl(
 
     if diff.sso_needs_update and diff.sso_config_text is not None:
         _print_apply_step("update sso config", verbose=verbose)
-        try:
-            stack.admin.sso_config.set(diff.sso_config_text)
-        except Exception as exc:
-            detail = format_exception(exc)
-            warnings.append(f"SSO config could not be updated: {detail}")
-            print(f"  ! sso config: {detail}", file=sys.stderr)
+        # Failed roles would make the registry reject the entire SSO config
+        # with RolesNotFound — prune those mappings (and default_role) so the
+        # roles that DID land still take effect, instead of losing all SSO.
+        available_roles = set(current.all_roles.keys()) | (
+            {role.name for role in diff.roles_to_create} - failed_roles
+        )
+        pruned_text, dropped_roles = _prune_sso_config_for_missing_roles(
+            diff.sso_config_text, available_roles
+        )
+        if dropped_roles:
+            warnings.append(
+                f"SSO config pruned to skip missing roles: "
+                f"{', '.join(sorted(dropped_roles))}. Mappings/default_role "
+                f"referencing them were dropped so the rest of SSO still applies."
+            )
+            print(
+                f"  ~ sso config: pruned roles {', '.join(sorted(dropped_roles))}",
+                file=sys.stderr,
+            )
+        if pruned_text is None:
+            warnings.append(
+                "SSO config not updated: every desired mapping references a "
+                "missing role."
+            )
+            print("  ! sso config: nothing to apply after pruning", file=sys.stderr)
         else:
-            prefix = "+" if diff.sso_is_create else "~"
-            print(f"  {prefix} sso config")
+            try:
+                stack.admin.sso_config.set(pruned_text)
+            except Exception as exc:
+                detail = format_exception(exc)
+                warnings.append(f"SSO config could not be updated: {detail}")
+                print(f"  ! sso config: {detail}", file=sys.stderr)
+            else:
+                prefix = "+" if diff.sso_is_create else "~"
+                print(f"  {prefix} sso config")
 
     for role_name in diff.roles_to_delete:
         try:
