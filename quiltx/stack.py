@@ -207,12 +207,33 @@ def is_auth_error(exc: BaseException) -> bool:
     Used to decide whether to bubble up to ``catalog_command``'s re-prompt
     loop (Story 8 per-catalog re-auth) versus rendering an inline error.
 
-    Match is on ``str(exc)`` rather than exception type because quilt3 raises
-    bare ``Exception("Authentication failed")`` from ``quilt3.session.login``
-    on a rejected key. If quilt3 ever introduces a typed error class, prefer
-    that here and treat the substring as a fallback.
+    Matches:
+    - ``Exception("Authentication failed")`` from ``quilt3.session.login``
+      on a rejected key (bare Exception, so we match on ``str(exc)``).
+    - ``GraphQLClientHttpError`` with status 401 — registry rejected the key.
+    - GraphQL ``{"errors":[{"message":"Unauthorized"}]}`` payloads, which
+      surface as ``GraphQLClientGraphQLMultiError`` whose stringification is
+      the joined error messages.
     """
-    return "Authentication failed" in str(exc)
+    try:
+        from quilt3._graphql_client.exceptions import (
+            GraphQLClientGraphQLMultiError,
+            GraphQLClientHttpError,
+        )
+    except ImportError:
+        GraphQLClientGraphQLMultiError = ()
+        GraphQLClientHttpError = ()
+
+    if (
+        isinstance(exc, GraphQLClientHttpError)
+        and getattr(exc, "status_code", None) == 401
+    ):
+        return True
+    if isinstance(exc, GraphQLClientGraphQLMultiError):
+        return True
+
+    msg = str(exc)
+    return "Authentication failed" in msg or msg.strip() == "Unauthorized"
 
 
 def _verbose_active(parsed_args: Any) -> bool:

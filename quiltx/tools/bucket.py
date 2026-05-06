@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import traceback
 from typing import Any, Mapping
 
 import boto3
@@ -182,11 +184,18 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         if stack_lib.is_auth_error(exc):
             raise
-        print(f"Error: {exc}", file=sys.stderr)
+        _print_exception(exc)
         return 1
 
     parser.print_help()
     return 1
+
+
+def _print_exception(exc: BaseException) -> None:
+    """Render a caught exception with type and (when verbose) traceback."""
+    print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)
+    if os.environ.get("QUILTX_VERBOSE"):
+        traceback.print_exception(exc, file=sys.stderr)
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -437,34 +446,25 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         sns_client = session.client("sns", region_name=bucket_region)
 
         existing_bucket = stack.admin.buckets.get(args.bucket_name)
-        if existing_bucket is not None and not args.force:
-            print(
-                f"Bucket {args.bucket_name}: already registered in Quilt; "
-                "nothing reapplied."
-            )
-            print("  - skipped: S3 bucket policy")
-            print("  - skipped: SNS notification")
-            print("  - skipped: cross-account principal grants")
-            print("  (use --force to remove and re-add so Quilt re-subscribes)")
-            if args.no_test:
-                return 0
-            return _verify_bucket_registration_and_access(
-                stack,
-                args.bucket_name,
-                control_account_id=control_account_id,
-            )
         prior_title = (
             getattr(existing_bucket, "title", None)
             if existing_bucket is not None
             else None
         )
-        if existing_bucket is not None:
+        if existing_bucket is not None and args.force:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
                 "removing and re-adding (--force) so Quilt re-subscribes SQS."
             )
             stack.admin.buckets.remove(args.bucket_name)
             existing_bucket = None
+        elif existing_bucket is not None:
+            print(
+                f"Bucket {args.bucket_name}: already registered in Quilt; "
+                "reapplying access plumbing (S3 policy / SNS / principals). "
+                "Use --force to also remove and re-add the catalog "
+                "registration so Quilt re-subscribes SQS."
+            )
 
         bucket_policy = bucket_lib.get_bucket_policy(
             args.bucket_name, s3_client=s3_client
@@ -544,12 +544,18 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         )
 
         bucket_title = args.title or prior_title or args.bucket_name
-        stack.admin.buckets.add(
-            name=args.bucket_name,
-            title=bucket_title,
-            sns_notification_arn=sns_topic_arn,
-        )
-        print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
+        if existing_bucket is None:
+            stack.admin.buckets.add(
+                name=args.bucket_name,
+                title=bucket_title,
+                sns_notification_arn=sns_topic_arn,
+            )
+            print(f"Registered bucket {args.bucket_name} as {bucket_title}.")
+        else:
+            print(
+                f"Bucket {args.bucket_name} already registered as "
+                f"{bucket_title}; access plumbing reapplied."
+            )
         print(f"SNS notifications: {sns_topic_arn}")
         if args.no_test:
             print(
@@ -565,7 +571,7 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     except Exception as exc:
         if stack_lib.is_auth_error(exc):
             raise
-        print(f"Error: {exc}", file=sys.stderr)
+        _print_exception(exc)
         return 1
 
 
@@ -599,7 +605,7 @@ def _cmd_remove(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     except Exception as exc:
         if stack_lib.is_auth_error(exc):
             raise
-        print(f"Error: {exc}", file=sys.stderr)
+        _print_exception(exc)
         return 1
 
 
@@ -625,7 +631,7 @@ def _cmd_list(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     except Exception as exc:
         if stack_lib.is_auth_error(exc):
             raise
-        print(f"Error: {exc}", file=sys.stderr)
+        _print_exception(exc)
         return 1
 
 

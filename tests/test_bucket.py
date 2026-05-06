@@ -500,63 +500,249 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
     sts_stubber.deactivate()
 
 
-def test_add_skip_already_registered(monkeypatch, capsys) -> None:
-    s3_client = _client("s3", region_name="us-west-2")
-    s3_stubber = Stubber(s3_client)
-    s3_stubber.add_response(
-        "get_bucket_location",
-        {"LocationConstraint": "us-west-2"},
-        {"Bucket": "bucket"},
-    )
-    s3_stubber.activate()
+def test_add_already_registered_reapplies_plumbing(monkeypatch, capsys) -> None:
+    """Already-registered bucket: reapply S3 policy / SNS / principals, but
+    skip the catalog ``admin.buckets.add`` GraphQL call.
 
-    session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
-    monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
+    The whole point of ``bucket add`` is to set up access. The catalog row
+    existing doesn't mean the bucket policy / SNS / cross-account grants are
+    in place, so we always (idempotently) apply those — only the GraphQL
+    registration is skipped when already present.
+    """
+    s3_client, s3_stubber = _stub_s3_for_full_add()
+    sns_client, sns_stubber, topic_arn = _stub_sns_for_existing_topic()
+    sts_client, sts_stubber = _stub_sts_caller_identity()
+
+    add_calls: list[dict[str, str]] = []
+    _install_fake_quilt3(
+        monkeypatch,
+        get_result=FakeBucket("bucket", "Existing Title"),
+        add_calls=add_calls,
+    )
+    monkeypatch.setattr(
+        bucket_tool.boto3,
+        "Session",
+        lambda profile_name=None: FakeSession(s3_client, sns_client, sts_client),
+    )
     _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
-        lambda catalog_name: {"account_id": "123456789012"},
+        lambda catalog_name: {
+            "account_id": "123456789012",
+            "outputs": [
+                {
+                    "OutputKey": "RegistryRoleARN",
+                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+                }
+            ],
+        },
     )
-    _install_fake_quilt3(monkeypatch, get_result=FakeBucket("bucket", "bucket"))
+    monkeypatch.setattr(
+        bucket_tool,
+        "_verify_bucket_registration_and_access",
+        lambda *args, **kwargs: 0,
+    )
 
     assert bucket_tool.main(["add", "bucket", "--yes"]) == 0
     captured = capsys.readouterr()
     assert "already registered" in captured.out
+    assert "reapplying access plumbing" in captured.out
+    assert add_calls == []
 
     s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    sts_stubber.assert_no_pending_responses()
     s3_stubber.deactivate()
+    sns_stubber.deactivate()
+    sts_stubber.deactivate()
 
 
-def test_add_skip_post_test_when_no_test_flag(monkeypatch) -> None:
-    s3_client = _client("s3", region_name="us-west-2")
-    s3_stubber = Stubber(s3_client)
-    s3_stubber.add_response(
-        "get_bucket_location",
-        {"LocationConstraint": "us-west-2"},
-        {"Bucket": "bucket"},
+def test_add_already_registered_skips_post_test_when_no_test_flag(monkeypatch) -> None:
+    s3_client, s3_stubber = _stub_s3_for_full_add()
+    sns_client, sns_stubber, topic_arn = _stub_sns_for_existing_topic()
+    sts_client, sts_stubber = _stub_sts_caller_identity()
+
+    _install_fake_quilt3(
+        monkeypatch,
+        get_result=FakeBucket("bucket", "Existing Title"),
+        add_calls=[],
     )
-    s3_stubber.activate()
-
-    session = FakeSession(s3_client, _client("sns", "us-west-2"), _client("sts"))
-    monkeypatch.setattr(bucket_tool.boto3, "Session", lambda profile_name=None: session)
+    monkeypatch.setattr(
+        bucket_tool.boto3,
+        "Session",
+        lambda profile_name=None: FakeSession(s3_client, sns_client, sts_client),
+    )
     _install_stack_context(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.stack_lib,
         "load_stack_payload",
-        lambda catalog_name: {"account_id": "123456789012"},
+        lambda catalog_name: {
+            "account_id": "123456789012",
+            "outputs": [
+                {
+                    "OutputKey": "RegistryRoleARN",
+                    "OutputValue": "arn:aws:iam::123456789012:role/quilt-registry",
+                }
+            ],
+        },
     )
-    _install_fake_quilt3(monkeypatch, get_result=FakeBucket("bucket", "bucket"))
     monkeypatch.setattr(
         bucket_tool,
         "_verify_bucket_registration_and_access",
-        lambda bucket_name: (_ for _ in ()).throw(AssertionError("should not run")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
     )
 
     assert bucket_tool.main(["add", "bucket", "--yes", "--no-test"]) == 0
 
     s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    sts_stubber.assert_no_pending_responses()
     s3_stubber.deactivate()
+    sns_stubber.deactivate()
+    sts_stubber.deactivate()
+
+
+def _stub_s3_for_full_add():
+    """S3 stubs covering get_location, policy read/write, notification read/write."""
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_location",
+        {"LocationConstraint": "us-west-2"},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {
+            "TopicConfigurations": [
+                {
+                    "Id": "existing",
+                    "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
+                    "Events": ["s3:ObjectCreated:*"],
+                }
+            ]
+        },
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {
+            "Bucket": "bucket",
+            "Policy": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        bucket_lib.build_quilt_policy_statement(
+                            "bucket", "123456789012"
+                        )
+                    ],
+                }
+            ),
+        },
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {
+            "TopicConfigurations": [
+                {
+                    "Id": "existing",
+                    "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
+                    "Events": ["s3:ObjectCreated:*"],
+                }
+            ]
+        },
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "put_bucket_notification_configuration",
+        {},
+        {
+            "Bucket": "bucket",
+            "NotificationConfiguration": {
+                "TopicConfigurations": [
+                    {
+                        "Id": "QuiltBucketNotifications",
+                        "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
+                        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+                    }
+                ]
+            },
+        },
+    )
+    s3_stubber.activate()
+    return s3_client, s3_stubber
+
+
+def _stub_sns_for_existing_topic():
+    sns_client = _client("sns", region_name="us-west-2")
+    sns_stubber = Stubber(sns_client)
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:existing"
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {}},
+        {"TopicArn": topic_arn},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "QuiltBucketNotifications",
+                            "Effect": "Allow",
+                            "Principal": {"Service": "s3.amazonaws.com"},
+                            "Action": "sns:Publish",
+                            "Resource": topic_arn,
+                            "Condition": {
+                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
+                                "StringEquals": {"aws:SourceAccount": "111122223333"},
+                            },
+                        },
+                        {
+                            "Sid": "QuiltCrossAccountSNSAccess",
+                            "Effect": "Allow",
+                            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+                            "Action": [
+                                "sns:GetTopicAttributes",
+                                "sns:Subscribe",
+                            ],
+                            "Resource": topic_arn,
+                        },
+                    ],
+                }
+            ),
+        },
+    )
+    sns_stubber.activate()
+    return sns_client, sns_stubber, topic_arn
+
+
+def _stub_sts_caller_identity():
+    sts_client = _client("sts")
+    sts_stubber = Stubber(sts_client)
+    sts_stubber.add_response(
+        "get_caller_identity",
+        {
+            "Account": "111122223333",
+            "Arn": "arn:aws:iam::111122223333:user/test",
+            "UserId": "test",
+        },
+        {},
+    )
+    sts_stubber.activate()
+    return sts_client, sts_stubber
 
 
 def test_add_no_config(monkeypatch, capsys) -> None:
