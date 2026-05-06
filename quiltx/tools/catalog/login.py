@@ -105,8 +105,8 @@ def _bootstrap_from_browser(
     """Browser-based login: open <registry>/login, prompt for paste-back code."""
     login_url = quilt_auth.browser_login_url(catalog_url)
     print(f"Opening {login_url} in your browser...")
-    print(f"If that didn't work, visit: {login_url}")
-    quilt_auth.open_browser(login_url)
+    if not quilt_auth.open_browser(login_url):
+        print(f"Could not open browser automatically. Please visit: {login_url}")
     print()
     try:
         refresh_token = input("Paste the code from the page here: ").strip()

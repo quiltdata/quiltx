@@ -841,6 +841,29 @@ def test_prune_sso_config_drops_mappings_referencing_missing_roles() -> None:
     assert payload["mappings"] == [{"roles": ["public"], "schema": {}}]
 
 
+def test_prune_sso_config_keeps_available_roles_in_multi_role_mapping() -> None:
+    """A mapping with both available and missing roles keeps the available ones."""
+    config_text = yaml.safe_dump(
+        {
+            "version": "1.0",
+            "mappings": [
+                {"roles": ["public", "exec"], "schema": {"x": 1}},
+            ],
+        },
+        sort_keys=False,
+    )
+
+    pruned, dropped = acl._prune_sso_config_for_missing_roles(
+        config_text, available_roles={"public"}
+    )
+
+    assert dropped == {"exec"}
+    assert pruned is not None
+    payload = yaml.safe_load(pruned)
+    # Surviving role keeps its SSO grant; the entry's other metadata is preserved.
+    assert payload["mappings"] == [{"roles": ["public"], "schema": {"x": 1}}]
+
+
 def test_prune_sso_config_returns_none_when_nothing_left_to_apply() -> None:
     config_text = yaml.safe_dump(
         {

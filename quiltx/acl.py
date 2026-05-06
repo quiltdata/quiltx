@@ -558,11 +558,21 @@ def _prune_sso_config_for_missing_roles(
     pruned_mappings: list[Any] = []
     for entry in payload.get("mappings") or []:
         roles = entry.get("roles") or []
+        surviving = [r for r in roles if r in available_roles]
         missing = [r for r in roles if r not in available_roles]
-        if missing:
-            dropped.update(missing)
+        dropped.update(missing)
+        if not surviving:
+            # All roles in this mapping are missing; drop the whole entry.
             continue
-        pruned_mappings.append(entry)
+        if missing:
+            # Keep the entry with the surviving roles so the SSO grant for
+            # those still applies. (Today's tooling emits single-role
+            # entries, but multi-role entries are valid in the schema.)
+            new_entry = dict(entry)
+            new_entry["roles"] = surviving
+            pruned_mappings.append(new_entry)
+        else:
+            pruned_mappings.append(entry)
     payload["mappings"] = pruned_mappings
 
     default_role = payload.get("default_role")
