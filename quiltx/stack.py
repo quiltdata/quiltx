@@ -216,12 +216,8 @@ def is_auth_error(exc: BaseException) -> bool:
       the joined error messages.
     """
     try:
-        from quilt3._graphql_client.exceptions import (
-            GraphQLClientGraphQLMultiError,
-            GraphQLClientHttpError,
-        )
+        from quilt3._graphql_client.exceptions import GraphQLClientHttpError
     except ImportError:
-        GraphQLClientGraphQLMultiError = ()
         GraphQLClientHttpError = ()
 
     if (
@@ -229,11 +225,18 @@ def is_auth_error(exc: BaseException) -> bool:
         and getattr(exc, "status_code", None) == 401
     ):
         return True
-    if isinstance(exc, GraphQLClientGraphQLMultiError):
-        return True
 
-    msg = str(exc)
-    return "Authentication failed" in msg or msg.strip() == "Unauthorized"
+    # GraphQLClientGraphQLMultiError carries arbitrary message lists ("Bucket
+    # not found", "Validation error", etc.) — only the literal "Unauthorized"
+    # payload should drive re-auth. Match on str() because the multi-error
+    # joins constituent messages with newlines/whitespace and exposes them
+    # via __str__.
+    msg = str(exc).strip()
+    if msg == "Unauthorized":
+        return True
+    if "Authentication failed" in msg:
+        return True
+    return False
 
 
 def _verbose_active(parsed_args: Any) -> bool:
