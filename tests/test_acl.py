@@ -270,6 +270,13 @@ def test_build_sso_config_emits_policy_and_static_role_mappings() -> None:
     assert payload["mappings"][2]["roles"] == ["exec"]
     assert payload["mappings"][2]["admin"] is True
 
+    # Non-admin mappings must omit `admin` entirely. Under union_roles, the
+    # server treats admin as a tri-state vote (None=non-vote, True=grant,
+    # False=veto); emitting admin:false here would veto the admin grant from
+    # any co-matching admin role.
+    assert "admin" not in payload["mappings"][0]
+    assert "admin" not in payload["mappings"][1]
+
 
 def test_compute_diff_from_simpler_stack_acl_example_against_empty_state() -> None:
     desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))

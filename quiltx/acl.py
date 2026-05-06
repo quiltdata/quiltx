@@ -399,22 +399,25 @@ def build_sso_config(config: AclConfig) -> str | None:
         payload["default_role"] = desired_state.default_role_name
 
     for mapping in desired_state.sso_mappings:
-        payload["mappings"].append(
-            {
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "groups": {
-                            "type": "array",
-                            "contains": {"const": mapping.group},
-                        }
-                    },
-                    "required": ["groups"],
+        entry: dict[str, Any] = {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "groups": {
+                        "type": "array",
+                        "contains": {"const": mapping.group},
+                    }
                 },
-                "roles": [mapping.role_name],
-                "admin": mapping.admin,
-            }
-        )
+                "required": ["groups"],
+            },
+            "roles": [mapping.role_name],
+        }
+        # Server tri-state: True grants admin, False vetoes, missing = non-vote.
+        # Under union_roles, emitting admin:false for ordinary roles would veto
+        # the admin grant from a co-matching admin role. Only emit when True.
+        if mapping.admin:
+            entry["admin"] = True
+        payload["mappings"].append(entry)
 
     return yaml.safe_dump(payload, sort_keys=False)
 
