@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-05-07
+
+### Fixed
+
+- `quiltx catalog acl`: dedupe `(bucket, level)` permissions when a bucket
+  appears in both `buckets.read` and `buckets.read_write`. RW implies R;
+  emitting both tripped the registry's composite PK on
+  `(role_policy_id, bucket_name)` and surfaced as an opaque 500 from
+  `policyCreateManaged`.
+- `quiltx catalog acl`: skip the SSO update when pruning would drop
+  `default_role` (registry requires it). Mappings land on the next
+  apply, with a warning explaining why.
+
+### Changed
+
+- `quiltx catalog acl`: on opaque `Internal Server Error` from
+  `policyCreateManaged` / `policyUpdateManaged` / policy delete, append
+  the desired permission set and a refetch of server-side state
+  (id, arn, permissions, or "not present"). Other errors unchanged.
+
 ## [0.13.0] - 2026-05-04
 
 This release reshapes `quiltx`'s identity and auth surface around a per-catalog model and switches the stored secret from username/password+refresh-token to a single `qk_...` API key per DNS. quiltx no longer mutates the user's global `quilt3.config()` to do its work, no longer consumes `quilt3`'s `credentials.json`/`auth.json`, and no longer relies on Quilt-minted AWS session credentials — AWS calls flow through the standard boto3 chain. Scripts that referenced the old `quiltx stack ...` surface, `--catalog-name`, or `--username`/`--password` will fail at argparse time — there are no aliases (pre-1.0).

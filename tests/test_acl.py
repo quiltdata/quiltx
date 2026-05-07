@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 import yaml
 
+from quilt3.admin.types import BucketPermissionLevel, Permission
+
 from quiltx import acl
 from quiltx.tools.catalog import acl as acl_tool
 
@@ -804,16 +806,21 @@ def test_apply_acl_prunes_sso_config_when_role_create_fails(monkeypatch) -> None
 
     warnings = acl.apply_acl(stack, diff, _empty_current_state())
 
-    assert len(sso_calls) == 1, "SSO config should still have been applied"
-    applied = sso_calls[0]
-    # `exec` mapping and default_role pruned; `public` mapping survives.
-    assert "default_role" not in applied
-    assert applied["mappings"] == [{"roles": ["public"], "schema": {}}]
-    assert any("pruned to skip missing roles" in w for w in warnings)
+    # Registry's SsoConfig schema requires default_role; since the configured
+    # default_role ("exec") was dropped, we cannot send the payload at all.
+    # The SSO update is deferred to a later run.
+    assert sso_calls == []
+    assert any("default_role" in w for w in warnings)
     assert any("exec" in w for w in warnings)
 
 
-def test_prune_sso_config_drops_mappings_referencing_missing_roles() -> None:
+def test_prune_sso_config_returns_none_when_default_role_dropped() -> None:
+    """If default_role's target role is missing, skip SSO entirely.
+
+    The registry's SsoConfig pydantic schema requires default_role; a payload
+    without it fails with `config.default_role: field required`. Returning
+    None tells the caller to defer the update until the missing role exists.
+    """
     config_text = yaml.safe_dump(
         {
             "version": "1.0",
@@ -832,12 +839,33 @@ def test_prune_sso_config_drops_mappings_referencing_missing_roles() -> None:
         config_text, available_roles={"public"}
     )
 
+    assert pruned is None
     assert dropped == {"internal_public", "exec"}
+
+
+def test_prune_sso_config_keeps_payload_when_default_role_survives() -> None:
+    """If only mapping-only roles are missing, the SSO update still goes."""
+    config_text = yaml.safe_dump(
+        {
+            "version": "1.0",
+            "union_roles": True,
+            "default_role": "public",
+            "mappings": [
+                {"roles": ["public"], "schema": {}},
+                {"roles": ["exec"], "schema": {}, "admin": True},
+            ],
+        },
+        sort_keys=False,
+    )
+
+    pruned, dropped = acl._prune_sso_config_for_missing_roles(
+        config_text, available_roles={"public"}
+    )
+
     assert pruned is not None
+    assert dropped == {"exec"}
     payload = yaml.safe_load(pruned)
-    # Only the surviving mapping remains; default_role and the two missing
-    # role mappings are gone, but `public` still gets its SSO grant.
-    assert "default_role" not in payload
+    assert payload["default_role"] == "public"
     assert payload["mappings"] == [{"roles": ["public"], "schema": {}}]
 
 
@@ -918,3 +946,112 @@ def test_acl_parser_accepts_catalog_and_api_key_flags() -> None:
     assert args.api_key == "qk_test"
     assert args.no_prompt is True
     assert args.config_file == "config.yaml"
+
+
+# Diagnostic helpers (added in 0.13.3 for opaque-500 surfacing).
+
+
+def test_permissions_for_buckets_dedupes_rw_over_read() -> None:
+    """A bucket listed in both read and read_write must yield ONE permission.
+
+    The registry's RolePolicyBucketPermission has a composite PK on
+    (role_policy_id, bucket_name); emitting both READ and READ_WRITE for the
+    same bucket trips a PK violation that surfaces as an opaque 500 from
+    policyCreateManaged. RW implies R, so we drop the redundant READ.
+    """
+    perms = acl._permissions_for_buckets(
+        read=["quilt-dev", "quilt-example"],
+        read_write=["quilt-bake", "quilt-dev"],
+    )
+    rendered = [(p.bucket, p.level.name) for p in perms]
+    # quilt-dev appears once, as READ_WRITE.
+    assert rendered == [
+        ("quilt-example", "READ"),
+        ("quilt-bake", "READ_WRITE"),
+        ("quilt-dev", "READ_WRITE"),
+    ]
+
+
+def test_permissions_for_buckets_handles_disjoint_inputs() -> None:
+    perms = acl._permissions_for_buckets(read=["a"], read_write=["b"])
+    rendered = [(p.bucket, p.level.name) for p in perms]
+    assert rendered == [("a", "READ"), ("b", "READ_WRITE")]
+
+
+def test_is_internal_server_error_matches_500_text() -> None:
+    assert acl._is_internal_server_error(
+        "Internal Server Error: Internal Server Error (path: ['policyCreateManaged'])"
+    )
+    assert acl._is_internal_server_error("Wrapper: Internal Server Error: foo")
+
+
+def test_is_internal_server_error_skips_validation_and_auth() -> None:
+    assert not acl._is_internal_server_error(
+        "errors=[InvalidInputSelectionErrors(path='config.default_role', "
+        "message='field required', name='ValidationError')] typename__='InvalidInput'"
+    )
+    assert not acl._is_internal_server_error("Unauthorized")
+    assert not acl._is_internal_server_error("Not Found")
+    assert not acl._is_internal_server_error("")
+
+
+def test_format_permissions_empty() -> None:
+    assert acl._format_permissions([]) == "(none)"
+
+
+def test_format_permissions_canonicalises_and_renders() -> None:
+    perms = [
+        Permission(bucket="quilt-bake", level=BucketPermissionLevel.READ_WRITE),
+        Permission(bucket="quilt-dev", level=BucketPermissionLevel.READ),
+        Permission(bucket="quilt-dev", level=BucketPermissionLevel.READ_WRITE),
+    ]
+    # Sorted by (bucket, level); enum repr split on '.' to surface just the name.
+    assert (
+        acl._format_permissions(perms)
+        == "READ_WRITE:quilt-bake,READ:quilt-dev,READ_WRITE:quilt-dev"
+    )
+
+
+def test_describe_policy_state_returns_id_arn_and_perms() -> None:
+    policy = SimpleNamespace(
+        title="internal",
+        id="pid-7",
+        arn="arn:aws:iam::123:policy/quilt-internal",
+        permissions=[
+            Permission(bucket="quilt-bake", level=BucketPermissionLevel.READ_WRITE),
+        ],
+    )
+    stack = _fake_stack(
+        policies=SimpleNamespace(list=lambda: [policy]),
+    )
+    out = acl._describe_policy_state(stack, "internal")
+    assert out == (
+        "server now: id=pid-7, arn=arn:aws:iam::123:policy/quilt-internal, "
+        "permissions=[READ_WRITE:quilt-bake]"
+    )
+
+
+def test_describe_policy_state_omits_arn_when_missing() -> None:
+    policy = SimpleNamespace(title="internal", id="pid-7", arn=None, permissions=[])
+    stack = _fake_stack(policies=SimpleNamespace(list=lambda: [policy]))
+    assert acl._describe_policy_state(stack, "internal") == (
+        "server now: id=pid-7, permissions=[(none)]"
+    )
+
+
+def test_describe_policy_state_reports_not_present() -> None:
+    stack = _fake_stack(policies=SimpleNamespace(list=lambda: []))
+    assert (
+        acl._describe_policy_state(stack, "internal")
+        == "server now: policy not present"
+    )
+
+
+def test_describe_policy_state_reports_refetch_failure() -> None:
+    def boom() -> Any:
+        raise RuntimeError("graphql down")
+
+    stack = _fake_stack(policies=SimpleNamespace(list=boom))
+    out = acl._describe_policy_state(stack, "internal")
+    assert out.startswith("refetch failed: ")
+    assert "graphql down" in out

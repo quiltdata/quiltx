@@ -549,6 +549,13 @@ def _prune_sso_config_for_missing_roles(
     referenced role is missing. Pruning lets us still apply the mappings whose
     roles do exist server-side. Returns ``(pruned_yaml, dropped_role_names)``;
     pruned_yaml is None when nothing meaningful is left to apply.
+
+    The registry's SsoConfig schema makes ``default_role`` a required field
+    (pydantic, no default). If pruning would leave the payload without a
+    ``default_role`` we cannot send it — the registry would reject with
+    ``InvalidInput: config.default_role: field required``. In that case we
+    return None so the caller skips the SSO update; the mappings will land
+    on the next apply once the missing role exists.
     """
     payload = yaml.safe_load(config_text)
     if not isinstance(payload, dict):
@@ -576,9 +583,18 @@ def _prune_sso_config_for_missing_roles(
     payload["mappings"] = pruned_mappings
 
     default_role = payload.get("default_role")
+    default_role_dropped = False
     if default_role and default_role not in available_roles:
         dropped.add(default_role)
         payload.pop("default_role", None)
+        default_role_dropped = True
+
+    if default_role_dropped:
+        # Registry's SsoConfig schema requires default_role; sending the
+        # payload without it fails pydantic validation
+        # (`config.default_role: field required`) before any DB write. Skip
+        # entirely; mappings land on a later apply once the role exists.
+        return None, dropped
 
     if not pruned_mappings and "default_role" not in payload:
         return None, dropped
@@ -639,10 +655,19 @@ def apply_acl(
                 else ""
             )
             detail = format_exception(exc)
+            if _is_internal_server_error(detail):
+                desired = _format_permissions(policy.permissions)
+                server_state = _describe_policy_state(stack, policy.title)
+                suffix = f" [desired: [{desired}]; {server_state}]"
+            else:
+                suffix = ""
             warnings.append(
-                f"Policy '{policy.title}' could not be created{hint}: {detail}"
+                f"Policy '{policy.title}' could not be created{hint}: {detail}{suffix}"
             )
-            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
+            print(
+                f"  ! policy {policy.title}: {detail}{suffix}",
+                file=sys.stderr,
+            )
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
@@ -680,10 +705,19 @@ def apply_acl(
                 else ""
             )
             detail = format_exception(exc)
+            if _is_internal_server_error(detail):
+                desired = _format_permissions(policy.permissions)
+                server_state = _describe_policy_state(stack, policy.title)
+                suffix = f" [desired: [{desired}]; {server_state}]"
+            else:
+                suffix = ""
             warnings.append(
-                f"Policy '{policy.title}' could not be updated{hint}: {detail}"
+                f"Policy '{policy.title}' could not be updated{hint}: {detail}{suffix}"
             )
-            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
+            print(
+                f"  ! policy {policy.title}: {detail}{suffix}",
+                file=sys.stderr,
+            )
             continue
         known_policies[policy.title] = updated
         print(f"  ~ policy {policy.title}")
@@ -750,23 +784,33 @@ def apply_acl(
         pruned_text, dropped_roles = _prune_sso_config_for_missing_roles(
             diff.sso_config_text, available_roles
         )
-        if dropped_roles:
+        if pruned_text is None:
+            roles_part = (
+                f" (missing roles: {', '.join(sorted(dropped_roles))})"
+                if dropped_roles
+                else ""
+            )
             warnings.append(
-                f"SSO config pruned to skip missing roles: "
-                f"{', '.join(sorted(dropped_roles))}. Mappings/default_role "
-                f"referencing them were dropped so the rest of SSO still applies."
+                "SSO config not updated: pruning would leave the payload "
+                "without a default_role (or with no surviving mappings); "
+                "the registry requires default_role to be present. "
+                f"Re-run after the missing role(s) are created.{roles_part}"
             )
             print(
-                f"  ~ sso config: pruned roles {', '.join(sorted(dropped_roles))}",
+                "  ! sso config: skipped (default_role or all mappings dropped)",
                 file=sys.stderr,
             )
-        if pruned_text is None:
-            warnings.append(
-                "SSO config not updated: every desired mapping references a "
-                "missing role."
-            )
-            print("  ! sso config: nothing to apply after pruning", file=sys.stderr)
         else:
+            if dropped_roles:
+                warnings.append(
+                    f"SSO config pruned to skip missing roles: "
+                    f"{', '.join(sorted(dropped_roles))}. Mappings referencing "
+                    f"them were dropped so the rest of SSO still applies."
+                )
+                print(
+                    f"  ~ sso config: pruned roles {', '.join(sorted(dropped_roles))}",
+                    file=sys.stderr,
+                )
             try:
                 stack.admin.sso_config.set(pruned_text)
             except Exception as exc:
@@ -1100,8 +1144,12 @@ def reset_policy(
         print(f"  - policy {title}")
     except Exception as exc:
         detail = format_exception(exc)
-        warnings.append(f"Policy '{title}' could not be deleted: {detail}")
-        print(f"  ! policy {title}: {detail}", file=sys.stderr)
+        if _is_internal_server_error(detail):
+            suffix = f" [{_describe_policy_state(stack, title)}]"
+        else:
+            suffix = ""
+        warnings.append(f"Policy '{title}' could not be deleted: {detail}{suffix}")
+        print(f"  ! policy {title}: {detail}{suffix}", file=sys.stderr)
     return warnings, user_snapshot
 
 
@@ -1353,10 +1401,17 @@ def _coerce_string_list(value: Any, field_name: str) -> list[str]:
 def _permissions_for_buckets(
     read: list[str], read_write: list[str]
 ) -> list[Permission]:
-    permissions = [Permission.read(bucket) for bucket in sorted(set(read))]
-    permissions.extend(
-        Permission.read_write(bucket) for bucket in sorted(set(read_write))
-    )
+    """Build the wire-level Permission list for a (read, read_write) pair.
+
+    Drops any READ entry whose bucket also appears in read_write — RW implies R,
+    and the registry's `RolePolicyBucketPermission` uses a composite primary
+    key on `(role_policy_id, bucket_name)`, so emitting two rows for the same
+    bucket trips a primary-key violation and surfaces as an opaque 500 from
+    `policyCreateManaged` / `policyUpdateManaged`.
+    """
+    rw = set(read_write)
+    permissions = [Permission.read(bucket) for bucket in sorted(set(read) - rw)]
+    permissions.extend(Permission.read_write(bucket) for bucket in sorted(rw))
     return permissions
 
 
@@ -1380,6 +1435,48 @@ def _dropped_permissions(
         for bucket, level in _canonical_permissions(sent)
         if (bucket, level) not in returned_set
     ]
+
+
+def _format_permissions(permissions: list[Permission]) -> str:
+    return (
+        ",".join(
+            f"{level.split('.')[-1]}:{bucket}"
+            for bucket, level in _canonical_permissions(permissions)
+        )
+        or "(none)"
+    )
+
+
+def _is_internal_server_error(detail: str) -> bool:
+    """True iff the formatted error text looks like a server-side 500.
+
+    Used to gate the refetch-and-describe diagnostic so we do not pay an
+    extra `policies.list()` round trip on expected validation, auth, or
+    not-found errors — those carry their own actionable text already.
+    """
+    return "Internal Server Error" in detail
+
+
+def _describe_policy_state(stack: stack_lib.Catalog, title: str) -> str:
+    """Re-fetch policy by title after a failed mutation; return a short
+    diagnostic string describing what (if anything) is on the server now.
+
+    Useful when a mutation returns a generic 500 without context: the
+    refetch tells us whether the policy actually exists, what permissions
+    it has, and what its id/arn are — turning an opaque "Internal Server
+    Error" into something we can act on the next attempt.
+    """
+    try:
+        for p in stack.admin.policies.list():
+            if getattr(p, "title", None) == title:
+                arn = getattr(p, "arn", None)
+                pid = getattr(p, "id", None)
+                perms = _format_permissions(getattr(p, "permissions", []) or [])
+                arn_part = f", arn={arn}" if arn else ""
+                return f"server now: id={pid}{arn_part}, permissions=[{perms}]"
+        return "server now: policy not present"
+    except Exception as inner:
+        return f"refetch failed: {format_exception(inner)}"
 
 
 def _same_yaml(left: str | None, right: str | None) -> bool:
