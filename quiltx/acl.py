@@ -15,14 +15,12 @@ from quiltx import stack as stack_lib
 INLINE_POLICY_SUFFIX = "__inline"
 ACL_TOP_LEVEL_KEYS = {"policies", "roles", "store_last_login_context"}
 ACL_POLICY_KEYS = {
-    "sso.groups",
     "buckets.read",
     "buckets.read_write",
     "config.is_admin",
     "config.default_role",
 }
 ACL_ROLE_KEYS = {
-    "sso.groups",
     "config.policies",
     "buckets.read",
     "buckets.read_write",
@@ -34,7 +32,7 @@ EVERYONE_GROUP = "Everyone"
 @dataclass(frozen=True)
 class AclPolicy:
     name: str
-    groups: list[str] = field(default_factory=list)
+    sso: dict[str, list[str]] = field(default_factory=dict)
     read: list[str] = field(default_factory=list)
     read_write: list[str] = field(default_factory=list)
     default_role: bool = False
@@ -44,7 +42,7 @@ class AclPolicy:
 @dataclass(frozen=True)
 class AclStaticRole:
     name: str
-    groups: list[str] = field(default_factory=list)
+    sso: dict[str, list[str]] = field(default_factory=dict)
     policies: list[str] = field(default_factory=list)
     read: list[str] = field(default_factory=list)
     read_write: list[str] = field(default_factory=list)
@@ -115,7 +113,7 @@ class AclDiff:
 @dataclass(frozen=True)
 class _SynthesizedRole:
     name: str
-    groups: list[str]
+    sso: dict[str, list[str]]
     policy_titles: list[str]
     source_policies: list[str]
     is_admin: bool | None
@@ -124,7 +122,7 @@ class _SynthesizedRole:
 @dataclass(frozen=True)
 class _ResolvedStaticRole:
     name: str
-    groups: list[str]
+    sso: dict[str, list[str]]
     policy_titles: list[str]
     is_admin: bool
     inline_policy_title: str | None
@@ -132,7 +130,8 @@ class _ResolvedStaticRole:
 
 @dataclass(frozen=True)
 class _SsoMapping:
-    group: str
+    claim: str
+    value: str
     role_name: str
     admin: bool | None = None
 
@@ -154,16 +153,19 @@ def format_exception(exc: Exception) -> str:
     errors = getattr(exc, "errors", None)
     if not isinstance(errors, list) or not errors:
         return base
-    details: list[str] = []
+    details: list[tuple[str, str]] = []
     for error in errors:
         message = getattr(error, "message", None)
         if not message:
             continue
         path = getattr(error, "path", None)
-        details.append(f"{message} (path: {path})" if path else str(message))
+        rendered = f"{message} (path: {path})" if path else str(message)
+        details.append((str(message), rendered))
     if not details:
         return base
-    return f"{base}: {'; '.join(details)}"
+    if all(message == base for message, _rendered in details):
+        return "; ".join(rendered for _message, rendered in details)
+    return f"{base}: {'; '.join(rendered for _message, rendered in details)}"
 
 
 def parse_acl_config(path: str | Path) -> AclConfig:
@@ -207,9 +209,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 f"'{INLINE_POLICY_SUFFIX}'; that suffix is reserved for generated "
                 "inline-role policies"
             )
-        groups = _coerce_non_empty_string_list(
-            value.get("sso.groups"), f"policies.{name}.sso.groups"
-        )
+        sso = _coerce_sso_selectors(value, f"policies.{name}")
         read = _coerce_string_list(
             value.get("buckets.read", []), f"policies.{name}.buckets.read"
         )
@@ -225,7 +225,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError(f"policies.{name}.config.default_role must be a boolean")
         policy = AclPolicy(
             name=name,
-            groups=_dedupe_preserve_order(groups),
+            sso=sso,
             read=_dedupe_preserve_order(read),
             read_write=_dedupe_preserve_order(read_write),
             is_admin=is_admin,
@@ -254,7 +254,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             allowed_keys=ACL_ROLE_KEYS,
             section="roles",
             name=name,
-            hint="User-specific SSO selectors such as 'sso.users' are not supported.",
+            hint="SSO selectors must be named 'sso.<claim>' and contain a non-empty list of strings.",
         )
         reserved_inline_policy = f"{name}{INLINE_POLICY_SUFFIX}"
         if reserved_inline_policy in raw_policies:
@@ -262,9 +262,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 f"Role '{name}' conflicts with reserved generated inline policy "
                 f"'{reserved_inline_policy}'"
             )
-        groups = _coerce_non_empty_string_list(
-            value.get("sso.groups"), f"roles.{name}.sso.groups"
-        )
+        sso = _coerce_sso_selectors(value, f"roles.{name}")
         policy_refs = _coerce_string_list(
             value.get("config.policies", []), f"roles.{name}.config.policies"
         )
@@ -289,7 +287,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError(f"roles.{name}.config.is_admin must be a boolean")
         roles[name] = AclStaticRole(
             name=name,
-            groups=_dedupe_preserve_order(groups),
+            sso=sso,
             policies=_dedupe_preserve_order(policy_refs),
             read=_dedupe_preserve_order(read),
             read_write=_dedupe_preserve_order(read_write),
@@ -439,12 +437,9 @@ def build_sso_config(config: AclConfig) -> str | None:
             "schema": {
                 "type": "object",
                 "properties": {
-                    "groups": {
-                        "type": "array",
-                        "contains": {"const": mapping.group},
-                    }
+                    mapping.claim: _sso_claim_schema(mapping.claim, mapping.value)
                 },
-                "required": ["groups"],
+                "required": [mapping.claim],
             },
             "roles": [mapping.role_name],
         }
@@ -790,8 +785,10 @@ def apply_acl(
         _print_apply_step(f"update role {role.name}", verbose=verbose)
         try:
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
+            existing = current.managed_roles.get(role.name)
+            role_ref = existing.id if existing is not None else role.name
             stack.admin.roles.update_managed(
-                role.name, name=role.name, policies=policy_ids
+                role_ref, name=role.name, policies=policy_ids
             )
         except KeyError as exc:
             warnings.append(
@@ -856,20 +853,89 @@ def apply_acl(
                 prefix = "+" if diff.sso_is_create else "~"
                 print(f"  {prefix} sso config")
 
+    sso_cleared_for_role_delete = False
+    roles_to_delete = set(diff.roles_to_delete)
+    if roles_to_delete:
+        try:
+            users_to_detach = users_assigned_to_roles(stack, roles_to_delete)
+        except Exception as exc:  # pragma: no cover - external API surface
+            detail = format_exception(exc)
+            warnings.append(f"Users could not be checked before role delete: {detail}")
+            users_to_detach = []
+        if users_to_detach:
+            warnings.extend(clear_sso_config(stack, verbose=verbose))
+            sso_cleared_for_role_delete = True
+        else:
+            try:
+                sso_detach_warnings = detach_sso_mappings_for_roles(
+                    stack, roles_to_delete, verbose=verbose
+                )
+            except Exception as exc:  # pragma: no cover - external API surface
+                warnings.append(
+                    "SSO mappings could not be checked before role delete: "
+                    f"{format_exception(exc)}"
+                )
+            else:
+                warnings.extend(sso_detach_warnings)
+
     for role_name in diff.roles_to_delete:
         try:
+            detach_warnings, _snapshot = detach_users_from_role(
+                stack, role_name, verbose=verbose
+            )
+        except Exception as exc:  # pragma: no cover - external API surface
+            warnings.append(
+                f"Users could not be detached before deleting role "
+                f"'{role_name}': {format_exception(exc)}"
+            )
+        else:
+            warnings.extend(detach_warnings)
+        warnings.extend(
+            detach_all_policies_from_roles(
+                stack,
+                {role_name},
+                current,
+                known_policies,
+                verbose=verbose,
+            )
+        )
+        try:
+            role_ref = _role_ref(role_name, current)
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
-            stack.admin.roles.delete(role_name)
+            stack.admin.roles.delete(role_ref)
             print(f"  - role {role_name}")
         except Exception as exc:  # pragma: no cover - external API surface
             warnings.append(
                 f"Role '{role_name}' could not be deleted: {format_exception(exc)}"
             )
 
+    if sso_cleared_for_role_delete and diff.sso_config_text is not None:
+        _print_apply_step("restore sso config", verbose=verbose)
+        try:
+            stack.admin.sso_config.set(diff.sso_config_text)
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(f"SSO config could not be restored: {detail}")
+            print(f"  ! sso config: {detail}", file=sys.stderr)
+        else:
+            print("  ~ sso config (restored)")
+
+    warnings.extend(
+        detach_policies_from_roles(
+            stack,
+            set(diff.policies_to_delete),
+            current,
+            known_policies,
+            roles_to_delete=roles_to_delete,
+            verbose=verbose,
+        )
+    )
+
     for policy_title in diff.policies_to_delete:
         try:
+            policy_ref = _policy_ref(policy_title, current)
             _print_apply_step(f"delete policy {policy_title}", verbose=verbose)
-            stack.admin.policies.delete(policy_title)
+            stack.admin.policies.delete(policy_ref)
             print(f"  - policy {policy_title}")
         except Exception as exc:  # pragma: no cover - external API surface
             warnings.append(
@@ -944,6 +1010,161 @@ def managed_roles_using_policy(policy_title: str, current: CurrentState) -> list
         for name, role in current.managed_roles.items()
         if any(p.title == policy_title for p in getattr(role, "policies", []) or [])
     )
+
+
+def _role_ref(role_name: str, current: CurrentState) -> str:
+    role = current.all_roles.get(role_name)
+    return str(role.id) if role is not None else role_name
+
+
+def _policy_ref(policy_title: str, current: CurrentState) -> str:
+    policy = current.all_policies.get(policy_title)
+    return str(policy.id) if policy is not None else policy_title
+
+
+def detach_all_policies_from_roles(
+    stack: stack_lib.Catalog,
+    role_names: set[str],
+    current: CurrentState,
+    known_policies: dict[str, Any],
+    *,
+    verbose: bool = False,
+) -> list[str]:
+    """Remove all policy associations from roles before deleting those roles."""
+    warnings: list[str] = []
+    for role_name in sorted(role_names):
+        role = current.managed_roles.get(role_name)
+        if role is None:
+            continue
+        current_policies = list(getattr(role, "policies", []) or [])
+        if not current_policies:
+            continue
+        try:
+            _print_apply_step(f"detach policies from role {role_name}", verbose=verbose)
+            stack.admin.roles.update_managed(role.id, name=role_name, policies=[])
+            print(f"  ~ role {role_name} (detached policies)")
+        except Exception as exc:
+            detail = format_exception(exc)
+            fallback_warnings = detach_role_from_policies_via_policy_updates(
+                stack,
+                role_name,
+                current_policies,
+                current,
+                known_policies,
+                verbose=verbose,
+            )
+            if fallback_warnings:
+                warnings.append(
+                    f"Role '{role_name}' could not be detached from policies "
+                    f"before delete: {detail}"
+                )
+                warnings.extend(fallback_warnings)
+            print(f"  ! role {role_name}: {detail}", file=sys.stderr)
+    return warnings
+
+
+def detach_role_from_policies_via_policy_updates(
+    stack: stack_lib.Catalog,
+    role_name: str,
+    current_policies: list[Any],
+    current: CurrentState,
+    known_policies: dict[str, Any],
+    *,
+    verbose: bool = False,
+) -> list[str]:
+    """Remove a role association by rewriting each attached policy's role list."""
+    warnings: list[str] = []
+    role = current.managed_roles.get(role_name)
+    if role is None:
+        return warnings
+
+    for policy_summary in current_policies:
+        policy = known_policies.get(policy_summary.title)
+        if policy is None:
+            policy = current.managed_policies.get(policy_summary.title)
+        if policy is None:
+            warnings.append(
+                f"Policy '{policy_summary.title}' could not be used to detach "
+                f"role '{role_name}': policy not found in current state"
+            )
+            continue
+
+        remaining_role_ids = [
+            r.id
+            for r in getattr(policy, "roles", []) or []
+            if getattr(r, "name", None) != role_name
+            and getattr(r, "id", None) != role.id
+        ]
+        try:
+            _print_apply_step(
+                f"detach role {role_name} from policy {policy.title}",
+                verbose=verbose,
+            )
+            stack.admin.policies.update_managed(
+                policy.id,
+                title=policy.title,
+                permissions=list(getattr(policy, "permissions", []) or []),
+                roles=remaining_role_ids,
+            )
+            print(f"  ~ policy {policy.title} (detached role {role_name})")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"Policy '{policy.title}' could not detach role "
+                f"'{role_name}': {detail}"
+            )
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
+
+    return warnings
+
+
+def detach_policies_from_roles(
+    stack: stack_lib.Catalog,
+    policy_titles: set[str],
+    current: CurrentState,
+    known_policies: dict[str, Any],
+    *,
+    roles_to_delete: set[str],
+    verbose: bool = False,
+) -> list[str]:
+    """Remove retiring policies from surviving managed roles before policy delete."""
+    warnings: list[str] = []
+    if not policy_titles:
+        return warnings
+
+    for role_name, role in sorted(current.managed_roles.items()):
+        if role_name in roles_to_delete:
+            continue
+        current_policies = list(getattr(role, "policies", []) or [])
+        if not any(policy.title in policy_titles for policy in current_policies):
+            continue
+
+        surviving_policy_ids: list[str] = []
+        for policy in current_policies:
+            if policy.title in policy_titles:
+                continue
+            known = known_policies.get(policy.title)
+            surviving_policy_ids.append(
+                str(known.id if known is not None else policy.id)
+            )
+
+        try:
+            _print_apply_step(f"detach policies from role {role_name}", verbose=verbose)
+            stack.admin.roles.update_managed(
+                role.id,
+                name=role_name,
+                policies=surviving_policy_ids,
+            )
+            print(f"  ~ role {role_name} (detached deleted policies)")
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"Role '{role_name}' could not be detached from deleted "
+                f"policies {', '.join(sorted(policy_titles))}: {detail}"
+            )
+            print(f"  ! role {role_name}: {detail}", file=sys.stderr)
+
+    return warnings
 
 
 def detach_sso_mappings_for_roles(
@@ -1027,8 +1248,8 @@ def detach_users_from_role(
     """
     warnings: list[str] = []
     snapshot: list[UserRoleBinding] = []
-    default_role = stack.admin.roles.get_default()
-    fallback_name = default_role.name if default_role is not None else None
+    fallback_name: str | None = None
+    fallback_loaded = False
     for user in stack.admin.users.list():
         primary = user.role.name if user.role else None
         extras = [
@@ -1036,6 +1257,10 @@ def detach_users_from_role(
         ]
         if primary != role_name and role_name not in extras:
             continue
+        if not fallback_loaded:
+            default_role = stack.admin.roles.get_default()
+            fallback_name = default_role.name if default_role is not None else None
+            fallback_loaded = True
         snapshot.append(
             UserRoleBinding(user_name=user.name, primary=primary, extras=extras)
         )
@@ -1214,7 +1439,7 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         )
         synthesized_role = _SynthesizedRole(
             name=synthesized_role_name,
-            groups=policy.groups,
+            sso=policy.sso,
             policy_titles=list(cumulative_policy_titles),
             source_policies=list(cumulative_policy_titles),
             is_admin=synthesized_admin,
@@ -1224,14 +1449,16 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
             name=synthesized_role.name,
             policy_titles=list(cumulative_policy_titles),
         )
-        for group in policy.groups:
-            sso_mappings.append(
-                _SsoMapping(
-                    group=group,
-                    role_name=synthesized_role.name,
-                    admin=synthesized_role.is_admin,
+        for claim, values in policy.sso.items():
+            for value in values:
+                sso_mappings.append(
+                    _SsoMapping(
+                        claim=claim,
+                        value=value,
+                        role_name=synthesized_role.name,
+                        admin=synthesized_role.is_admin,
+                    )
                 )
-            )
         if policy.default_role:
             default_role_name = synthesized_role.name
 
@@ -1248,7 +1475,7 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
             policy_titles.append(inline_policy_title)
         resolved_role = _ResolvedStaticRole(
             name=role.name,
-            groups=role.groups,
+            sso=role.sso,
             policy_titles=policy_titles,
             is_admin=role.is_admin,
             inline_policy_title=inline_policy_title,
@@ -1257,14 +1484,16 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         role_updates[role.name] = RoleUpdate(
             name=role.name, policy_titles=policy_titles
         )
-        for group in role.groups:
-            sso_mappings.append(
-                _SsoMapping(
-                    group=group,
-                    role_name=role.name,
-                    admin=True if role.is_admin else None,
+        for claim, values in role.sso.items():
+            for value in values:
+                sso_mappings.append(
+                    _SsoMapping(
+                        claim=claim,
+                        value=value,
+                        role_name=role.name,
+                        admin=True if role.is_admin else None,
+                    )
                 )
-            )
 
     return _DesiredAclState(
         policy_updates=policy_updates,
@@ -1315,39 +1544,46 @@ def _validate_acl_section_keys(
     name: str,
     hint: str,
 ) -> None:
-    unknown_keys = sorted(set(value) - allowed_keys)
+    unknown_keys = sorted(
+        key for key in value if key not in allowed_keys and not key.startswith("sso.")
+    )
     if not unknown_keys:
         return
     raise ValueError(
         f"Unknown ACL fields in {section}.{name}: "
         + ", ".join(unknown_keys)
         + ". Supported fields: "
-        + ", ".join(sorted(allowed_keys))
+        + ", ".join([*sorted(allowed_keys), "sso.<claim>"])
         + f". {hint}"
     )
 
 
 def _validate_policy_ladder(policies: list[AclPolicy]) -> None:
     for previous, current in zip(policies, policies[1:]):
-        if _groups_are_nested(current.groups, previous.groups):
+        if _policy_audience_is_compatible(current.sso, previous.sso):
             continue
-        violating_groups = sorted(set(current.groups) - set(previous.groups))
-        if not violating_groups:
-            violating_groups = current.groups
         raise ValueError(
             "Policy ladder is not nested: "
-            f"policy '{current.name}' has groups {current.groups}, which are not a "
-            f"subset of policy '{previous.name}' groups {previous.groups}. "
+            f"policy '{current.name}' has SSO selectors {_format_sso_selectors(current.sso)}, "
+            f"which are not a subset of policy '{previous.name}' selectors "
+            f"{_format_sso_selectors(previous.sso)}. "
             "Without a declared hierarchy, only explicitly repeated groups or a prior "
-            f"'{EVERYONE_GROUP}' audience are accepted. Offending groups: "
-            + ", ".join(violating_groups)
+            f"'{EVERYONE_GROUP}' audience are accepted."
         )
 
 
-def _groups_are_nested(current_groups: list[str], previous_groups: list[str]) -> bool:
-    current_set = set(current_groups)
-    previous_set = set(previous_groups)
-    return current_set <= previous_set or EVERYONE_GROUP in previous_set
+def _policy_audience_is_compatible(
+    current_sso: dict[str, list[str]], previous_sso: dict[str, list[str]]
+) -> bool:
+    if EVERYONE_GROUP in previous_sso.get("groups", []):
+        return True
+    for claim, current_values in current_sso.items():
+        previous_values = previous_sso.get(claim)
+        if previous_values is not None and not set(current_values) <= set(
+            previous_values
+        ):
+            return False
+    return True
 
 
 def _validate_synthetic_role_names(
@@ -1395,7 +1631,7 @@ def _print_verbose_state(
     for policy in desired.policies:
         prefix = _diff_prefix(policy.name, created_policies, updated_policies)
         print(f"{prefix} policy {policy.name}")
-        print(f"    groups: {', '.join(policy.groups)}")
+        print(f"    sso: {_format_sso_selectors(policy.sso)}")
         _print_permissions(_permissions_for_buckets(policy.read, policy.read_write))
         if policy.default_role:
             print("    default_role: true")
@@ -1418,7 +1654,7 @@ def _print_verbose_state(
         prefix = _diff_prefix(synth_role.name, created_roles, updated_roles)
         sources = ", ".join(synth_role.source_policies)
         print(f"{prefix} role {synth_role.name} (synthesized from policies {sources})")
-        print(f"    groups: {', '.join(synth_role.groups)}")
+        print(f"    sso: {_format_sso_selectors(synth_role.sso)}")
         print(f"    policies: {', '.join(synth_role.policy_titles)}")
         if desired_state.default_role_name == synth_role.name:
             print("    default_role: true")
@@ -1426,7 +1662,7 @@ def _print_verbose_state(
     for role in desired_state.static_roles:
         prefix = _diff_prefix(role.name, created_roles, updated_roles)
         print(f"{prefix} role {role.name}")
-        print(f"    groups: {', '.join(role.groups)}")
+        print(f"    sso: {_format_sso_selectors(role.sso)}")
         print(f"    policies: {', '.join(role.policy_titles) or '(none)'}")
         if role.inline_policy_title is not None:
             print(f"    inline policy: {role.inline_policy_title}")
@@ -1473,6 +1709,42 @@ def _print_sso_summary(sso_text: str) -> None:
         roles = mapping.get("roles", [])
         admin = " (admin)" if mapping.get("admin") else ""
         print(f"    {match_str} -> [{', '.join(roles)}]{admin}")
+
+
+def _coerce_sso_selectors(
+    value: dict[str, Any], section_name: str
+) -> dict[str, list[str]]:
+    sso: dict[str, list[str]] = {}
+    for key, raw_values in value.items():
+        if not key.startswith("sso."):
+            continue
+        claim = key.removeprefix("sso.")
+        if not claim:
+            raise ValueError(f"'{section_name}.{key}' must include a claim name")
+        values = _coerce_non_empty_string_list(raw_values, f"{section_name}.{key}")
+        sso[claim] = _dedupe_preserve_order(values)
+    if not sso:
+        raise ValueError(
+            f"'{section_name}' must include at least one sso.<claim> selector"
+        )
+    return sso
+
+
+def _format_sso_selectors(sso: dict[str, list[str]]) -> str:
+    if not sso:
+        return "(none)"
+    return ", ".join(f"sso.{claim}={values}" for claim, values in sso.items())
+
+
+def _sso_claim_schema(claim: str, value: str) -> dict[str, Any]:
+    if claim == "groups":
+        return {"type": "array", "contains": {"const": value}}
+    return {
+        "anyOf": [
+            {"const": value},
+            {"type": "array", "contains": {"const": value}},
+        ]
+    }
 
 
 def _coerce_non_empty_string_list(value: Any, field_name: str) -> list[str]:
