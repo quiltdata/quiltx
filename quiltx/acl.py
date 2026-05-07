@@ -549,6 +549,13 @@ def _prune_sso_config_for_missing_roles(
     referenced role is missing. Pruning lets us still apply the mappings whose
     roles do exist server-side. Returns ``(pruned_yaml, dropped_role_names)``;
     pruned_yaml is None when nothing meaningful is left to apply.
+
+    The registry's SsoConfig schema makes ``default_role`` a required field
+    (pydantic, no default). If pruning would leave the payload without a
+    ``default_role`` we cannot send it — the registry would reject with
+    ``InvalidInput: config.default_role: field required``. In that case we
+    return None so the caller skips the SSO update; the mappings will land
+    on the next apply once the missing role exists.
     """
     payload = yaml.safe_load(config_text)
     if not isinstance(payload, dict):
@@ -576,9 +583,16 @@ def _prune_sso_config_for_missing_roles(
     payload["mappings"] = pruned_mappings
 
     default_role = payload.get("default_role")
+    default_role_dropped = False
     if default_role and default_role not in available_roles:
         dropped.add(default_role)
         payload.pop("default_role", None)
+        default_role_dropped = True
+
+    if default_role_dropped:
+        # Registry requires default_role; sending the payload now would 500
+        # the SSO update. Skip entirely; mappings land on a later apply.
+        return None, dropped
 
     if not pruned_mappings and "default_role" not in payload:
         return None, dropped
@@ -776,10 +790,15 @@ def apply_acl(
             )
         if pruned_text is None:
             warnings.append(
-                "SSO config not updated: every desired mapping references a "
-                "missing role."
+                "SSO config not updated: pruning would leave the payload "
+                "without a default_role (or with no surviving mappings); "
+                "the registry requires default_role to be present. "
+                "Re-run after the missing role(s) are created."
             )
-            print("  ! sso config: nothing to apply after pruning", file=sys.stderr)
+            print(
+                "  ! sso config: skipped (default_role or all mappings dropped)",
+                file=sys.stderr,
+            )
         else:
             try:
                 stack.admin.sso_config.set(pruned_text)

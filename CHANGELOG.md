@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.13.3] - 2026-05-07
 
+### Fixed
+
+- `quiltx catalog acl`: when a policy fails to create, every role that
+  references it is also skipped — including, in single-role configs, the
+  role pointed at by `config.default_role`. The existing prune dropped
+  `default_role` from the SSO payload to avoid `RolesNotFound`, but the
+  registry's `SsoConfig` schema requires `default_role` (pydantic, no
+  default), so the SSO update then failed with
+  `config.default_role: field required`. The prune now returns `None`
+  in that case and the caller skips the SSO update entirely with a
+  clear warning; the mappings land on the next apply once the missing
+  role exists.
+
 ### Changed
 
 - `quiltx catalog acl`: when `policyCreateManaged`, `policyUpdateManaged`,

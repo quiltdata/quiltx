@@ -804,16 +804,21 @@ def test_apply_acl_prunes_sso_config_when_role_create_fails(monkeypatch) -> None
 
     warnings = acl.apply_acl(stack, diff, _empty_current_state())
 
-    assert len(sso_calls) == 1, "SSO config should still have been applied"
-    applied = sso_calls[0]
-    # `exec` mapping and default_role pruned; `public` mapping survives.
-    assert "default_role" not in applied
-    assert applied["mappings"] == [{"roles": ["public"], "schema": {}}]
-    assert any("pruned to skip missing roles" in w for w in warnings)
+    # Registry's SsoConfig schema requires default_role; since the configured
+    # default_role ("exec") was dropped, we cannot send the payload at all.
+    # The SSO update is deferred to a later run.
+    assert sso_calls == []
+    assert any("default_role" in w for w in warnings)
     assert any("exec" in w for w in warnings)
 
 
-def test_prune_sso_config_drops_mappings_referencing_missing_roles() -> None:
+def test_prune_sso_config_returns_none_when_default_role_dropped() -> None:
+    """If default_role's target role is missing, skip SSO entirely.
+
+    The registry's SsoConfig pydantic schema requires default_role; a payload
+    without it fails with `config.default_role: field required`. Returning
+    None tells the caller to defer the update until the missing role exists.
+    """
     config_text = yaml.safe_dump(
         {
             "version": "1.0",
@@ -832,12 +837,33 @@ def test_prune_sso_config_drops_mappings_referencing_missing_roles() -> None:
         config_text, available_roles={"public"}
     )
 
+    assert pruned is None
     assert dropped == {"internal_public", "exec"}
+
+
+def test_prune_sso_config_keeps_payload_when_default_role_survives() -> None:
+    """If only mapping-only roles are missing, the SSO update still goes."""
+    config_text = yaml.safe_dump(
+        {
+            "version": "1.0",
+            "union_roles": True,
+            "default_role": "public",
+            "mappings": [
+                {"roles": ["public"], "schema": {}},
+                {"roles": ["exec"], "schema": {}, "admin": True},
+            ],
+        },
+        sort_keys=False,
+    )
+
+    pruned, dropped = acl._prune_sso_config_for_missing_roles(
+        config_text, available_roles={"public"}
+    )
+
     assert pruned is not None
+    assert dropped == {"exec"}
     payload = yaml.safe_load(pruned)
-    # Only the surviving mapping remains; default_role and the two missing
-    # role mappings are gone, but `public` still gets its SSO grant.
-    assert "default_role" not in payload
+    assert payload["default_role"] == "public"
     assert payload["mappings"] == [{"roles": ["public"], "schema": {}}]
 
 
