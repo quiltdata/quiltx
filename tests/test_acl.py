@@ -133,7 +133,11 @@ roles: {}
     policy_message = str(policy_error.value)
     assert "Unknown ACL fields in policies.exec" in policy_message
     assert "config.policies" in policy_message
-    assert "belong under top-level 'roles:'" in policy_message
+    assert "only valid under top-level 'roles:'" in policy_message
+    assert (
+        "Supported ACL entry fields are buckets.read, buckets.read_write, "
+        "config.default_role, config.is_admin" in policy_message
+    )
 
     role_path = tmp_path / "role.yml"
     role_path.write_text("""
@@ -154,6 +158,7 @@ roles:
     assert "unknown" in role_message
     assert "sso.users" not in role_message
     assert "sso.<claim>" in role_message
+    assert "Explicit roles also support the magic config.policies key" in role_message
 
 
 def test_parse_acl_config_accepts_arbitrary_sso_claims(tmp_path: Path) -> None:
@@ -233,6 +238,19 @@ roles: {}
     with pytest.raises(ValueError, match="policies.public.config.default_role"):
         acl.parse_acl_config(default_path)
 
+    role_default_path = tmp_path / "role_default.yml"
+    role_default_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles:
+  exec:
+    sso.groups: [Executives]
+    config.default_role: "yes"
+""")
+    with pytest.raises(ValueError, match="roles.exec.config.default_role"):
+        acl.parse_acl_config(role_default_path)
+
 
 def test_parse_acl_config_rejects_unknown_static_role_policy(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
@@ -250,7 +268,7 @@ roles:
         acl.parse_acl_config(config_path)
 
 
-def test_parse_acl_config_rejects_multiple_default_policies(tmp_path: Path) -> None:
+def test_parse_acl_config_rejects_multiple_default_entries(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
 policies:
@@ -259,11 +277,15 @@ policies:
     config.default_role: true
   internal:
     sso.groups: [Everyone]
+roles:
+  exec:
+    sso.groups: [Executives]
     config.default_role: true
-roles: {}
 """)
 
-    with pytest.raises(ValueError, match="Only one policy may set config.default_role"):
+    with pytest.raises(
+        ValueError, match="Only one ACL entry may set config.default_role"
+    ):
         acl.parse_acl_config(config_path)
 
 
@@ -401,6 +423,28 @@ roles:
         }
     }
     assert payload["mappings"][2]["schema"]["required"] == ["email"]
+
+
+def test_static_role_can_be_default_role(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles:
+  exec:
+    sso.groups: [Executives]
+    config.policies: [public]
+    config.default_role: true
+""")
+
+    config = acl.parse_acl_config(config_path)
+    sso_config = acl.build_sso_config(config)
+    assert sso_config is not None
+    payload = yaml.safe_load(sso_config)
+
+    assert config.roles["exec"].default_role is True
+    assert payload["default_role"] == "exec"
 
 
 def test_policy_config_is_admin_marks_synthesized_role_admin(tmp_path: Path) -> None:

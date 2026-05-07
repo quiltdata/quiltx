@@ -14,18 +14,13 @@ from quiltx import stack as stack_lib
 
 INLINE_POLICY_SUFFIX = "__inline"
 ACL_TOP_LEVEL_KEYS = {"policies", "roles", "store_last_login_context"}
-ACL_POLICY_KEYS = {
+ACL_ENTRY_KEYS = {
     "buckets.read",
     "buckets.read_write",
-    "config.is_admin",
     "config.default_role",
-}
-ACL_ROLE_KEYS = {
-    "config.policies",
-    "buckets.read",
-    "buckets.read_write",
     "config.is_admin",
 }
+CONFIG_POLICIES_KEY = "config.policies"
 EVERYONE_GROUP = "Everyone"
 
 
@@ -46,6 +41,7 @@ class AclStaticRole:
     policies: list[str] = field(default_factory=list)
     read: list[str] = field(default_factory=list)
     read_write: list[str] = field(default_factory=list)
+    default_role: bool = False
     is_admin: bool = False
 
 
@@ -125,6 +121,7 @@ class _ResolvedStaticRole:
     sso: dict[str, list[str]]
     policy_titles: list[str]
     is_admin: bool
+    default_role: bool
     inline_policy_title: str | None
 
 
@@ -134,6 +131,15 @@ class _SsoMapping:
     value: str
     role_name: str
     admin: bool | None = None
+
+
+@dataclass(frozen=True)
+class _ParsedAclEntry:
+    sso: dict[str, list[str]]
+    read: list[str]
+    read_write: list[str]
+    default_role: bool
+    is_admin: bool | None
 
 
 @dataclass(frozen=True)
@@ -190,57 +196,32 @@ def parse_acl_config(path: str | Path) -> AclConfig:
 
     policies: list[AclPolicy] = []
     policy_names: set[str] = set()
-    default_policy_names: list[str] = []
+    default_role_sources: list[str] = []
     for name, value in raw_policies.items():
         if not isinstance(name, str):
             raise ValueError("Policy names must be strings")
         if not isinstance(value, dict):
             raise ValueError(f"Policy '{name}' must be a mapping")
-        _validate_acl_section_keys(
-            value,
-            allowed_keys=ACL_POLICY_KEYS,
-            section="policies",
-            name=name,
-            hint="Role-only fields such as 'config.policies' belong under top-level 'roles:'.",
-        )
+        _validate_acl_entry_keys(value, section="policies", name=name)
         if name.endswith(INLINE_POLICY_SUFFIX):
             raise ValueError(
                 "Policy names may not end with "
                 f"'{INLINE_POLICY_SUFFIX}'; that suffix is reserved for generated "
                 "inline-role policies"
             )
-        sso = _coerce_sso_selectors(value, f"policies.{name}")
-        read = _coerce_string_list(
-            value.get("buckets.read", []), f"policies.{name}.buckets.read"
-        )
-        read_write = _coerce_string_list(
-            value.get("buckets.read_write", []),
-            f"policies.{name}.buckets.read_write",
-        )
-        is_admin = value.get("config.is_admin")
-        if is_admin is not None and not isinstance(is_admin, bool):
-            raise ValueError(f"policies.{name}.config.is_admin must be a boolean")
-        default_role = value.get("config.default_role", False)
-        if not isinstance(default_role, bool):
-            raise ValueError(f"policies.{name}.config.default_role must be a boolean")
+        entry = _parse_acl_entry(value, f"policies.{name}")
         policy = AclPolicy(
             name=name,
-            sso=sso,
-            read=_dedupe_preserve_order(read),
-            read_write=_dedupe_preserve_order(read_write),
-            is_admin=is_admin,
-            default_role=default_role,
+            sso=entry.sso,
+            read=entry.read,
+            read_write=entry.read_write,
+            is_admin=entry.is_admin,
+            default_role=entry.default_role,
         )
         policies.append(policy)
         policy_names.add(name)
-        if default_role:
-            default_policy_names.append(name)
-
-    if len(default_policy_names) > 1:
-        raise ValueError(
-            "Only one policy may set config.default_role: true; found "
-            + ", ".join(default_policy_names)
-        )
+        if entry.default_role:
+            default_role_sources.append(f"policies.{name}")
 
     roles: dict[str, AclStaticRole] = {}
     role_names: set[str] = set()
@@ -249,22 +230,16 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError("Role names must be strings")
         if not isinstance(value, dict):
             raise ValueError(f"Role '{name}' must be a mapping")
-        _validate_acl_section_keys(
-            value,
-            allowed_keys=ACL_ROLE_KEYS,
-            section="roles",
-            name=name,
-            hint="SSO selectors must be named 'sso.<claim>' and contain a non-empty list of strings.",
-        )
+        _validate_acl_entry_keys(value, section="roles", name=name)
         reserved_inline_policy = f"{name}{INLINE_POLICY_SUFFIX}"
         if reserved_inline_policy in raw_policies:
             raise ValueError(
                 f"Role '{name}' conflicts with reserved generated inline policy "
                 f"'{reserved_inline_policy}'"
             )
-        sso = _coerce_sso_selectors(value, f"roles.{name}")
+        entry = _parse_acl_entry(value, f"roles.{name}")
         policy_refs = _coerce_string_list(
-            value.get("config.policies", []), f"roles.{name}.config.policies"
+            value.get(CONFIG_POLICIES_KEY, []), f"roles.{name}.{CONFIG_POLICIES_KEY}"
         )
         missing = [
             policy_name
@@ -275,25 +250,24 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError(
                 f"Role '{name}' references unknown policies: {', '.join(missing)}"
             )
-        read = _coerce_string_list(
-            value.get("buckets.read", []), f"roles.{name}.buckets.read"
-        )
-        read_write = _coerce_string_list(
-            value.get("buckets.read_write", []),
-            f"roles.{name}.buckets.read_write",
-        )
-        is_admin = value.get("config.is_admin", False)
-        if not isinstance(is_admin, bool):
-            raise ValueError(f"roles.{name}.config.is_admin must be a boolean")
         roles[name] = AclStaticRole(
             name=name,
-            sso=sso,
+            sso=entry.sso,
             policies=_dedupe_preserve_order(policy_refs),
-            read=_dedupe_preserve_order(read),
-            read_write=_dedupe_preserve_order(read_write),
-            is_admin=is_admin,
+            read=entry.read,
+            read_write=entry.read_write,
+            default_role=entry.default_role,
+            is_admin=bool(entry.is_admin),
         )
         role_names.add(name)
+        if entry.default_role:
+            default_role_sources.append(f"roles.{name}")
+
+    if len(default_role_sources) > 1:
+        raise ValueError(
+            "Only one ACL entry may set config.default_role: true; found "
+            + ", ".join(default_role_sources)
+        )
 
     _validate_policy_ladder(policies)
     _validate_synthetic_role_names(policies, role_names)
@@ -1478,6 +1452,7 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
             sso=role.sso,
             policy_titles=policy_titles,
             is_admin=role.is_admin,
+            default_role=role.default_role,
             inline_policy_title=inline_policy_title,
         )
         static_roles.append(resolved_role)
@@ -1494,6 +1469,8 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
                         admin=True if role.is_admin else None,
                     )
                 )
+        if role.default_role:
+            default_role_name = role.name
 
     return _DesiredAclState(
         policy_updates=policy_updates,
@@ -1536,25 +1513,56 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
         )
 
 
-def _validate_acl_section_keys(
-    value: dict[str, Any],
-    *,
-    allowed_keys: set[str],
-    section: str,
-    name: str,
-    hint: str,
-) -> None:
+def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) -> None:
+    allowed_keys = set(ACL_ENTRY_KEYS)
+    if section == "roles":
+        allowed_keys.add(CONFIG_POLICIES_KEY)
     unknown_keys = sorted(
         key for key in value if key not in allowed_keys and not key.startswith("sso.")
     )
     if not unknown_keys:
         return
+    hint = (
+        f" Supported ACL entry fields are {', '.join(sorted(ACL_ENTRY_KEYS))} "
+        "and any `sso.<claim>` selector."
+    )
+    if section == "roles":
+        hint += f" Explicit roles also support the magic {CONFIG_POLICIES_KEY} key."
+    if section == "policies" and CONFIG_POLICIES_KEY in unknown_keys:
+        hint += (
+            f" {CONFIG_POLICIES_KEY} is only valid under top-level 'roles:' "
+            "because it composes existing named policies."
+        )
     raise ValueError(
         f"Unknown ACL fields in {section}.{name}: "
         + ", ".join(unknown_keys)
         + ". Supported fields: "
         + ", ".join([*sorted(allowed_keys), "sso.<claim>"])
-        + f". {hint}"
+        + "."
+        + hint
+    )
+
+
+def _parse_acl_entry(value: dict[str, Any], field_name: str) -> _ParsedAclEntry:
+    sso = _coerce_sso_selectors(value, field_name)
+    read = _coerce_string_list(
+        value.get("buckets.read", []), f"{field_name}.buckets.read"
+    )
+    read_write = _coerce_string_list(
+        value.get("buckets.read_write", []), f"{field_name}.buckets.read_write"
+    )
+    default_role = value.get("config.default_role", False)
+    if not isinstance(default_role, bool):
+        raise ValueError(f"{field_name}.config.default_role must be a boolean")
+    is_admin = value.get("config.is_admin")
+    if is_admin is not None and not isinstance(is_admin, bool):
+        raise ValueError(f"{field_name}.config.is_admin must be a boolean")
+    return _ParsedAclEntry(
+        sso=sso,
+        read=_dedupe_preserve_order(read),
+        read_write=_dedupe_preserve_order(read_write),
+        default_role=default_role,
+        is_admin=is_admin,
     )
 
 
@@ -1664,6 +1672,8 @@ def _print_verbose_state(
         print(f"{prefix} role {role.name}")
         print(f"    sso: {_format_sso_selectors(role.sso)}")
         print(f"    policies: {', '.join(role.policy_titles) or '(none)'}")
+        if desired_state.default_role_name == role.name:
+            print("    default_role: true")
         if role.inline_policy_title is not None:
             print(f"    inline policy: {role.inline_policy_title}")
         if role.is_admin:
