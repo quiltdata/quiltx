@@ -590,8 +590,10 @@ def _prune_sso_config_for_missing_roles(
         default_role_dropped = True
 
     if default_role_dropped:
-        # Registry requires default_role; sending the payload now would 500
-        # the SSO update. Skip entirely; mappings land on a later apply.
+        # Registry's SsoConfig schema requires default_role; sending the
+        # payload without it fails pydantic validation
+        # (`config.default_role: field required`) before any DB write. Skip
+        # entirely; mappings land on a later apply once the role exists.
         return None, dropped
 
     if not pruned_mappings and "default_role" not in payload:
@@ -782,28 +784,33 @@ def apply_acl(
         pruned_text, dropped_roles = _prune_sso_config_for_missing_roles(
             diff.sso_config_text, available_roles
         )
-        if dropped_roles:
-            warnings.append(
-                f"SSO config pruned to skip missing roles: "
-                f"{', '.join(sorted(dropped_roles))}. Mappings/default_role "
-                f"referencing them were dropped so the rest of SSO still applies."
-            )
-            print(
-                f"  ~ sso config: pruned roles {', '.join(sorted(dropped_roles))}",
-                file=sys.stderr,
-            )
         if pruned_text is None:
+            roles_part = (
+                f" (missing roles: {', '.join(sorted(dropped_roles))})"
+                if dropped_roles
+                else ""
+            )
             warnings.append(
                 "SSO config not updated: pruning would leave the payload "
                 "without a default_role (or with no surviving mappings); "
                 "the registry requires default_role to be present. "
-                "Re-run after the missing role(s) are created."
+                f"Re-run after the missing role(s) are created.{roles_part}"
             )
             print(
                 "  ! sso config: skipped (default_role or all mappings dropped)",
                 file=sys.stderr,
             )
         else:
+            if dropped_roles:
+                warnings.append(
+                    f"SSO config pruned to skip missing roles: "
+                    f"{', '.join(sorted(dropped_roles))}. Mappings referencing "
+                    f"them were dropped so the rest of SSO still applies."
+                )
+                print(
+                    f"  ~ sso config: pruned roles {', '.join(sorted(dropped_roles))}",
+                    file=sys.stderr,
+                )
             try:
                 stack.admin.sso_config.set(pruned_text)
             except Exception as exc:
