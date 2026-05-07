@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -189,8 +189,6 @@ def test_parse_acl_config_accepts_user_policy_after_group_policy(
 policies:
   public:
     sso.groups: [Everyone]
-  internal:
-    sso.groups: [Employees]
   exec:
     sso.users: [ernest@quilt.bio]
 roles: {}
@@ -198,7 +196,7 @@ roles: {}
 
     config = acl.parse_acl_config(config_path)
 
-    assert config.policies[2].sso == {"users": ["ernest@quilt.bio"]}
+    assert config.policies[1].sso == {"users": ["ernest@quilt.bio"]}
 
 
 def test_parse_acl_config_rejects_non_list_groups_and_non_bool_flags(
@@ -297,6 +295,23 @@ policies:
     sso.groups: [Contractors]
   finance:
     sso.groups: [Executives]
+roles: {}
+""")
+
+    with pytest.raises(ValueError, match="Policy ladder is not nested"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_policy_ladder_with_new_sso_claim(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  internal:
+    sso.groups: [Employees]
+  exec:
+    sso.users: [ernest@quilt.bio]
 roles: {}
 """)
 
@@ -845,10 +860,12 @@ def test_apply_acl_detaches_users_before_deleting_roles() -> None:
 
     diff = acl.AclDiff(
         roles_to_delete=["legacy_role"],
-        sso_config_text="version: '1.0'\nmappings: []\n",
+    )
+    current = replace(
+        _empty_current_state(), sso_config_text="version: '1.0'\nmappings: []\n"
     )
 
-    warnings = acl.apply_acl(stack, diff, _empty_current_state())
+    warnings = acl.apply_acl(stack, diff, current)
 
     assert warnings == []
     assert calls == [
@@ -856,6 +873,77 @@ def test_apply_acl_detaches_users_before_deleting_roles() -> None:
         ("remove_roles", "alice", ["legacy_role"], "default"),
         ("role_delete", "legacy_role"),
         ("sso_set", "version: '1.0'\nmappings: []\n"),
+    ]
+
+
+def test_apply_acl_restores_pruned_sso_after_role_delete_clear() -> None:
+    sso_calls: list[dict[str, Any] | None] = []
+
+    def role_create(name: str, policies: list[str]) -> FakeRole:
+        if name == "exec":
+            raise RuntimeError("role create failed")
+        return FakeRole(id=f"id-{name}", name=name, policies=[], permissions=[])
+
+    def sso_set(text: str | None) -> None:
+        sso_calls.append(None if text is None else yaml.safe_load(text))
+
+    stack = _fake_stack(
+        roles=SimpleNamespace(
+            create_managed=role_create,
+            delete=lambda name: None,
+            get_default=lambda: SimpleNamespace(name="public"),
+        ),
+        sso_config=SimpleNamespace(set=sso_set),
+        users=SimpleNamespace(
+            list=lambda: [
+                SimpleNamespace(
+                    name="alice",
+                    role=SimpleNamespace(name="legacy_role"),
+                    extra_roles=[],
+                )
+            ],
+            remove_roles=lambda *args, **kwargs: None,
+        ),
+    )
+
+    diff = acl.AclDiff(
+        roles_to_create=[
+            acl.RoleUpdate(name="public", policy_titles=[]),
+            acl.RoleUpdate(name="exec", policy_titles=[]),
+        ],
+        roles_to_delete=["legacy_role"],
+        sso_config_text=yaml.safe_dump(
+            {
+                "version": "1.0",
+                "default_role": "public",
+                "mappings": [
+                    {
+                        "schema": {"properties": {}, "required": []},
+                        "roles": ["public"],
+                    },
+                    {
+                        "schema": {"properties": {}, "required": []},
+                        "roles": ["exec"],
+                    },
+                ],
+            }
+        ),
+        sso_needs_update=True,
+    )
+
+    warnings = acl.apply_acl(stack, diff, _empty_current_state())
+
+    assert any("Role 'exec' could not be created" in warning for warning in warnings)
+    assert [call["default_role"] if call else None for call in sso_calls] == [
+        "public",
+        None,
+        "public",
+    ]
+    restored_payload = sso_calls[0]
+    assert restored_payload is not None
+    assert restored_payload == sso_calls[2]
+    assert restored_payload["mappings"] == [
+        {"schema": {"properties": {}, "required": []}, "roles": ["public"]}
     ]
 
 
@@ -901,7 +989,9 @@ def test_apply_acl_detaches_policies_before_deleting_roles() -> None:
     ]
 
 
-def test_apply_acl_falls_back_to_policy_update_when_role_detach_fails() -> None:
+def test_apply_acl_falls_back_to_policy_update_when_role_detach_fails(
+    capsys,
+) -> None:
     calls: list[tuple[Any, ...]] = []
     exec_role = FakeRole(
         id="id-exec",
@@ -952,6 +1042,7 @@ def test_apply_acl_falls_back_to_policy_update_when_role_detach_fails() -> None:
     warnings = acl.apply_acl(stack, acl.AclDiff(roles_to_delete=["exec"]), current)
 
     assert warnings == []
+    assert "role exec: role update failed" not in capsys.readouterr().err
     assert calls == [
         ("role_update", "id-exec", "exec", []),
         ("policy_update", "id-inline", "exec__inline", []),

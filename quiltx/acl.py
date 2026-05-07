@@ -779,6 +779,7 @@ def apply_acl(
             continue
         print(f"  ~ role {role.name}")
 
+    sso_text_to_restore = current.sso_config_text
     if diff.sso_needs_update and diff.sso_config_text is not None:
         _print_apply_step("update sso config", verbose=verbose)
         # Failed roles would make the registry reject the entire SSO config
@@ -824,6 +825,7 @@ def apply_acl(
                 warnings.append(f"SSO config could not be updated: {detail}")
                 print(f"  ! sso config: {detail}", file=sys.stderr)
             else:
+                sso_text_to_restore = pruned_text
                 prefix = "+" if diff.sso_is_create else "~"
                 print(f"  {prefix} sso config")
 
@@ -883,16 +885,22 @@ def apply_acl(
                 f"Role '{role_name}' could not be deleted: {format_exception(exc)}"
             )
 
-    if sso_cleared_for_role_delete and diff.sso_config_text is not None:
+    if sso_cleared_for_role_delete and sso_text_to_restore is not None:
         _print_apply_step("restore sso config", verbose=verbose)
         try:
-            stack.admin.sso_config.set(diff.sso_config_text)
+            stack.admin.sso_config.set(sso_text_to_restore)
         except Exception as exc:
             detail = format_exception(exc)
             warnings.append(f"SSO config could not be restored: {detail}")
             print(f"  ! sso config: {detail}", file=sys.stderr)
         else:
             print("  ~ sso config (restored)")
+    elif sso_cleared_for_role_delete:
+        warnings.append(
+            "SSO config was cleared for role deletion and no SSO config text "
+            "was available to restore."
+        )
+        print("  ! sso config: no restore payload available", file=sys.stderr)
 
     warnings.extend(
         detach_policies_from_roles(
@@ -1033,7 +1041,7 @@ def detach_all_policies_from_roles(
                     f"before delete: {detail}"
                 )
                 warnings.extend(fallback_warnings)
-            print(f"  ! role {role_name}: {detail}", file=sys.stderr)
+                print(f"  ! role {role_name}: {detail}", file=sys.stderr)
     return warnings
 
 
@@ -1587,9 +1595,9 @@ def _policy_audience_is_compatible(
         return True
     for claim, current_values in current_sso.items():
         previous_values = previous_sso.get(claim)
-        if previous_values is not None and not set(current_values) <= set(
-            previous_values
-        ):
+        if previous_values is None:
+            return False
+        if not set(current_values) <= set(previous_values):
             return False
     return True
 
