@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `quiltx catalog acl`: dedupe `(bucket, level)` permissions when a bucket
+  appears in both `buckets.read` and `buckets.read_write`. RW implies R;
+  emitting both tripped the registry's composite PK on
+  `(role_policy_id, bucket_name)` and surfaced as an opaque 500 from
+  `policyCreateManaged`.
 - `quiltx catalog acl`: skip the SSO update when pruning would drop
   `default_role` (registry requires it). Mappings land on the next
   apply, with a warning explaining why.

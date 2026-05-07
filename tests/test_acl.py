@@ -951,6 +951,33 @@ def test_acl_parser_accepts_catalog_and_api_key_flags() -> None:
 # Diagnostic helpers (added in 0.13.3 for opaque-500 surfacing).
 
 
+def test_permissions_for_buckets_dedupes_rw_over_read() -> None:
+    """A bucket listed in both read and read_write must yield ONE permission.
+
+    The registry's RolePolicyBucketPermission has a composite PK on
+    (role_policy_id, bucket_name); emitting both READ and READ_WRITE for the
+    same bucket trips a PK violation that surfaces as an opaque 500 from
+    policyCreateManaged. RW implies R, so we drop the redundant READ.
+    """
+    perms = acl._permissions_for_buckets(
+        read=["quilt-dev", "quilt-example"],
+        read_write=["quilt-bake", "quilt-dev"],
+    )
+    rendered = [(p.bucket, p.level.name) for p in perms]
+    # quilt-dev appears once, as READ_WRITE.
+    assert rendered == [
+        ("quilt-example", "READ"),
+        ("quilt-bake", "READ_WRITE"),
+        ("quilt-dev", "READ_WRITE"),
+    ]
+
+
+def test_permissions_for_buckets_handles_disjoint_inputs() -> None:
+    perms = acl._permissions_for_buckets(read=["a"], read_write=["b"])
+    rendered = [(p.bucket, p.level.name) for p in perms]
+    assert rendered == [("a", "READ"), ("b", "READ_WRITE")]
+
+
 def test_is_internal_server_error_matches_500_text() -> None:
     assert acl._is_internal_server_error(
         "Internal Server Error: Internal Server Error (path: ['policyCreateManaged'])"

@@ -1394,10 +1394,17 @@ def _coerce_string_list(value: Any, field_name: str) -> list[str]:
 def _permissions_for_buckets(
     read: list[str], read_write: list[str]
 ) -> list[Permission]:
-    permissions = [Permission.read(bucket) for bucket in sorted(set(read))]
-    permissions.extend(
-        Permission.read_write(bucket) for bucket in sorted(set(read_write))
-    )
+    """Build the wire-level Permission list for a (read, read_write) pair.
+
+    Drops any READ entry whose bucket also appears in read_write — RW implies R,
+    and the registry's `RolePolicyBucketPermission` uses a composite primary
+    key on `(role_policy_id, bucket_name)`, so emitting two rows for the same
+    bucket trips a primary-key violation and surfaces as an opaque 500 from
+    `policyCreateManaged` / `policyUpdateManaged`.
+    """
+    rw = set(read_write)
+    permissions = [Permission.read(bucket) for bucket in sorted(set(read) - rw)]
+    permissions.extend(Permission.read_write(bucket) for bucket in sorted(rw))
     return permissions
 
 
