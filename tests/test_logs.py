@@ -10,7 +10,7 @@ from botocore.stub import Stubber
 
 from quiltx import logs
 from quiltx import stack
-from quiltx.tools import logs as logs_tool
+from quiltx.tools.ecs import logs as logs_tool
 from tests.conftest import make_fake_catalog
 
 
