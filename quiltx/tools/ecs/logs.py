@@ -442,15 +442,10 @@ def _run(catalog: stack_lib.Catalog, args: Any) -> int:
         ecs_lib.set_log_level(service, container, args.set_level, dry_run=dry_run)
         return 0
 
-    try:
-        payload = logs_lib.load_stack_payload(catalog.catalog_name)
-    except FileNotFoundError:
-        print(
-            f"No cached stack payload for {catalog.catalog_name}. "
-            f"Run quiltx catalog stack {catalog.catalog_name} first.",
-            file=sys.stderr,
-        )
-        return 2
+    payload = stack_lib.ensure_stack_payload(
+        catalog,
+        announce=lambda message: print(message, file=sys.stderr),
+    )
 
     console = Console(force_terminal=not args.no_color)
 

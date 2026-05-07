@@ -715,6 +715,46 @@ def require_stack_payload(catalog_name: str) -> Mapping[str, Any]:
     return payload
 
 
+def discover_stack_payload(catalog: Catalog) -> Mapping[str, Any]:
+    """Discover and return the CloudFormation payload for a catalog."""
+    catalog_config = fetch_catalog_config(catalog.catalog_url)
+    region = fetch_region(catalog, catalog_config)
+
+    stack_info = find_matching_stack(catalog, region=region)
+    stack_name = str(stack_info["StackName"])
+    log_groups = list_log_group_resources(catalog, stack_name, region=region)
+    ecs_resources = list_ecs_resources(catalog, stack_name, region=region)
+    payload = build_stack_payload(
+        catalog.catalog_name,
+        catalog.catalog_url,
+        region,
+        stack_info,
+        log_groups,
+        ecs_resources,
+        catalog_config,
+    )
+    return payload
+
+
+def ensure_stack_payload(
+    catalog: Catalog,
+    *,
+    refresh: bool = False,
+    announce: Callable[[str], None] | None = None,
+) -> Mapping[str, Any]:
+    """Return cached stack payload, discovering and caching it when needed."""
+    if not refresh:
+        payload = load_stack_payload(catalog.catalog_name)
+        if payload is not None:
+            return payload
+
+    if announce is not None:
+        announce(f"Discovering stack for {catalog.catalog_name}...")
+    payload = discover_stack_payload(catalog)
+    write_stack_payload(catalog.catalog_name, payload)
+    return payload
+
+
 def format_stack_header(
     dns: str,
     payload: Mapping[str, Any] | None = None,

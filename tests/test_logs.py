@@ -183,11 +183,10 @@ def test_format_event_structured_warning() -> None:
     assert "Memory usage high" in structured["message"]
 
 
-def test_logs_emits_canonical_error_when_stack_payload_missing(
+def test_logs_auto_discovers_stack_payload_when_cache_missing(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    """quiltx logs must emit the canonical 'No cached stack payload' message
-    and exit non-zero when stack.json is absent — Story 9/10 acceptance."""
+    """quiltx ecs logs should use the shared stack discovery path on cache miss."""
     monkeypatch.setattr(stack, "user_data_path", lambda *_a, **_kw: tmp_path)
     fake = make_fake_catalog("nightly.quilttest.com")
     monkeypatch.setattr(
@@ -195,9 +194,55 @@ def test_logs_emits_canonical_error_when_stack_payload_missing(
         "resolve_catalog_context",
         lambda _catalog=None, **_kw: fake,
     )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "fetch_catalog_config",
+        lambda _url: {"region": "us-east-1"},
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "fetch_region",
+        lambda _catalog, _catalog_config=None: "us-east-1",
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "find_matching_stack",
+        lambda _catalog, region=None: {
+            "StackName": "quilt",
+            "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/quilt/abc",
+            "Outputs": [],
+            "Parameters": [],
+        },
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "list_log_group_resources",
+        lambda _catalog, _stack_name, region=None: [
+            {"logical_id": "RegistryLogGroup", "log_group_name": "/aws/ecs/registry"}
+        ],
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "list_ecs_resources",
+        lambda _catalog, _stack_name, region=None: [],
+    )
 
-    rc = logs_tool.main(["--catalog", "nightly.quilttest.com"])
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "No cached stack payload for nightly.quilttest.com" in err
-    assert "quiltx catalog stack" in err
+    class _EmptyLogsClient:
+        def get_paginator(self, _name):
+            class _Paginator:
+                def paginate(self, **_kwargs):
+                    return [{"events": []}]
+
+            return _Paginator()
+
+    monkeypatch.setattr(
+        logs_tool.boto3, "client", lambda *_a, **_kw: _EmptyLogsClient()
+    )
+
+    rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--no-follow"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Discovering stack for nightly.quilttest.com" in captured.err
+    payload = stack.load_stack_payload("nightly.quilttest.com")
+    assert payload is not None
+    assert payload["region"] == "us-east-1"
