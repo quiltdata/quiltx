@@ -247,3 +247,19 @@ def run_migration_for_catalog(
         )
 
     return wait_for_task(ecs_client, cluster, task_arn)
+
+
+def set_log_level(
+    service: str, container: str | None, level: str, dry_run: bool = True
+) -> None:
+    """Stub: set log level for a service/container.
+
+    Full implementation will register a new task definition revision and update
+    the service to point at it. For now this prints the intended action.
+    """
+    action = "(dry-run) would"
+    if not dry_run:
+        action = "would"
+    print(
+        f"{action} set log level of service={service} container={container} to {level}"
+    )
