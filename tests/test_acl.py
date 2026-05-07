@@ -116,6 +116,45 @@ groups: {}
         acl.parse_acl_config(config_path)
 
 
+def test_parse_acl_config_rejects_unknown_policy_and_role_fields(
+    tmp_path: Path,
+) -> None:
+    policy_path = tmp_path / "policy.yml"
+    policy_path.write_text("""
+policies:
+  exec:
+    sso.users: [ernest@example.com]
+    config.policies: [public]
+roles: {}
+""")
+    with pytest.raises(ValueError) as policy_error:
+        acl.parse_acl_config(policy_path)
+
+    policy_message = str(policy_error.value)
+    assert "Unknown ACL fields in policies.exec" in policy_message
+    assert "config.policies" in policy_message
+    assert "sso.users" in policy_message
+    assert "belong under top-level 'roles:'" in policy_message
+
+    role_path = tmp_path / "role.yml"
+    role_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles:
+  exec:
+    sso.users: [ernest@example.com]
+    config.policies: [public]
+""")
+    with pytest.raises(ValueError) as role_error:
+        acl.parse_acl_config(role_path)
+
+    role_message = str(role_error.value)
+    assert "Unknown ACL fields in roles.exec" in role_message
+    assert "sso.users" in role_message
+    assert "User-specific SSO selectors" in role_message
+
+
 def test_parse_acl_config_rejects_non_list_groups_and_non_bool_flags(
     tmp_path: Path,
 ) -> None:
@@ -278,6 +317,58 @@ def test_build_sso_config_emits_policy_and_static_role_mappings() -> None:
     # any co-matching admin role.
     assert "admin" not in payload["mappings"][0]
     assert "admin" not in payload["mappings"][1]
+
+
+def test_policy_config_is_admin_marks_synthesized_role_admin(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    config.is_admin: true
+roles: {}
+""")
+
+    config = acl.parse_acl_config(config_path)
+    sso_config = acl.build_sso_config(config)
+    assert sso_config is not None
+    payload = yaml.safe_load(sso_config)
+
+    assert config.policies[0].is_admin is True
+    assert payload["mappings"][0]["roles"] == ["public"]
+    assert payload["mappings"][0]["admin"] is True
+
+
+def test_policy_config_is_admin_false_vetoes_generated_role_admin_and_warns(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    config.is_admin: true
+  internal:
+    sso.groups: [Employees]
+    config.is_admin: false
+roles: {}
+""")
+
+    desired = acl.parse_acl_config(config_path)
+    diff = acl.compute_diff(desired, _empty_current_state())
+    assert diff.sso_config_text is not None
+    payload = yaml.safe_load(diff.sso_config_text)
+
+    assert payload["mappings"][0]["roles"] == ["public"]
+    assert payload["mappings"][0]["admin"] is True
+    assert payload["mappings"][1]["roles"] == ["internal_public"]
+    assert payload["mappings"][1]["admin"] is False
+    assert any(
+        "config.is_admin: false" in warning
+        and "vetoes" in warning
+        and "internal_public" in warning
+        for warning in diff.warnings
+    )
 
 
 def test_compute_diff_from_simpler_stack_acl_example_against_empty_state() -> None:

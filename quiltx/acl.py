@@ -14,6 +14,20 @@ from quiltx import stack as stack_lib
 
 INLINE_POLICY_SUFFIX = "__inline"
 ACL_TOP_LEVEL_KEYS = {"policies", "roles", "store_last_login_context"}
+ACL_POLICY_KEYS = {
+    "sso.groups",
+    "buckets.read",
+    "buckets.read_write",
+    "config.is_admin",
+    "config.default_role",
+}
+ACL_ROLE_KEYS = {
+    "sso.groups",
+    "config.policies",
+    "buckets.read",
+    "buckets.read_write",
+    "config.is_admin",
+}
 EVERYONE_GROUP = "Everyone"
 
 
@@ -24,6 +38,7 @@ class AclPolicy:
     read: list[str] = field(default_factory=list)
     read_write: list[str] = field(default_factory=list)
     default_role: bool = False
+    is_admin: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +118,7 @@ class _SynthesizedRole:
     groups: list[str]
     policy_titles: list[str]
     source_policies: list[str]
+    is_admin: bool | None
 
 
 @dataclass(frozen=True)
@@ -118,7 +134,7 @@ class _ResolvedStaticRole:
 class _SsoMapping:
     group: str
     role_name: str
-    admin: bool = False
+    admin: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +145,7 @@ class _DesiredAclState:
     role_updates: dict[str, RoleUpdate]
     sso_mappings: list[_SsoMapping]
     default_role_name: str | None
+    warnings: list[str] = field(default_factory=list)
 
 
 def format_exception(exc: Exception) -> str:
@@ -177,6 +194,13 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError("Policy names must be strings")
         if not isinstance(value, dict):
             raise ValueError(f"Policy '{name}' must be a mapping")
+        _validate_acl_section_keys(
+            value,
+            allowed_keys=ACL_POLICY_KEYS,
+            section="policies",
+            name=name,
+            hint="Role-only fields such as 'config.policies' belong under top-level 'roles:'.",
+        )
         if name.endswith(INLINE_POLICY_SUFFIX):
             raise ValueError(
                 "Policy names may not end with "
@@ -193,6 +217,9 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             value.get("buckets.read_write", []),
             f"policies.{name}.buckets.read_write",
         )
+        is_admin = value.get("config.is_admin")
+        if is_admin is not None and not isinstance(is_admin, bool):
+            raise ValueError(f"policies.{name}.config.is_admin must be a boolean")
         default_role = value.get("config.default_role", False)
         if not isinstance(default_role, bool):
             raise ValueError(f"policies.{name}.config.default_role must be a boolean")
@@ -201,6 +228,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             groups=_dedupe_preserve_order(groups),
             read=_dedupe_preserve_order(read),
             read_write=_dedupe_preserve_order(read_write),
+            is_admin=is_admin,
             default_role=default_role,
         )
         policies.append(policy)
@@ -221,6 +249,13 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             raise ValueError("Role names must be strings")
         if not isinstance(value, dict):
             raise ValueError(f"Role '{name}' must be a mapping")
+        _validate_acl_section_keys(
+            value,
+            allowed_keys=ACL_ROLE_KEYS,
+            section="roles",
+            name=name,
+            hint="User-specific SSO selectors such as 'sso.users' are not supported.",
+        )
         reserved_inline_policy = f"{name}{INLINE_POLICY_SUFFIX}"
         if reserved_inline_policy in raw_policies:
             raise ValueError(
@@ -324,6 +359,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     """Compute the actions required to reconcile ACL state."""
     desired_state = _build_desired_acl_state(desired)
     diff = AclDiff()
+    diff.warnings.extend(desired_state.warnings)
     diff.buckets_to_add = sorted(all_buckets(desired) - current.buckets.keys())
 
     desired_policy_titles = set(desired_state.policy_updates)
@@ -413,10 +449,9 @@ def build_sso_config(config: AclConfig) -> str | None:
             "roles": [mapping.role_name],
         }
         # Server tri-state: True grants admin, False vetoes, missing = non-vote.
-        # Under union_roles, emitting admin:false for ordinary roles would veto
-        # the admin grant from a co-matching admin role. Only emit when True.
-        if mapping.admin:
-            entry["admin"] = True
+        # Only emit False when the config explicitly requests a veto.
+        if mapping.admin is not None:
+            entry["admin"] = mapping.admin
         payload["mappings"].append(entry)
 
     return yaml.safe_dump(payload, sort_keys=False)
@@ -1159,20 +1194,30 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
     role_updates: dict[str, RoleUpdate] = {}
     sso_mappings: list[_SsoMapping] = []
     default_role_name: str | None = None
+    warnings: list[str] = []
 
     cumulative_policy_titles: list[str] = []
+    cumulative_admin_votes: list[tuple[str, bool]] = []
     for policy in config.policies:
         policy_updates[policy.name] = PolicyUpdate(
             title=policy.name,
             permissions=_permissions_for_buckets(policy.read, policy.read_write),
         )
         cumulative_policy_titles.append(policy.name)
+        if policy.is_admin is not None:
+            cumulative_admin_votes.append((policy.name, policy.is_admin))
         synthesized_role_name = _synthesized_role_name(cumulative_policy_titles)
+        synthesized_admin = _resolve_policy_admin_vote(
+            cumulative_admin_votes,
+            synthesized_role_name,
+            warnings,
+        )
         synthesized_role = _SynthesizedRole(
             name=synthesized_role_name,
             groups=policy.groups,
             policy_titles=list(cumulative_policy_titles),
             source_policies=list(cumulative_policy_titles),
+            is_admin=synthesized_admin,
         )
         synthesized_roles.append(synthesized_role)
         role_updates[synthesized_role.name] = RoleUpdate(
@@ -1181,7 +1226,11 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         )
         for group in policy.groups:
             sso_mappings.append(
-                _SsoMapping(group=group, role_name=synthesized_role.name)
+                _SsoMapping(
+                    group=group,
+                    role_name=synthesized_role.name,
+                    admin=synthesized_role.is_admin,
+                )
             )
         if policy.default_role:
             default_role_name = synthesized_role.name
@@ -1210,7 +1259,11 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         )
         for group in role.groups:
             sso_mappings.append(
-                _SsoMapping(group=group, role_name=role.name, admin=role.is_admin)
+                _SsoMapping(
+                    group=group,
+                    role_name=role.name,
+                    admin=True if role.is_admin else None,
+                )
             )
 
     return _DesiredAclState(
@@ -1220,7 +1273,26 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         role_updates=role_updates,
         sso_mappings=sso_mappings,
         default_role_name=default_role_name,
+        warnings=warnings,
     )
+
+
+def _resolve_policy_admin_vote(
+    votes: list[tuple[str, bool]], role_name: str, warnings: list[str]
+) -> bool | None:
+    false_votes = [name for name, is_admin in votes if not is_admin]
+    true_votes = [name for name, is_admin in votes if is_admin]
+    if false_votes:
+        if true_votes:
+            warnings.append(
+                "Policy config.is_admin: false vetoes true for generated role "
+                f"'{role_name}' (true: {', '.join(true_votes)}; "
+                f"false: {', '.join(false_votes)})"
+            )
+        return False
+    if true_votes:
+        return True
+    return None
 
 
 def _validate_top_level_keys(raw: dict[str, Any]) -> None:
@@ -1233,6 +1305,26 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
             + ", ".join(sorted(ACL_TOP_LEVEL_KEYS))
             + "."
         )
+
+
+def _validate_acl_section_keys(
+    value: dict[str, Any],
+    *,
+    allowed_keys: set[str],
+    section: str,
+    name: str,
+    hint: str,
+) -> None:
+    unknown_keys = sorted(set(value) - allowed_keys)
+    if not unknown_keys:
+        return
+    raise ValueError(
+        f"Unknown ACL fields in {section}.{name}: "
+        + ", ".join(unknown_keys)
+        + ". Supported fields: "
+        + ", ".join(sorted(allowed_keys))
+        + f". {hint}"
+    )
 
 
 def _validate_policy_ladder(policies: list[AclPolicy]) -> None:
