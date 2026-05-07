@@ -12,29 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `quiltx catalog acl`: when a policy fails to create, every role that
-  references it is also skipped — including, in single-role configs, the
-  role pointed at by `config.default_role`. The existing prune dropped
-  `default_role` from the SSO payload to avoid `RolesNotFound`, but the
-  registry's `SsoConfig` schema requires `default_role` (pydantic, no
-  default), so the SSO update then failed with
-  `config.default_role: field required`. The prune now returns `None`
-  in that case and the caller skips the SSO update entirely with a
-  clear warning; the mappings land on the next apply once the missing
-  role exists.
+- `quiltx catalog acl`: skip the SSO update when pruning would drop
+  `default_role` (registry requires it). Mappings land on the next
+  apply, with a warning explaining why.
 
 ### Changed
 
-- `quiltx catalog acl`: when `policyCreateManaged`, `policyUpdateManaged`,
-  or the policy delete inside `_handle_policy_drift` returns a generic
-  `Internal Server Error`, the warning now includes the desired
-  permission set we tried to send and a refetch of the policy's
-  current server-side state (id, arn, permissions, or "not present").
-  Lets a follow-up retry distinguish "create silently committed" from
-  "create truly failed" without needing registry CloudWatch access.
-  Gated on `Internal Server Error` substring — validation/auth/not-found
-  errors carry their own actionable text and do not pay the extra
-  `policies.list()` round trip.
+- `quiltx catalog acl`: on opaque `Internal Server Error` from
+  `policyCreateManaged` / `policyUpdateManaged` / policy delete, append
+  the desired permission set and a refetch of server-side state
+  (id, arn, permissions, or "not present"). Other errors unchanged.
 
 ## [0.13.0] - 2026-05-04
 
