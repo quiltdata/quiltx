@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-05-07
+
+### Fixed
+
+- `quiltx catalog acl` actually dedupes `(bucket, level)` now: `_permissions_for_buckets` drops READ when the bucket is also in `read_write`. Previously emitted both rows and tripped the registry's composite PK on `RolePolicyBucketPermission(role_policy_id, bucket_name)` as an opaque 500 from `policyCreateManaged` / `policyUpdateManaged`.
+- `quiltx catalog acl` skips the SSO update (with a clear warning) when pruning orphaned roles would drop `default_role`. Previously the pruned payload was sent without `default_role` and the registry rejected it with `InvalidInput: config.default_role: field required` — `SsoConfig.default_role` is a required pydantic field.
+- `quiltx catalog acl` policy create / update / delete warnings now refetch state and append `[desired: ...; server now: ...]` on `Internal Server Error`, turning opaque 500s into actionable text. Gated on 500 so validation, auth, and not-found errors skip the extra `policies.list()` round trip.
+
 ## [0.14.0] - 2026-05-07
 
 ### Added
