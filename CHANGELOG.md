@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-05-07
+
+### Added
+
+- `quiltx catalog login` opens `<registry>/login` in the browser and prompts for a paste-back code on interactive TTYs (works with any auth backend, including SSO). `--no-browser` falls back to username/password; `--username` and `--api-key` paths are unchanged.
+
+### Changed
+
+- `quiltx bucket add` on already-registered buckets reapplies S3 bucket policy / SNS / cross-account principals instead of silently skipping. `--force` still removes and re-adds the catalog registration so Quilt re-subscribes SQS.
+- `quiltx bucket add` errors print exception type; full traceback under `QUILTX_VERBOSE=1`.
+- On opaque `Internal Server Error` from policy create / update / delete, `quiltx catalog acl` warnings now append the desired permission set and a refetch of server-side state.
+
+### Fixed
+
+- `quiltx catalog acl` dedupes `(bucket, level)` permissions when a bucket appears in both `buckets.read` and `buckets.read_write` (RW implies R) — previously tripped the registry's composite PK as an opaque 500 from `policyCreateManaged`.
+- `quiltx catalog acl` prunes SSO mappings referencing orphaned roles when a managed-policy create fails, so surviving roles still land (previously the whole `setSsoConfig` rejected with `RolesNotFound`, wiping all SSO state). If the prune would drop `default_role`, the SSO update is skipped with a clear warning.
+- `quiltx catalog acl` no longer emits `admin: false` for non-admin SSO mappings — under `union_roles` the server treats `admin` as tri-state and `false` vetoed admin grants from co-matching admin roles.
+- `quiltx bucket add` no longer performs a direct S3 `b.ls()` access check (stale local creds caused false negatives).
+- `is_auth_error` matches only HTTP 401 and the literal `Unauthorized` GraphQL payload, stopping false re-auth loops triggered by unrelated `GraphQLClientGraphQLMultiError` payloads (e.g. "Bucket not found", validation errors).
+
 ## [0.13.0] - 2026-05-04
 
 This release reshapes `quiltx`'s identity and auth surface around a per-catalog model and switches the stored secret from username/password+refresh-token to a single `qk_...` API key per DNS. quiltx no longer mutates the user's global `quilt3.config()` to do its work, no longer consumes `quilt3`'s `credentials.json`/`auth.json`, and no longer relies on Quilt-minted AWS session credentials — AWS calls flow through the standard boto3 chain. Scripts that referenced the old `quiltx stack ...` surface, `--catalog-name`, or `--username`/`--password` will fail at argparse time — there are no aliases (pre-1.0).
