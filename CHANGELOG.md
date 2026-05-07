@@ -342,7 +342,7 @@ This release reshapes `quiltx`'s identity and auth surface around a per-catalog 
 ### Added
 
 - `logs` tool: Enhanced log display and filtering capabilities
-  - Stream-based filtering: Filter logs by stream name with substring matching (e.g., `quiltx logs registry/registry`)
+  - Stream-based filtering: Filter logs by stream name with substring matching (e.g., `quiltx ecs logs registry/registry`)
   - `--wrap` flag: Option to wrap long log messages instead of truncating (auto-enabled when filtering by stream)
   - Health check coalescing: Consecutive health check log entries are automatically summarized to reduce noise
   - Default behavior now shows all log streams instead of just LogGroup
