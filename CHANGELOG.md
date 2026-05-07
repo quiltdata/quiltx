@@ -8,25 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.3] - 2026-05-07
+## [0.14.0] - 2026-05-07
 
-### Fixed
+### Added
 
-- `quiltx catalog acl`: dedupe `(bucket, level)` permissions when a bucket
-  appears in both `buckets.read` and `buckets.read_write`. RW implies R;
-  emitting both tripped the registry's composite PK on
-  `(role_policy_id, bucket_name)` and surfaced as an opaque 500 from
-  `policyCreateManaged`.
-- `quiltx catalog acl`: skip the SSO update when pruning would drop
-  `default_role` (registry requires it). Mappings land on the next
-  apply, with a warning explaining why.
+- `quiltx catalog login` opens `<registry>/login` in the browser and prompts for a paste-back code on interactive TTYs (works with any auth backend, including SSO). `--no-browser` falls back to username/password; `--username` and `--api-key` paths are unchanged.
 
 ### Changed
 
-- `quiltx catalog acl`: on opaque `Internal Server Error` from
-  `policyCreateManaged` / `policyUpdateManaged` / policy delete, append
-  the desired permission set and a refetch of server-side state
-  (id, arn, permissions, or "not present"). Other errors unchanged.
+- `quiltx bucket add` on already-registered buckets reapplies S3 bucket policy / SNS / cross-account principals instead of silently skipping. `--force` still removes and re-adds the catalog registration so Quilt re-subscribes SQS.
+- `quiltx bucket add` errors print exception type; full traceback under `QUILTX_VERBOSE=1`.
+- On opaque `Internal Server Error` from policy create / update / delete, `quiltx catalog acl` warnings now append the desired permission set and a refetch of server-side state.
+
+### Fixed
+
+- `quiltx catalog acl` dedupes `(bucket, level)` permissions when a bucket appears in both `buckets.read` and `buckets.read_write` (RW implies R) — previously tripped the registry's composite PK as an opaque 500 from `policyCreateManaged`.
+- `quiltx catalog acl` prunes SSO mappings referencing orphaned roles when a managed-policy create fails, so surviving roles still land (previously the whole `setSsoConfig` rejected with `RolesNotFound`, wiping all SSO state). If the prune would drop `default_role`, the SSO update is skipped with a clear warning.
+- `quiltx catalog acl` no longer emits `admin: false` for non-admin SSO mappings — under `union_roles` the server treats `admin` as tri-state and `false` vetoed admin grants from co-matching admin roles.
+- `quiltx bucket add` no longer performs a direct S3 `b.ls()` access check (stale local creds caused false negatives).
+- `is_auth_error` matches only HTTP 401 and the literal `Unauthorized` GraphQL payload, stopping false re-auth loops triggered by unrelated `GraphQLClientGraphQLMultiError` payloads (e.g. "Bucket not found", validation errors).
 
 ## [0.13.0] - 2026-05-04
 
