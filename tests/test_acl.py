@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 import yaml
 
+from quilt3.admin.types import BucketPermissionLevel, Permission
+
 from quiltx import acl
 from quiltx.tools.catalog import acl as acl_tool
 
@@ -944,3 +946,85 @@ def test_acl_parser_accepts_catalog_and_api_key_flags() -> None:
     assert args.api_key == "qk_test"
     assert args.no_prompt is True
     assert args.config_file == "config.yaml"
+
+
+# Diagnostic helpers (added in 0.13.3 for opaque-500 surfacing).
+
+
+def test_is_internal_server_error_matches_500_text() -> None:
+    assert acl._is_internal_server_error(
+        "Internal Server Error: Internal Server Error (path: ['policyCreateManaged'])"
+    )
+    assert acl._is_internal_server_error("Wrapper: Internal Server Error: foo")
+
+
+def test_is_internal_server_error_skips_validation_and_auth() -> None:
+    assert not acl._is_internal_server_error(
+        "errors=[InvalidInputSelectionErrors(path='config.default_role', "
+        "message='field required', name='ValidationError')] typename__='InvalidInput'"
+    )
+    assert not acl._is_internal_server_error("Unauthorized")
+    assert not acl._is_internal_server_error("Not Found")
+    assert not acl._is_internal_server_error("")
+
+
+def test_format_permissions_empty() -> None:
+    assert acl._format_permissions([]) == "(none)"
+
+
+def test_format_permissions_canonicalises_and_renders() -> None:
+    perms = [
+        Permission(bucket="quilt-bake", level=BucketPermissionLevel.READ_WRITE),
+        Permission(bucket="quilt-dev", level=BucketPermissionLevel.READ),
+        Permission(bucket="quilt-dev", level=BucketPermissionLevel.READ_WRITE),
+    ]
+    # Sorted by (bucket, level); enum repr split on '.' to surface just the name.
+    assert (
+        acl._format_permissions(perms)
+        == "READ_WRITE:quilt-bake,READ:quilt-dev,READ_WRITE:quilt-dev"
+    )
+
+
+def test_describe_policy_state_returns_id_arn_and_perms() -> None:
+    policy = SimpleNamespace(
+        title="internal",
+        id="pid-7",
+        arn="arn:aws:iam::123:policy/quilt-internal",
+        permissions=[
+            Permission(bucket="quilt-bake", level=BucketPermissionLevel.READ_WRITE),
+        ],
+    )
+    stack = _fake_stack(
+        policies=SimpleNamespace(list=lambda: [policy]),
+    )
+    out = acl._describe_policy_state(stack, "internal")
+    assert out == (
+        "server now: id=pid-7, arn=arn:aws:iam::123:policy/quilt-internal, "
+        "permissions=[READ_WRITE:quilt-bake]"
+    )
+
+
+def test_describe_policy_state_omits_arn_when_missing() -> None:
+    policy = SimpleNamespace(title="internal", id="pid-7", arn=None, permissions=[])
+    stack = _fake_stack(policies=SimpleNamespace(list=lambda: [policy]))
+    assert acl._describe_policy_state(stack, "internal") == (
+        "server now: id=pid-7, permissions=[(none)]"
+    )
+
+
+def test_describe_policy_state_reports_not_present() -> None:
+    stack = _fake_stack(policies=SimpleNamespace(list=lambda: []))
+    assert (
+        acl._describe_policy_state(stack, "internal")
+        == "server now: policy not present"
+    )
+
+
+def test_describe_policy_state_reports_refetch_failure() -> None:
+    def boom() -> Any:
+        raise RuntimeError("graphql down")
+
+    stack = _fake_stack(policies=SimpleNamespace(list=boom))
+    out = acl._describe_policy_state(stack, "internal")
+    assert out.startswith("refetch failed: ")
+    assert "graphql down" in out

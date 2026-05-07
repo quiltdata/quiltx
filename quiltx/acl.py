@@ -653,15 +653,17 @@ def apply_acl(
                 else ""
             )
             detail = format_exception(exc)
-            desired = _format_permissions(policy.permissions)
-            server_state = _describe_policy_state(stack, policy.title)
+            if _is_internal_server_error(detail):
+                desired = _format_permissions(policy.permissions)
+                server_state = _describe_policy_state(stack, policy.title)
+                suffix = f" [desired: [{desired}]; {server_state}]"
+            else:
+                suffix = ""
             warnings.append(
-                f"Policy '{policy.title}' could not be created{hint}: {detail} "
-                f"[desired: [{desired}]; {server_state}]"
+                f"Policy '{policy.title}' could not be created{hint}: {detail}{suffix}"
             )
             print(
-                f"  ! policy {policy.title}: {detail} "
-                f"[desired: [{desired}]; {server_state}]",
+                f"  ! policy {policy.title}: {detail}{suffix}",
                 file=sys.stderr,
             )
             continue
@@ -701,15 +703,17 @@ def apply_acl(
                 else ""
             )
             detail = format_exception(exc)
-            desired = _format_permissions(policy.permissions)
-            server_state = _describe_policy_state(stack, policy.title)
+            if _is_internal_server_error(detail):
+                desired = _format_permissions(policy.permissions)
+                server_state = _describe_policy_state(stack, policy.title)
+                suffix = f" [desired: [{desired}]; {server_state}]"
+            else:
+                suffix = ""
             warnings.append(
-                f"Policy '{policy.title}' could not be updated{hint}: {detail} "
-                f"[desired: [{desired}]; {server_state}]"
+                f"Policy '{policy.title}' could not be updated{hint}: {detail}{suffix}"
             )
             print(
-                f"  ! policy {policy.title}: {detail} "
-                f"[desired: [{desired}]; {server_state}]",
+                f"  ! policy {policy.title}: {detail}{suffix}",
                 file=sys.stderr,
             )
             continue
@@ -1133,14 +1137,12 @@ def reset_policy(
         print(f"  - policy {title}")
     except Exception as exc:
         detail = format_exception(exc)
-        server_state = _describe_policy_state(stack, title)
-        warnings.append(
-            f"Policy '{title}' could not be deleted: {detail} [{server_state}]"
-        )
-        print(
-            f"  ! policy {title}: {detail} [{server_state}]",
-            file=sys.stderr,
-        )
+        if _is_internal_server_error(detail):
+            suffix = f" [{_describe_policy_state(stack, title)}]"
+        else:
+            suffix = ""
+        warnings.append(f"Policy '{title}' could not be deleted: {detail}{suffix}")
+        print(f"  ! policy {title}: {detail}{suffix}", file=sys.stderr)
     return warnings, user_snapshot
 
 
@@ -1429,6 +1431,16 @@ def _format_permissions(permissions: list[Permission]) -> str:
         )
         or "(none)"
     )
+
+
+def _is_internal_server_error(detail: str) -> bool:
+    """True iff the formatted error text looks like a server-side 500.
+
+    Used to gate the refetch-and-describe diagnostic so we do not pay an
+    extra `policies.list()` round trip on expected validation, auth, or
+    not-found errors — those carry their own actionable text already.
+    """
+    return "Internal Server Error" in detail
 
 
 def _describe_policy_state(stack: stack_lib.Catalog, title: str) -> str:

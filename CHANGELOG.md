@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current server-side state (id, arn, permissions, or "not present").
   Lets a follow-up retry distinguish "create silently committed" from
   "create truly failed" without needing registry CloudWatch access.
+  Gated on `Internal Server Error` substring — validation/auth/not-found
+  errors carry their own actionable text and do not pay the extra
+  `policies.list()` round trip.
 
 ## [0.13.0] - 2026-05-04
 
