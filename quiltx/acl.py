@@ -639,10 +639,17 @@ def apply_acl(
                 else ""
             )
             detail = format_exception(exc)
+            desired = _format_permissions(policy.permissions)
+            server_state = _describe_policy_state(stack, policy.title)
             warnings.append(
-                f"Policy '{policy.title}' could not be created{hint}: {detail}"
+                f"Policy '{policy.title}' could not be created{hint}: {detail} "
+                f"[desired: [{desired}]; {server_state}]"
             )
-            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
+            print(
+                f"  ! policy {policy.title}: {detail} "
+                f"[desired: [{desired}]; {server_state}]",
+                file=sys.stderr,
+            )
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
@@ -680,10 +687,17 @@ def apply_acl(
                 else ""
             )
             detail = format_exception(exc)
+            desired = _format_permissions(policy.permissions)
+            server_state = _describe_policy_state(stack, policy.title)
             warnings.append(
-                f"Policy '{policy.title}' could not be updated{hint}: {detail}"
+                f"Policy '{policy.title}' could not be updated{hint}: {detail} "
+                f"[desired: [{desired}]; {server_state}]"
             )
-            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
+            print(
+                f"  ! policy {policy.title}: {detail} "
+                f"[desired: [{desired}]; {server_state}]",
+                file=sys.stderr,
+            )
             continue
         known_policies[policy.title] = updated
         print(f"  ~ policy {policy.title}")
@@ -1100,8 +1114,14 @@ def reset_policy(
         print(f"  - policy {title}")
     except Exception as exc:
         detail = format_exception(exc)
-        warnings.append(f"Policy '{title}' could not be deleted: {detail}")
-        print(f"  ! policy {title}: {detail}", file=sys.stderr)
+        server_state = _describe_policy_state(stack, title)
+        warnings.append(
+            f"Policy '{title}' could not be deleted: {detail} [{server_state}]"
+        )
+        print(
+            f"  ! policy {title}: {detail} [{server_state}]",
+            file=sys.stderr,
+        )
     return warnings, user_snapshot
 
 
@@ -1380,6 +1400,38 @@ def _dropped_permissions(
         for bucket, level in _canonical_permissions(sent)
         if (bucket, level) not in returned_set
     ]
+
+
+def _format_permissions(permissions: list[Permission]) -> str:
+    return (
+        ",".join(
+            f"{level.split('.')[-1]}:{bucket}"
+            for bucket, level in _canonical_permissions(permissions)
+        )
+        or "(none)"
+    )
+
+
+def _describe_policy_state(stack: stack_lib.Catalog, title: str) -> str:
+    """Re-fetch policy by title after a failed mutation; return a short
+    diagnostic string describing what (if anything) is on the server now.
+
+    Useful when a mutation returns a generic 500 without context: the
+    refetch tells us whether the policy actually exists, what permissions
+    it has, and what its id/arn are — turning an opaque "Internal Server
+    Error" into something we can act on the next attempt.
+    """
+    try:
+        for p in stack.admin.policies.list():
+            if getattr(p, "title", None) == title:
+                arn = getattr(p, "arn", None)
+                pid = getattr(p, "id", None)
+                perms = _format_permissions(getattr(p, "permissions", []) or [])
+                arn_part = f", arn={arn}" if arn else ""
+                return f"server now: id={pid}{arn_part}, permissions=[{perms}]"
+        return "server now: policy not present"
+    except Exception as inner:
+        return f"refetch failed: {format_exception(inner)}"
 
 
 def _same_yaml(left: str | None, right: str | None) -> bool:
