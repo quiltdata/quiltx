@@ -301,3 +301,56 @@ def test_run_migration_success() -> None:
     task_arn = task.get("taskArn")
     assert isinstance(task_arn, str)
     assert task_arn.endswith("/abc")
+
+
+def test_set_log_level_dry_run_updates_task_definition(capsys) -> None:
+    class FakeEcsClient:
+        def describe_services(self, *, cluster: str, services: list[str]):
+            assert cluster == "quilt"
+            assert services == ["registry-service"]
+            return {
+                "services": [
+                    {
+                        "taskDefinition": (
+                            "arn:aws:ecs:us-east-1:123:task-definition/quilt-registry:1"
+                        )
+                    }
+                ]
+            }
+
+        def describe_task_definition(self, *, taskDefinition: str):
+            assert taskDefinition.endswith(":1")
+            return {
+                "taskDefinition": {
+                    "family": "quilt-registry",
+                    "networkMode": "awsvpc",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "cpu": "1024",
+                    "memory": "2048",
+                    "taskDefinitionArn": taskDefinition,
+                    "revision": 1,
+                    "status": "ACTIVE",
+                    "containerDefinitions": [
+                        {
+                            "name": "registry",
+                            "image": "registry:latest",
+                            "environment": [{"name": "EXISTING", "value": "1"}],
+                        }
+                    ],
+                }
+            }
+
+    result = ecs_lib.set_log_level(
+        FakeEcsClient(),
+        cluster="quilt",
+        service="registry-service",
+        container="registry",
+        level="DEBUG",
+        dry_run=True,
+    )
+
+    register_args = result["registerTaskDefinition"]
+    container = register_args["containerDefinitions"][0]
+    assert {"name": "QUILT_LOG_LEVEL", "value": "DEBUG"} in container["environment"]
+    assert "taskDefinitionArn" not in register_args
+    assert '"service": "registry-service"' in capsys.readouterr().out

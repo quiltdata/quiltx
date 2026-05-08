@@ -347,6 +347,34 @@ def test_write_log_groups(tmp_path, monkeypatch) -> None:
     assert '"catalog_config"' in content
 
 
+def test_stack_payload_accessors() -> None:
+    payload = {
+        "region": "us-east-1",
+        "stack_name": "quilt",
+        "log_groups": [
+            {"logical_id": "RegistryLogGroup", "log_group_name": "/aws/ecs/registry"}
+        ],
+        "ecs_resources": [
+            {
+                "logical_id": "Cluster",
+                "physical_id": "quilt",
+                "resource_type": "AWS::ECS::Cluster",
+            },
+            {
+                "logical_id": "RegistryService",
+                "physical_id": "registry-service",
+                "resource_type": "AWS::ECS::Service",
+            },
+        ],
+    }
+
+    assert stack.require_region(payload) == "us-east-1"
+    assert stack.require_stack_name(payload) == "quilt"
+    assert stack.require_ecs_cluster(payload) == "quilt"
+    assert stack.require_registry_service(payload) == "registry-service"
+    assert stack.log_groups(payload) == {"RegistryLogGroup": "/aws/ecs/registry"}
+
+
 def test_verbose_preflight_prints_to_stderr(monkeypatch, capsys) -> None:
     """@catalog_command prints catalog/source/auth block when --verbose is set."""
     ctx = stack.Catalog(

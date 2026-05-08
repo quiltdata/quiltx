@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-import boto3
 from botocore.exceptions import WaiterError
 
 from quiltx import stack as stack_lib
@@ -47,39 +47,8 @@ def _coerce_str(value: object | None) -> str | None:
     return None
 
 
-def _ecs_resources(
-    stack_payload: Mapping[str, object] | None,
-) -> list[Mapping[str, object]]:
-    if not stack_payload:
-        return []
-    resources = stack_payload.get("ecs_resources")
-    if not isinstance(resources, list):
-        return []
-    return [resource for resource in resources if isinstance(resource, dict)]
-
-
 def _cluster_from_stack_payload(stack_payload: Mapping[str, object]) -> str:
-    clusters = [
-        resource
-        for resource in _ecs_resources(stack_payload)
-        if resource.get("resource_type") == "AWS::ECS::Cluster"
-    ]
-    if len(clusters) == 1:
-        cluster = _coerce_str(clusters[0].get("physical_id"))
-        if cluster:
-            return cluster
-
-    stack_name = _coerce_str(stack_payload.get("stack_name"))
-    if stack_name:
-        for cluster_resource in clusters:
-            physical_id = _coerce_str(cluster_resource.get("physical_id"))
-            if physical_id == stack_name:
-                return physical_id
-
-    raise ValueError(
-        "Could not determine ECS cluster from cached stack payload. "
-        "Run 'quiltx catalog stack <dns>' to refresh the cache."
-    )
+    return stack_lib.require_ecs_cluster(stack_payload)
 
 
 def find_migration_task_def(ecs_client: Any, stack_name: str) -> str:
@@ -96,26 +65,7 @@ def find_migration_task_def(ecs_client: Any, stack_name: str) -> str:
 def get_network_config(
     ecs_client: Any, cluster: str, stack_payload: Mapping[str, object]
 ) -> dict[str, object]:
-    registry_service: str | None = None
-
-    for resource in _ecs_resources(stack_payload):
-        if resource.get("resource_type") != "AWS::ECS::Service":
-            continue
-        logical_id = _coerce_str(resource.get("logical_id")) or ""
-        physical_id = _coerce_str(resource.get("physical_id"))
-        if not physical_id:
-            continue
-        if logical_id == "RegistryService":
-            registry_service = physical_id
-            break
-        if registry_service is None and "registry" in logical_id.lower():
-            registry_service = physical_id
-
-    if not registry_service:
-        raise ValueError(
-            "Could not find RegistryService in cached stack payload. "
-            "Run 'quiltx catalog stack <dns>' to refresh the cache."
-        )
+    registry_service = stack_lib.require_registry_service(stack_payload)
 
     response = ecs_client.describe_services(
         cluster=cluster, services=[registry_service]
@@ -216,20 +166,16 @@ def run_migration_for_catalog(
     region: str | None = None,
 ) -> MigrationResult:
     catalog_name = get_hostname(catalog)
-    stack_payload = stack_lib.load_stack_payload(catalog_name)
-    if not stack_payload:
-        raise ValueError(
-            f"No cached stack payload for {catalog_name}. "
-            f"Run 'quiltx catalog stack {catalog_name}' first."
-        )
+    catalog_context = stack_lib.Catalog.from_dns(
+        catalog_name, source="flag", auth_required=False
+    )
+    stack_payload = stack_lib.ensure_stack_payload(catalog_context)
 
-    stack_name = _coerce_str(stack_payload.get("stack_name"))
-    if not stack_name:
-        raise ValueError("Cached stack payload is missing stack_name")
+    stack_name = stack_lib.require_stack_name(stack_payload)
 
-    resolved_region = region or _coerce_str(stack_payload.get("region"))
-    cluster = _cluster_from_stack_payload(stack_payload)
-    ecs_client = boto3.client("ecs", region_name=resolved_region)
+    resolved_region = region or stack_lib.require_region(stack_payload)
+    cluster = stack_lib.require_ecs_cluster(stack_payload)
+    ecs_client = stack_lib.aws_client("ecs", stack_payload, region=resolved_region)
 
     task_def = find_migration_task_def(ecs_client, stack_name)
     network_config = get_network_config(ecs_client, cluster, stack_payload)
@@ -249,17 +195,139 @@ def run_migration_for_catalog(
     return wait_for_task(ecs_client, cluster, task_arn)
 
 
-def set_log_level(
-    service: str, container: str | None, level: str, dry_run: bool = True
-) -> None:
-    """Stub: set log level for a service/container.
+def _task_definition_registration_args(
+    task_definition: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return fields accepted by ECS RegisterTaskDefinition."""
+    allowed_fields = {
+        "family",
+        "taskRoleArn",
+        "executionRoleArn",
+        "networkMode",
+        "containerDefinitions",
+        "volumes",
+        "placementConstraints",
+        "requiresCompatibilities",
+        "cpu",
+        "memory",
+        "pidMode",
+        "ipcMode",
+        "proxyConfiguration",
+        "inferenceAccelerators",
+        "ephemeralStorage",
+        "runtimePlatform",
+    }
+    return {
+        key: value
+        for key, value in task_definition.items()
+        if key in allowed_fields and value is not None
+    }
 
-    Full implementation will register a new task definition revision and update
-    the service to point at it. For now this prints the intended action.
-    """
-    action = "(dry-run) would"
-    if not dry_run:
-        action = "would"
-    print(
-        f"{action} set log level of service={service} container={container} to {level}"
+
+def _set_container_env(
+    container_definition: Mapping[str, Any],
+    name: str,
+    value: str | None,
+) -> dict[str, Any]:
+    updated = dict(container_definition)
+    env_entries = updated.get("environment") or []
+    environment = [
+        dict(entry)
+        for entry in env_entries
+        if isinstance(entry, dict) and entry.get("name") != name
+    ]
+    if value:
+        environment.append({"name": name, "value": value})
+    updated["environment"] = environment
+    return updated
+
+
+def set_log_level(
+    ecs_client: Any,
+    *,
+    cluster: str,
+    service: str,
+    level: str | None,
+    container: str | None = None,
+    dry_run: bool = True,
+) -> Mapping[str, Any]:
+    """Set or clear QUILT_LOG_LEVEL for an ECS service task definition."""
+    service_response = ecs_client.describe_services(cluster=cluster, services=[service])
+    services = service_response.get("services", [])
+    if not services:
+        raise ValueError(f"Registry service '{service}' was not found in ECS")
+    task_definition_arn = services[0].get("taskDefinition")
+    if not isinstance(task_definition_arn, str) or not task_definition_arn:
+        raise ValueError(f"Registry service '{service}' is missing a task definition")
+
+    task_response = ecs_client.describe_task_definition(
+        taskDefinition=task_definition_arn
     )
+    task_definition = task_response.get("taskDefinition")
+    if not isinstance(task_definition, dict):
+        raise ValueError(f"Task definition '{task_definition_arn}' was not found")
+
+    registration_args = _task_definition_registration_args(task_definition)
+    container_definitions = registration_args.get("containerDefinitions")
+    if not isinstance(container_definitions, list) or not container_definitions:
+        raise ValueError("Task definition has no container definitions")
+
+    selected = container
+    if selected is None:
+        selected = str(container_definitions[0].get("name") or "")
+    if not selected:
+        raise ValueError("Could not determine target container")
+
+    updated_containers: list[dict[str, Any]] = []
+    found = False
+    for definition in container_definitions:
+        if not isinstance(definition, dict):
+            continue
+        if definition.get("name") == selected:
+            updated_containers.append(
+                _set_container_env(definition, "QUILT_LOG_LEVEL", level)
+            )
+            found = True
+        else:
+            updated_containers.append(dict(definition))
+    if not found:
+        raise ValueError(f"Container '{selected}' not found in task definition")
+
+    registration_args["containerDefinitions"] = updated_containers
+    preview = {
+        "cluster": cluster,
+        "service": service,
+        "container": selected,
+        "level": level,
+        "registerTaskDefinition": registration_args,
+        "updateService": {
+            "cluster": cluster,
+            "service": service,
+            "taskDefinition": "<new task definition arn>",
+            "forceNewDeployment": True,
+        },
+    }
+
+    if dry_run:
+        print(json.dumps(preview, indent=2, sort_keys=True))
+        return preview
+
+    register_response = ecs_client.register_task_definition(**registration_args)
+    new_task_definition = register_response.get("taskDefinition")
+    if not isinstance(new_task_definition, dict):
+        raise ValueError("ECS did not return the registered task definition")
+    new_task_definition_arn = new_task_definition.get("taskDefinitionArn")
+    if not isinstance(new_task_definition_arn, str) or not new_task_definition_arn:
+        raise ValueError("Registered task definition is missing taskDefinitionArn")
+
+    update_response = ecs_client.update_service(
+        cluster=cluster,
+        service=service,
+        taskDefinition=new_task_definition_arn,
+        forceNewDeployment=True,
+    )
+    print(
+        f"Updated {service} to {new_task_definition_arn} "
+        f"with QUILT_LOG_LEVEL={level or '<unset>'}"
+    )
+    return update_response

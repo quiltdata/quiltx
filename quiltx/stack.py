@@ -99,7 +99,9 @@ class Catalog(CatalogContext):
     def payload(self) -> Mapping[str, Any] | None:
         return load_stack_payload(self.catalog_name)
 
-    def aws_session(self, *, profile: str | None = None) -> Any:
+    def aws_session(
+        self, *, profile: str | None = None, region: str | None = None
+    ) -> Any:
         """Return a plain boto3 session for AWS operations on this catalog.
 
         Per spec [06 §3.3]: never imports quilt3 and never reads
@@ -107,7 +109,7 @@ class Catalog(CatalogContext):
         """
         import boto3
 
-        return boto3.Session(profile_name=profile, region_name=self._region)
+        return boto3.Session(profile_name=profile, region_name=region or self._region)
 
     def cfn_client(self, region: str | None = None) -> Any:
         import boto3
@@ -715,6 +717,132 @@ def require_stack_payload(catalog_name: str) -> Mapping[str, Any]:
     return payload
 
 
+def require_region(payload: Mapping[str, Any]) -> str:
+    """Return the AWS region from a stack payload, or raise a precise error."""
+    region = payload.get("region")
+    if not isinstance(region, str) or not region:
+        raise ValueError("Stack payload is missing region")
+    return region
+
+
+def require_stack_name(payload: Mapping[str, Any]) -> str:
+    """Return the CloudFormation stack name from a stack payload."""
+    stack_name = payload.get("stack_name")
+    if not isinstance(stack_name, str) or not stack_name:
+        raise ValueError("Stack payload is missing stack_name")
+    return stack_name
+
+
+def _normalized_ecs_resources(
+    payload: Mapping[str, Any] | None,
+) -> list[dict[str, str]]:
+    if not payload:
+        return []
+    entries = payload.get("ecs_resources", [])
+    if not isinstance(entries, list):
+        return []
+
+    resources: list[dict[str, str]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        resources.append(
+            {
+                "logical_id": str(item.get("logical_id") or ""),
+                "physical_id": str(item.get("physical_id") or ""),
+                "resource_type": str(item.get("resource_type") or ""),
+            }
+        )
+    return resources
+
+
+def ecs_clusters(payload: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Return normalized ECS cluster resources from a stack payload."""
+    return [
+        resource
+        for resource in _normalized_ecs_resources(payload)
+        if resource["resource_type"] == "AWS::ECS::Cluster"
+    ]
+
+
+def ecs_services(payload: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Return normalized ECS service resources from a stack payload."""
+    return [
+        resource
+        for resource in _normalized_ecs_resources(payload)
+        if resource["resource_type"] == "AWS::ECS::Service"
+    ]
+
+
+def default_ecs_cluster(payload: Mapping[str, Any] | None) -> str | None:
+    """Return the best cluster choice from payload resources."""
+    clusters = ecs_clusters(payload)
+    if len(clusters) == 1:
+        return clusters[0]["physical_id"] or None
+
+    stack_name = None
+    if payload is not None:
+        value = payload.get("stack_name")
+        if isinstance(value, str):
+            stack_name = value
+    if stack_name:
+        for cluster in clusters:
+            if cluster["physical_id"] == stack_name:
+                return cluster["physical_id"]
+    return None
+
+
+def require_ecs_cluster(payload: Mapping[str, Any]) -> str:
+    """Return the default ECS cluster, or raise with remediation guidance."""
+    cluster = default_ecs_cluster(payload)
+    if cluster:
+        return cluster
+    raise ValueError(
+        "Could not determine ECS cluster from stack payload. "
+        "Run 'quiltx catalog stack <dns>' to refresh the cache."
+    )
+
+
+def registry_service(payload: Mapping[str, Any]) -> str | None:
+    """Return the registry ECS service physical id, if one can be inferred."""
+    services = ecs_services(payload)
+    for service in services:
+        if service["logical_id"] == "RegistryService":
+            return service["physical_id"] or None
+    for service in services:
+        if "registry" in service["logical_id"].lower():
+            return service["physical_id"] or None
+    return None
+
+
+def require_registry_service(payload: Mapping[str, Any]) -> str:
+    """Return the registry ECS service physical id, or raise."""
+    service = registry_service(payload)
+    if service:
+        return service
+    raise ValueError(
+        "Could not find RegistryService in stack payload. "
+        "Run 'quiltx catalog stack <dns>' to refresh the cache."
+    )
+
+
+def log_groups(payload: Mapping[str, Any]) -> dict[str, str]:
+    """Return log groups keyed by logical id."""
+    entries = payload.get("log_groups", [])
+    if not isinstance(entries, list):
+        return {}
+    result: dict[str, str] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        logical_id = item.get("logical_id")
+        log_group_name = item.get("log_group_name")
+        if isinstance(logical_id, str) and isinstance(log_group_name, str):
+            if logical_id and log_group_name:
+                result[logical_id] = log_group_name
+    return result
+
+
 def discover_stack_payload(catalog: Catalog) -> Mapping[str, Any]:
     """Discover and return the CloudFormation payload for a catalog."""
     catalog_config = fetch_catalog_config(catalog.catalog_url)
@@ -736,11 +864,54 @@ def discover_stack_payload(catalog: Catalog) -> Mapping[str, Any]:
     return payload
 
 
+def lightweight_stack_payload(
+    catalog: Catalog,
+    *,
+    catalog_config: Mapping[str, Any] | None = None,
+    region: str | None = None,
+) -> Mapping[str, Any]:
+    """Build an in-memory payload for commands that can proceed without CFN.
+
+    This path still uses the ambient AWS credential chain to identify the
+    control account, but it does not require a matching CloudFormation stack.
+    """
+    if catalog_config is None:
+        catalog_config = fetch_catalog_config(catalog.catalog_url)
+    resolved_region = region or fetch_region(catalog, catalog_config)
+    session = catalog.aws_session(region=resolved_region)
+    try:
+        account_id = session.client("sts").get_caller_identity()["Account"]
+    except Exception as exc:
+        raise RuntimeError(
+            f"AWS credentials unavailable for {catalog.catalog_name}: {exc}. "
+            "Configure AWS credentials (e.g. AWS_PROFILE, ~/.aws/credentials) "
+            f"or run `quiltx catalog stack --catalog {catalog.catalog_name}` first."
+        ) from exc
+
+    return {
+        "catalog_name": catalog.catalog_name,
+        "catalog_url": catalog.catalog_url,
+        "web_url": catalog.catalog_url,
+        "region": resolved_region,
+        "account_id": account_id,
+        "stack_name": None,
+        "stack_id": None,
+        "outputs": [],
+        "parameters": [],
+        "log_groups": [],
+        "ecs_resources": [],
+        "catalog_config": dict(catalog_config),
+        "quiltx_version": __version__,
+    }
+
+
 def ensure_stack_payload(
     catalog: Catalog,
     *,
     refresh: bool = False,
+    allow_lightweight: bool = False,
     announce: Callable[[str], None] | None = None,
+    warn: Callable[[str], None] | None = None,
 ) -> Mapping[str, Any]:
     """Return cached stack payload, discovering and caching it when needed."""
     if not refresh:
@@ -750,9 +921,36 @@ def ensure_stack_payload(
 
     if announce is not None:
         announce(f"Discovering stack for {catalog.catalog_name}...")
-    payload = discover_stack_payload(catalog)
+    try:
+        payload = discover_stack_payload(catalog)
+    except Exception as exc:
+        if not allow_lightweight:
+            raise
+        if warn is not None:
+            warn(
+                f"CloudFormation discovery unavailable ({exc}); "
+                "using Quilt session identity for account/region."
+            )
+        return lightweight_stack_payload(catalog)
     write_stack_payload(catalog.catalog_name, payload)
     return payload
+
+
+def aws_client(
+    service_name: str,
+    payload: Mapping[str, Any] | None = None,
+    *,
+    region: str | None = None,
+) -> Any:
+    """Construct a boto3 client using explicit or payload region."""
+    import boto3
+
+    resolved_region = region
+    if resolved_region is None:
+        if payload is None:
+            raise ValueError("AWS client construction requires region or stack payload")
+        resolved_region = require_region(payload)
+    return boto3.client(service_name, region_name=resolved_region)
 
 
 def format_stack_header(

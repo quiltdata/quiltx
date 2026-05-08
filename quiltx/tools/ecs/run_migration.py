@@ -6,12 +6,9 @@ import argparse
 import json
 import sys
 
-import boto3
-
 from quiltx import ecs as ecs_lib
 from quiltx import stack as stack_lib
 from quiltx.cli_common import add_catalog_args
-from quiltx.tools.ecs import shell
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,32 +50,17 @@ def _format_launch_failures(failures: list[dict[str, str]]) -> str:
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
-        payload = shell._load_stack_payload(catalog.catalog_name)
-        if not payload:
-            raise ValueError(
-                f"No cached stack payload for {catalog.catalog_name}. "
-                f"Run 'quiltx catalog stack {catalog.catalog_name}' first."
-            )
+        payload = stack_lib.ensure_stack_payload(
+            catalog,
+            announce=lambda message: print(message, file=sys.stderr),
+        )
 
-        stack_name = payload.get("stack_name")
-        if not isinstance(stack_name, str) or not stack_name:
-            raise ValueError("Cached stack payload is missing stack_name")
+        stack_name = stack_lib.require_stack_name(payload)
+        region = args.region or stack_lib.require_region(payload)
 
-        region = args.region
-        if not region:
-            payload_region = payload.get("region")
-            if isinstance(payload_region, str):
-                region = payload_region
+        cluster = stack_lib.require_ecs_cluster(payload)
 
-        clusters, _services = shell._extract_ecs_resources(payload)
-        cluster = shell._default_cluster_from_resources(clusters, stack_name)
-        if not cluster:
-            raise ValueError(
-                "Could not determine ECS cluster from cached stack payload. "
-                "Run 'quiltx catalog stack <dns>' to refresh the cache."
-            )
-
-        ecs_client = boto3.client("ecs", region_name=region)
+        ecs_client = stack_lib.aws_client("ecs", payload, region=region)
         task_def = ecs_lib.find_migration_task_def(ecs_client, stack_name)
         network_config = ecs_lib.get_network_config(ecs_client, cluster, payload)
 
@@ -117,13 +99,13 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
 
         print(f"Started migration task: {task_arn}")
         if args.no_wait:
-            print("Not waiting for completion. Check logs with 'quiltx logs'.")
+            print("Not waiting for completion. Check logs with 'quiltx ecs logs'.")
             return 0
 
         result = ecs_lib.wait_for_task(ecs_client, cluster, task_arn)
         if result.exit_code == 0:
             print("Migration completed successfully.")
-            print("Check logs with 'quiltx logs' if you need task output.")
+            print("Check logs with 'quiltx ecs logs' if you need task output.")
             return 0
 
         print(f"Migration failed with exit code {result.exit_code}.", file=sys.stderr)
@@ -131,7 +113,7 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             print(f"Stop code: {result.stop_code}", file=sys.stderr)
         if result.stopped_reason:
             print(f"Stopped reason: {result.stopped_reason}", file=sys.stderr)
-        print("Check logs with 'quiltx logs' for task output.", file=sys.stderr)
+        print("Check logs with 'quiltx ecs logs' for task output.", file=sys.stderr)
         return 1
     except ecs_lib.MigrationLaunchError as exc:
         print(_format_launch_failures(exc.failures), file=sys.stderr)

@@ -12,7 +12,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-import boto3
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -22,6 +21,33 @@ from quiltx import ecs as ecs_lib
 from quiltx import logs as logs_lib
 from quiltx import stack as stack_lib
 from quiltx.cli_common import add_catalog_args
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
+_LOG_LEVEL_ALIASES = {"WARNING": "WARN"}
+
+
+def _normalize_set_level(value: str) -> str:
+    """Normalize a --set-level value, accepting unique prefixes."""
+    candidate = value.strip().upper()
+    if not candidate:
+        raise argparse.ArgumentTypeError(
+            f"invalid log level {value!r}; expected one of {', '.join(_LOG_LEVELS)}"
+        )
+    if candidate in _LOG_LEVEL_ALIASES:
+        return _LOG_LEVEL_ALIASES[candidate]
+    if candidate in _LOG_LEVELS:
+        return candidate
+
+    matches = [level for level in _LOG_LEVELS if level.startswith(candidate)]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise argparse.ArgumentTypeError(
+            f"ambiguous log level {value!r}; matches {', '.join(matches)}"
+        )
+    raise argparse.ArgumentTypeError(
+        f"invalid log level {value!r}; expected one of {', '.join(_LOG_LEVELS)}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,7 +129,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--set-level",
         dest="set_level",
-        help="Set the container log level (e.g. DEBUG). Performs a dry-run unless --yes is provided.",
+        nargs="?",
+        const="DEBUG",
+        type=_normalize_set_level,
+        help="Set the container log level (default DEBUG). Performs a dry-run unless --yes is provided.",
+    )
+    parser.add_argument(
+        "--reset-level",
+        action="store_true",
+        help="Remove QUILT_LOG_LEVEL from the target container.",
+    )
+    parser.add_argument(
+        "--service",
+        help="ECS service to update (defaults to RegistryService from the stack payload).",
+    )
+    parser.add_argument(
+        "--container",
+        help="Container to update (defaults to the first container in the task definition).",
     )
     parser.add_argument(
         "--yes",
@@ -435,13 +477,6 @@ def _follow_logs_dynamic(
 
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: Any) -> int:
-    if getattr(args, "set_level", None):
-        service = "registry-service"
-        container = None
-        dry_run = not bool(getattr(args, "yes", False))
-        ecs_lib.set_log_level(service, container, args.set_level, dry_run=dry_run)
-        return 0
-
     payload = stack_lib.ensure_stack_payload(
         catalog,
         announce=lambda message: print(message, file=sys.stderr),
@@ -449,12 +484,27 @@ def _run(catalog: stack_lib.Catalog, args: Any) -> int:
 
     console = Console(force_terminal=not args.no_color)
 
+    if getattr(args, "set_level", None) or getattr(args, "reset_level", False):
+        cluster = stack_lib.require_ecs_cluster(payload)
+        service = args.service or stack_lib.require_registry_service(payload)
+        ecs_client = stack_lib.aws_client("ecs", payload)
+        level = None if args.reset_level else args.set_level
+        dry_run = not bool(getattr(args, "yes", False))
+        ecs_lib.set_log_level(
+            ecs_client,
+            cluster=cluster,
+            service=service,
+            container=args.container,
+            level=level,
+            dry_run=dry_run,
+        )
+        return 0
+
     if args.list:
         _list_available_logs(console, payload)
         return 0
 
-    log_entries = payload.get("log_groups", [])
-    log_groups = _get_all_log_groups(log_entries)
+    log_groups = stack_lib.log_groups(payload)
 
     if not log_groups:
         console.print("[red]Error:[/red] No log groups found in stack payload")
@@ -465,15 +515,13 @@ def _run(catalog: stack_lib.Catalog, args: Any) -> int:
 
     stream_filters = args.streams if args.streams else None
 
-    region = payload.get("region")
-    if not region:
-        raise ValueError("Region missing from stack payload")
+    region = stack_lib.require_region(payload)
 
     start_ms, end_ms = logs_lib.resolve_time_range(
         args.since, args.until, args.minutes, args.hours, args.days, args.ago
     )
 
-    logs_client = boto3.client("logs", region_name=region)
+    logs_client = stack_lib.aws_client("logs", payload, region=region)
 
     wrap = args.wrap or bool(stream_filters)
 

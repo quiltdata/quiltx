@@ -236,7 +236,7 @@ def test_logs_auto_discovers_stack_payload_when_cache_missing(
             return _Paginator()
 
     monkeypatch.setattr(
-        logs_tool.boto3, "client", lambda *_a, **_kw: _EmptyLogsClient()
+        logs_tool.stack_lib, "aws_client", lambda *_a, **_kw: _EmptyLogsClient()
     )
 
     rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--no-follow"])
@@ -246,3 +246,136 @@ def test_logs_auto_discovers_stack_payload_when_cache_missing(
     payload = stack.load_stack_payload("nightly.quilttest.com")
     assert payload is not None
     assert payload["region"] == "us-east-1"
+
+
+def test_set_level_uses_stack_context(monkeypatch) -> None:
+    fake = make_fake_catalog("nightly.quilttest.com")
+    payload = {
+        "region": "us-east-1",
+        "stack_name": "quilt",
+        "ecs_resources": [
+            {
+                "logical_id": "Cluster",
+                "physical_id": "quilt",
+                "resource_type": "AWS::ECS::Cluster",
+            },
+            {
+                "logical_id": "RegistryService",
+                "physical_id": "registry-service",
+                "resource_type": "AWS::ECS::Service",
+            },
+        ],
+        "log_groups": [],
+    }
+    calls = {}
+
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **_kw: fake,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "ensure_stack_payload",
+        lambda catalog, **_kw: payload,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "aws_client",
+        lambda service, stack_payload, **_kw: "ecs-client",
+    )
+
+    def _set_log_level(ecs_client, **kwargs):
+        calls["ecs_client"] = ecs_client
+        calls.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(logs_tool.ecs_lib, "set_log_level", _set_log_level)
+
+    rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--set-level"])
+
+    assert rc == 0
+    assert calls == {
+        "ecs_client": "ecs-client",
+        "cluster": "quilt",
+        "service": "registry-service",
+        "container": None,
+        "level": "DEBUG",
+        "dry_run": True,
+    }
+
+
+def test_set_level_autocompletes_unique_prefix(monkeypatch) -> None:
+    fake = make_fake_catalog("nightly.quilttest.com")
+    payload = {
+        "region": "us-east-1",
+        "stack_name": "quilt",
+        "ecs_resources": [
+            {
+                "logical_id": "Cluster",
+                "physical_id": "quilt",
+                "resource_type": "AWS::ECS::Cluster",
+            },
+            {
+                "logical_id": "RegistryService",
+                "physical_id": "registry-service",
+                "resource_type": "AWS::ECS::Service",
+            },
+        ],
+        "log_groups": [],
+    }
+    calls = {}
+
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **_kw: fake,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "ensure_stack_payload",
+        lambda catalog, **_kw: payload,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "aws_client",
+        lambda service, stack_payload, **_kw: "ecs-client",
+    )
+
+    def _set_log_level(ecs_client, **kwargs):
+        calls.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(logs_tool.ecs_lib, "set_log_level", _set_log_level)
+
+    rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--set-level", "D"])
+
+    assert rc == 0
+    assert calls["level"] == "DEBUG"
+
+
+def test_set_level_rejects_invalid_value_before_stack_lookup(
+    monkeypatch, capsys
+) -> None:
+    called = False
+
+    def _resolve_catalog_context(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return make_fake_catalog("nightly.quilttest.com")
+
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "resolve_catalog_context",
+        _resolve_catalog_context,
+    )
+
+    try:
+        logs_tool.main(["--catalog", "nightly.quilttest.com", "--set-level", "nope"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("Expected argparse to exit for invalid log level")
+
+    assert called is False
+    assert "invalid log level 'nope'" in capsys.readouterr().err
