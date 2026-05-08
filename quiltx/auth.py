@@ -6,7 +6,7 @@ CLI ladder ([05 §4]):
   1. --api-key flag
   2. QUILTX_API_KEY env var
   3. Keyring entry for catalog.catalog_name
-  4. Interactive prompt (only if TTY + not --no-prompt + not QUILTX_NO_PROMPT)
+  4. Interactive browser/SSO auth flow
   5. Error
 
 API ladder (no CLI args, no TTY):
@@ -15,7 +15,7 @@ API ladder (no CLI args, no TTY):
   3. Keyring entry for catalog.catalog_name
   4. Error
 
-``source`` is one of: "flag", "env", "keyring", "prompt".
+``source`` is one of: "flag", "env", "keyring", "auth-flow".
 
 When ``skip_keyring=True`` is passed, step 3 is skipped — used by the retry
 envelope in @catalog_command after an auth failure to force re-prompt
@@ -24,7 +24,6 @@ envelope in @catalog_command after an auth failure to force re-prompt
 
 from __future__ import annotations
 
-import getpass
 import os
 import sys
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -34,7 +33,7 @@ from quiltx import credentials
 if TYPE_CHECKING:
     from quiltx.stack import Catalog
 
-CredentialSource = Literal["flag", "env", "keyring", "prompt"]
+CredentialSource = Literal["flag", "env", "keyring", "auth-flow"]
 
 
 class ResolvedCredentials(NamedTuple):
@@ -53,10 +52,6 @@ def _no_prompt_active(args: object | None) -> bool:
     if args is not None and getattr(args, "no_prompt", False):
         return True
     return False
-
-
-def _generate_url_for(catalog: "Catalog") -> str:
-    return f"{catalog.catalog_url.rstrip('/')}/profile/api-keys"
 
 
 def resolve_cli(
@@ -88,12 +83,12 @@ def resolve_cli(
         if stored is not None:
             return ResolvedCredentials(stored["api_key"], "keyring")
 
-    # 4. Interactive prompt
+    # 4. Interactive auth flow
     if _no_prompt_active(args) or not sys.stdin.isatty():
         raise CredentialError(
             f"No API key available for {dns}. "
             "Provide --api-key, set QUILTX_API_KEY, "
-            "or run interactively to be prompted."
+            f"or run `quiltx catalog api-key --catalog {dns}` interactively."
         )
 
     if skip_keyring:
@@ -103,27 +98,20 @@ def resolve_cli(
         )
     else:
         print(f"No stored API key for {dns}.", file=sys.stderr)
-    print(
-        f"Generate one at {_generate_url_for(catalog)}",
-        file=sys.stderr,
-    )
+
+    from quiltx.tools.catalog import login as login_tool
+
     try:
-        api_key = getpass.getpass("API key: ")
-    except (KeyboardInterrupt, EOFError):
-        print("\nAborted.", file=sys.stderr)
-        raise CredentialError(f"Authentication aborted for {dns}.")
-
-    api_key = api_key.strip()
-    if not api_key:
-        raise CredentialError(f"Empty API key entered for {dns}.")
-    if not api_key.startswith("qk_"):
-        raise CredentialError(
-            f"Invalid API key for {dns}: Quilt API keys begin with 'qk_'."
+        minted = login_tool.mint_api_key(
+            catalog.catalog_url,
+            dns,
+            no_prompt=False,
         )
+    except login_tool.LoginError as exc:
+        raise CredentialError(str(exc)) from exc
 
-    # Store for future runs (paste-only bootstrap leaves name/expires_at null)
-    credentials.set(dns, api_key)
-    return ResolvedCredentials(api_key, "prompt")
+    login_tool.print_stored_message(minted, dns)
+    return ResolvedCredentials(minted.secret, "auth-flow")
 
 
 def resolve_api(

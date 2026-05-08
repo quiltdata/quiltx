@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-08
+
+### Added
+
+- `quiltx catalog api-key` prints the stored `qk_...` API key for a catalog, with `--new` to mint, store, and print a replacement. Supports browser-based login or `--username`/`--password` U/P bootstrap, plus `--insecure` for localhost testing.
+- `quiltx catalog login` mints and stores a catalog API key during the auth flow so downstream tools can reuse it without re-authenticating.
+
 ## [0.15.0] - 2026-05-07
 
 ### Added

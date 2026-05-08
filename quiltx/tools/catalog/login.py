@@ -22,6 +22,8 @@ import getpass
 import socket
 import sys
 
+from dataclasses import dataclass
+
 from quiltx import credentials, quilt_auth
 from quiltx.cli_common import add_catalog_args
 from quiltx.identity import build_catalog_url, normalize_dns
@@ -47,6 +49,21 @@ def _parse_expires_at(value: object) -> int | None:
     return int(dt.timestamp())
 
 
+@dataclass(frozen=True)
+class MintedApiKey:
+    secret: str
+    name: str
+    expires_at: int | None
+
+
+class LoginError(RuntimeError):
+    """Raised when an interactive catalog login flow cannot complete."""
+
+
+class LoginUsageError(LoginError):
+    """Raised when the caller invoked the login flow with bad arguments."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="quiltx catalog login",
@@ -66,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--password",
         help=(
-            "Catalog admin password. If --username is given without --password "
-            "in interactive mode, you will be prompted."
+            "Catalog admin password. INSECURE: visible in `ps`/process listings; "
+            "prefer omitting it so you are prompted via getpass on TTY."
         ),
     )
     parser.add_argument(
@@ -112,10 +129,9 @@ def _bootstrap_from_browser(
         refresh_token = input("Paste the code from the page here: ").strip()
     except (KeyboardInterrupt, EOFError):
         print("\nAborted.", file=sys.stderr)
-        raise SystemExit(1)
+        raise LoginError(f"Authentication aborted for {dns}.")
     if not refresh_token:
-        print("Error: no code provided.", file=sys.stderr)
-        raise SystemExit(1)
+        raise LoginError("No code provided.")
     try:
         return quilt_auth.bootstrap_api_key_from_refresh_token(
             catalog_url,
@@ -124,8 +140,7 @@ def _bootstrap_from_browser(
             expires_in_days=expires_in_days,
         )
     except quilt_auth.CatalogAuthError as exc:
-        print(f"Error: catalog rejected the code from {dns}: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise LoginError(f"Catalog rejected the code from {dns}: {exc}") from exc
 
 
 def _bootstrap_from_credentials(
@@ -147,14 +162,95 @@ def _bootstrap_from_credentials(
     except quilt_auth.CatalogAuthError as exc:
         # SSO-only catalogs reject /api/login; the catalog's body is in str(exc).
         message = str(exc)
-        print(f"Error: {message}", file=sys.stderr)
         if "sso" in message.lower() or "401" in message:
-            print(
-                "If this catalog uses SSO, mint a key from the catalog UI and "
-                "pass it via --api-key.",
-                file=sys.stderr,
+            message = (
+                f"{message}\nIf this catalog uses SSO, rerun without "
+                "--no-browser to use the browser auth flow."
             )
-        raise SystemExit(1)
+        raise LoginError(message) from exc
+
+
+def mint_api_key(
+    catalog_url: str,
+    dns: str,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    no_browser: bool = False,
+    no_prompt: bool = False,
+    key_name: str | None = None,
+    expires_in_days: int = 365,
+) -> MintedApiKey:
+    """Mint and store a catalog API key using browser SSO or U/P fallback."""
+    interactive = not no_prompt and sys.stdin.isatty()
+    name = key_name or _default_key_name()
+
+    if username is not None:
+        resolved_password = password
+        if resolved_password is None:
+            if not interactive:
+                raise LoginUsageError(
+                    "--password is required when --username is set headlessly."
+                )
+            try:
+                resolved_password = getpass.getpass(f"Password for {username}@{dns}: ")
+            except (KeyboardInterrupt, EOFError) as exc:
+                print("\nAborted.", file=sys.stderr)
+                raise LoginError(f"Authentication aborted for {dns}.") from exc
+        result = _bootstrap_from_credentials(
+            catalog_url,
+            username=username,
+            password=resolved_password,
+            name=name,
+            expires_in_days=expires_in_days,
+        )
+    elif interactive and not no_browser:
+        result = _bootstrap_from_browser(
+            catalog_url,
+            dns,
+            name=name,
+            expires_in_days=expires_in_days,
+        )
+    else:
+        if not interactive:
+            raise LoginUsageError(
+                "--username/--password or interactive TTY is required "
+                "(browser flow needs a TTY for paste-back)."
+            )
+        try:
+            prompted_username = input(f"Username for {dns}: ").strip()
+        except (KeyboardInterrupt, EOFError) as exc:
+            print("\nAborted.", file=sys.stderr)
+            raise LoginError(f"Authentication aborted for {dns}.") from exc
+        if not prompted_username:
+            raise LoginError("Username is required.")
+        try:
+            prompted_password = getpass.getpass(
+                f"Password for {prompted_username}@{dns}: "
+            )
+        except (KeyboardInterrupt, EOFError) as exc:
+            print("\nAborted.", file=sys.stderr)
+            raise LoginError(f"Authentication aborted for {dns}.") from exc
+        result = _bootstrap_from_credentials(
+            catalog_url,
+            username=prompted_username,
+            password=prompted_password,
+            name=name,
+            expires_in_days=expires_in_days,
+        )
+
+    secret = str(result["secret"])
+    expires_at = _parse_expires_at(result.get("expires_at"))
+    credentials.store(dns, secret, name=name, expires_at=expires_at)
+    return MintedApiKey(secret=secret, name=name, expires_at=expires_at)
+
+
+def print_stored_message(minted: MintedApiKey, dns: str) -> None:
+    pretty_expiry = ""
+    if minted.expires_at:
+        expiry_dt = _dt.datetime.fromtimestamp(minted.expires_at, _dt.timezone.utc)
+        pretty_expiry = f" (expires {expiry_dt.strftime('%Y-%m-%d')})"
+    print(f"Stored API key '{minted.name}' for {dns}{pretty_expiry}.", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -194,82 +290,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Stored API key for {dns}.")
         return 0
 
-    interactive = not args.no_prompt and sys.stdin.isatty()
-    name = args.key_name or _default_key_name()
-
-    # Path 2: explicit username (and/or password) — U/P bootstrap, with
-    # interactive password prompt when omitted on a TTY.
-    if args.username is not None:
-        username = args.username
-        password = args.password
-        if password is None:
-            if not interactive:
-                print(
-                    "Error: --password is required when --username is set headlessly.",
-                    file=sys.stderr,
-                )
-                return 2
-            try:
-                password = getpass.getpass(f"Password for {username}@{dns}: ")
-            except (KeyboardInterrupt, EOFError):
-                print("\nAborted.", file=sys.stderr)
-                return 1
-        result = _bootstrap_from_credentials(
-            catalog_url,
-            username=username,
-            password=password,
-            name=name,
-            expires_in_days=args.expires_in_days,
-        )
-
-    # Path 3 (default on a TTY without --username): browser flow.
-    elif interactive and not args.no_browser:
-        result = _bootstrap_from_browser(
+    try:
+        minted = mint_api_key(
             catalog_url,
             dns,
-            name=name,
+            username=args.username,
+            password=args.password,
+            no_browser=args.no_browser,
+            no_prompt=args.no_prompt,
+            key_name=args.key_name,
             expires_in_days=args.expires_in_days,
         )
+    except LoginError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2 if isinstance(exc, LoginUsageError) else 1
 
-    # Path 4: --no-browser (or no TTY): fall back to interactive U/P prompt.
-    else:
-        if not interactive:
-            print(
-                "Error: --username, --api-key, or interactive TTY is "
-                "required (browser flow needs a TTY for paste-back).",
-                file=sys.stderr,
-            )
-            return 2
-        try:
-            username = input(f"Username for {dns}: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nAborted.", file=sys.stderr)
-            return 1
-        if not username:
-            print("Error: username is required.", file=sys.stderr)
-            return 1
-        try:
-            password = getpass.getpass(f"Password for {username}@{dns}: ")
-        except (KeyboardInterrupt, EOFError):
-            print("\nAborted.", file=sys.stderr)
-            return 1
-        result = _bootstrap_from_credentials(
-            catalog_url,
-            username=username,
-            password=password,
-            name=name,
-            expires_in_days=args.expires_in_days,
-        )
-
-    secret = str(result["secret"])
-    expires_at = _parse_expires_at(result.get("expires_at"))
-    credentials.store(dns, secret, name=name, expires_at=expires_at)
-
-    pretty_expiry = ""
-    if expires_at:
-        expiry_dt = _dt.datetime.fromtimestamp(expires_at, _dt.timezone.utc)
-        pretty_expiry = f" (expires {expiry_dt.strftime('%Y-%m-%d')})"
-    print(f"Stored API key '{name}' for {dns}{pretty_expiry}.")
+    print_stored_message(minted, dns)
     return 0
 
 
