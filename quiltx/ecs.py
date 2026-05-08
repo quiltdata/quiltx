@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -66,6 +65,28 @@ class ServiceStatus:
     @property
     def failed(self) -> bool:
         return any(item.get("rolloutState") == "FAILED" for item in self.deployments)
+
+
+@dataclass(frozen=True)
+class LogLevelPlan:
+    cluster: str
+    service: str
+    container: str
+    current_task_definition: str
+    level: str | None
+    current_level: str | None
+    register_task_definition: Mapping[str, Any]
+
+    @property
+    def action(self) -> str:
+        return "remove QUILT_LOG_LEVEL" if self.level is None else "set QUILT_LOG_LEVEL"
+
+
+@dataclass(frozen=True)
+class LogLevelResult:
+    plan: LogLevelPlan
+    task_definition_arn: str
+    response: Mapping[str, Any]
 
 
 def _coerce_str(value: object | None) -> str | None:
@@ -308,16 +329,30 @@ def _default_log_level_container(container_definitions: list[Any]) -> str | None
     return names[0] if names else None
 
 
-def set_log_level(
+def _container_env_value(
+    container_definition: Mapping[str, Any],
+    name: str,
+) -> str | None:
+    env_entries = container_definition.get("environment") or []
+    if not isinstance(env_entries, list):
+        return None
+    for entry in env_entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("name") == name and isinstance(entry.get("value"), str):
+            return entry["value"]
+    return None
+
+
+def build_log_level_plan(
     ecs_client: Any,
     *,
     cluster: str,
     service: str,
     level: str | None,
     container: str | None = None,
-    dry_run: bool = True,
-) -> Mapping[str, Any]:
-    """Set or clear QUILT_LOG_LEVEL for an ECS service task definition."""
+) -> LogLevelPlan:
+    """Build a task-definition update plan for QUILT_LOG_LEVEL."""
     service_response = ecs_client.describe_services(cluster=cluster, services=[service])
     services = service_response.get("services", [])
     if not services:
@@ -360,25 +395,27 @@ def set_log_level(
         raise ValueError(f"Container '{selected}' not found in task definition")
 
     registration_args["containerDefinitions"] = updated_containers
-    preview = {
-        "cluster": cluster,
-        "service": service,
-        "container": selected,
-        "level": level,
-        "registerTaskDefinition": registration_args,
-        "updateService": {
-            "cluster": cluster,
-            "service": service,
-            "taskDefinition": "<new task definition arn>",
-            "forceNewDeployment": True,
-        },
-    }
+    current_container = next(
+        item
+        for item in container_definitions
+        if isinstance(item, dict) and item.get("name") == selected
+    )
+    return LogLevelPlan(
+        cluster=cluster,
+        service=service,
+        container=selected,
+        current_task_definition=task_definition_arn,
+        level=level,
+        current_level=_container_env_value(current_container, "QUILT_LOG_LEVEL"),
+        register_task_definition=registration_args,
+    )
 
-    if dry_run:
-        print(json.dumps(preview, indent=2, sort_keys=True))
-        return preview
 
-    register_response = ecs_client.register_task_definition(**registration_args)
+def apply_log_level_plan(ecs_client: Any, plan: LogLevelPlan) -> LogLevelResult:
+    """Register the planned task definition and update the ECS service."""
+    register_response = ecs_client.register_task_definition(
+        **dict(plan.register_task_definition)
+    )
     new_task_definition = register_response.get("taskDefinition")
     if not isinstance(new_task_definition, dict):
         raise ValueError("ECS did not return the registered task definition")
@@ -387,13 +424,37 @@ def set_log_level(
         raise ValueError("Registered task definition is missing taskDefinitionArn")
 
     update_response = ecs_client.update_service(
-        cluster=cluster,
-        service=service,
+        cluster=plan.cluster,
+        service=plan.service,
         taskDefinition=new_task_definition_arn,
         forceNewDeployment=True,
     )
+    return LogLevelResult(
+        plan=plan,
+        task_definition_arn=new_task_definition_arn,
+        response=update_response,
+    )
+
+
+def set_log_level(
+    ecs_client: Any,
+    *,
+    cluster: str,
+    service: str,
+    level: str | None,
+    container: str | None = None,
+) -> LogLevelResult:
+    """Set or clear QUILT_LOG_LEVEL for an ECS service task definition."""
+    plan = build_log_level_plan(
+        ecs_client,
+        cluster=cluster,
+        service=service,
+        level=level,
+        container=container,
+    )
+    result = apply_log_level_plan(ecs_client, plan)
     print(
-        f"Updated {service} to {new_task_definition_arn} "
+        f"Updated {service} to {result.task_definition_arn} "
         f"with QUILT_LOG_LEVEL={level or '<unset>'}"
     )
-    return update_response
+    return result

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from datetime import timezone
 
 import boto3
@@ -12,6 +13,61 @@ from quiltx import logs
 from quiltx import stack
 from quiltx.tools.ecs import logs as logs_tool
 from tests.conftest import make_fake_catalog
+
+
+def _log_level_payload() -> dict[str, object]:
+    return {
+        "region": "us-east-1",
+        "stack_name": "quilt",
+        "ecs_resources": [
+            {
+                "logical_id": "Cluster",
+                "physical_id": "quilt",
+                "resource_type": "AWS::ECS::Cluster",
+            },
+            {
+                "logical_id": "RegistryService",
+                "physical_id": "registry-service",
+                "resource_type": "AWS::ECS::Service",
+            },
+        ],
+        "log_groups": [],
+    }
+
+
+def _install_log_level_context(monkeypatch):
+    fake = make_fake_catalog("nightly.quilttest.com")
+    payload = _log_level_payload()
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **_kw: fake,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "ensure_stack_payload",
+        lambda catalog, **_kw: payload,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "aws_client",
+        lambda service, stack_payload, **_kw: "ecs-client",
+    )
+    return payload
+
+
+def _plan(**overrides):
+    values = {
+        "cluster": "quilt",
+        "service": "registry-service",
+        "container": "registry",
+        "current_task_definition": "task-def:1",
+        "level": "DEBUG",
+        "current_level": "INFO",
+        "register_task_definition": {},
+    }
+    values.update(overrides)
+    return logs_tool.ecs_lib.LogLevelPlan(**values)
 
 
 def test_parse_time_epoch_seconds() -> None:
@@ -249,50 +305,21 @@ def test_logs_auto_discovers_stack_payload_when_cache_missing(
 
 
 def test_set_level_uses_stack_context(monkeypatch) -> None:
-    fake = make_fake_catalog("nightly.quilttest.com")
-    payload = {
-        "region": "us-east-1",
-        "stack_name": "quilt",
-        "ecs_resources": [
-            {
-                "logical_id": "Cluster",
-                "physical_id": "quilt",
-                "resource_type": "AWS::ECS::Cluster",
-            },
-            {
-                "logical_id": "RegistryService",
-                "physical_id": "registry-service",
-                "resource_type": "AWS::ECS::Service",
-            },
-        ],
-        "log_groups": [],
-    }
+    _install_log_level_context(monkeypatch)
     calls = {}
 
-    monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "resolve_catalog_context",
-        lambda _catalog=None, **_kw: fake,
-    )
-    monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "ensure_stack_payload",
-        lambda catalog, **_kw: payload,
-    )
-    monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "aws_client",
-        lambda service, stack_payload, **_kw: "ecs-client",
-    )
-
-    def _set_log_level(ecs_client, **kwargs):
+    def _build_log_level_plan(ecs_client, **kwargs):
         calls["ecs_client"] = ecs_client
         calls.update(kwargs)
-        return {}
+        return _plan()
 
-    monkeypatch.setattr(logs_tool.ecs_lib, "set_log_level", _set_log_level)
+    monkeypatch.setattr(
+        logs_tool.ecs_lib, "build_log_level_plan", _build_log_level_plan
+    )
 
-    rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--set-level"])
+    rc = logs_tool.main(
+        ["--catalog", "nightly.quilttest.com", "--set-level", "--dry-run"]
+    )
 
     assert rc == 0
     assert calls == {
@@ -301,96 +328,41 @@ def test_set_level_uses_stack_context(monkeypatch) -> None:
         "service": "registry-service",
         "container": None,
         "level": "DEBUG",
-        "dry_run": True,
     }
 
 
 def test_set_level_autocompletes_unique_prefix(monkeypatch) -> None:
-    fake = make_fake_catalog("nightly.quilttest.com")
-    payload = {
-        "region": "us-east-1",
-        "stack_name": "quilt",
-        "ecs_resources": [
-            {
-                "logical_id": "Cluster",
-                "physical_id": "quilt",
-                "resource_type": "AWS::ECS::Cluster",
-            },
-            {
-                "logical_id": "RegistryService",
-                "physical_id": "registry-service",
-                "resource_type": "AWS::ECS::Service",
-            },
-        ],
-        "log_groups": [],
-    }
+    _install_log_level_context(monkeypatch)
     calls = {}
 
-    monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "resolve_catalog_context",
-        lambda _catalog=None, **_kw: fake,
-    )
-    monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "ensure_stack_payload",
-        lambda catalog, **_kw: payload,
-    )
-    monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "aws_client",
-        lambda service, stack_payload, **_kw: "ecs-client",
-    )
-
-    def _set_log_level(ecs_client, **kwargs):
+    def _build_log_level_plan(ecs_client, **kwargs):
         calls.update(kwargs)
-        return {}
+        return _plan()
 
-    monkeypatch.setattr(logs_tool.ecs_lib, "set_log_level", _set_log_level)
+    monkeypatch.setattr(
+        logs_tool.ecs_lib, "build_log_level_plan", _build_log_level_plan
+    )
 
-    rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--set-level", "D"])
+    rc = logs_tool.main(
+        ["--catalog", "nightly.quilttest.com", "--set-level", "D", "--dry-run"]
+    )
 
     assert rc == 0
     assert calls["level"] == "DEBUG"
 
 
 def test_set_level_yes_waits_for_stability(monkeypatch) -> None:
-    fake = make_fake_catalog("nightly.quilttest.com")
-    payload = {
-        "region": "us-east-1",
-        "stack_name": "quilt",
-        "ecs_resources": [
-            {
-                "logical_id": "Cluster",
-                "physical_id": "quilt",
-                "resource_type": "AWS::ECS::Cluster",
-            },
-            {
-                "logical_id": "RegistryService",
-                "physical_id": "registry-service",
-                "resource_type": "AWS::ECS::Service",
-            },
-        ],
-        "log_groups": [],
-    }
+    _install_log_level_context(monkeypatch)
     calls = {}
 
     monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "resolve_catalog_context",
-        lambda _catalog=None, **_kw: fake,
+        logs_tool.ecs_lib, "build_log_level_plan", lambda *a, **kw: _plan()
     )
     monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "ensure_stack_payload",
-        lambda catalog, **_kw: payload,
+        logs_tool.ecs_lib,
+        "apply_log_level_plan",
+        lambda *a, **kw: SimpleNamespace(task_definition_arn="task-def:2"),
     )
-    monkeypatch.setattr(
-        logs_tool.stack_lib,
-        "aws_client",
-        lambda service, stack_payload, **_kw: "ecs-client",
-    )
-    monkeypatch.setattr(logs_tool.ecs_lib, "set_log_level", lambda *a, **kw: {})
 
     def _wait_for_stable(ecs_client, **kwargs):
         calls["ecs_client"] = ecs_client
@@ -406,6 +378,53 @@ def test_set_level_yes_waits_for_stability(monkeypatch) -> None:
     assert calls["ecs_client"] == "ecs-client"
     assert calls["cluster"] == "quilt"
     assert calls["service"] == "registry-service"
+
+
+def test_set_level_prompts_before_apply(monkeypatch) -> None:
+    _install_log_level_context(monkeypatch)
+    applied = {"called": False}
+
+    monkeypatch.setattr(
+        logs_tool.ecs_lib, "build_log_level_plan", lambda *a, **kw: _plan()
+    )
+    monkeypatch.setattr(logs_tool.Confirm, "ask", lambda *a, **kw: True)
+    monkeypatch.setattr(logs_tool.status_tool, "wait_for_stable", lambda *a, **kw: None)
+
+    def _apply_log_level_plan(*_args, **_kwargs):
+        applied["called"] = True
+        return SimpleNamespace(task_definition_arn="task-def:2")
+
+    monkeypatch.setattr(
+        logs_tool.ecs_lib, "apply_log_level_plan", _apply_log_level_plan
+    )
+
+    rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--set-level", "DEBUG"])
+
+    assert rc == 0
+    assert applied["called"] is True
+
+
+def test_set_level_prompt_decline_aborts(monkeypatch) -> None:
+    _install_log_level_context(monkeypatch)
+    applied = {"called": False}
+
+    monkeypatch.setattr(
+        logs_tool.ecs_lib, "build_log_level_plan", lambda *a, **kw: _plan()
+    )
+    monkeypatch.setattr(logs_tool.Confirm, "ask", lambda *a, **kw: False)
+
+    def _apply_log_level_plan(*_args, **_kwargs):
+        applied["called"] = True
+        return SimpleNamespace(task_definition_arn="task-def:2")
+
+    monkeypatch.setattr(
+        logs_tool.ecs_lib, "apply_log_level_plan", _apply_log_level_plan
+    )
+
+    rc = logs_tool.main(["--catalog", "nightly.quilttest.com", "--set-level", "DEBUG"])
+
+    assert rc == 1
+    assert applied["called"] is False
 
 
 def test_set_level_rejects_invalid_value_before_stack_lookup(

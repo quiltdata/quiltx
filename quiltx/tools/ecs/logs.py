@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 from rich.console import Console
 from rich.live import Live
+from rich.prompt import Confirm
 from rich.table import Table
 from rich.text import Text
 
@@ -133,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const="DEBUG",
         type=_normalize_set_level,
-        help="Set the container log level (default DEBUG). Performs a dry-run unless --yes is provided.",
+        help="Set the container log level (default DEBUG). Prompts unless --yes or --dry-run is provided.",
     )
     parser.add_argument(
         "--reset-level",
@@ -151,7 +152,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="Perform the changes instead of a dry-run (used with --set-level).",
+        help="Apply --set-level without prompting.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Summarize the --set-level update without applying it.",
     )
     parser.add_argument(
         "--no-wait",
@@ -481,6 +487,21 @@ def _follow_logs_dynamic(
             pass
 
 
+def _render_log_level_plan(plan: ecs_lib.LogLevelPlan) -> Table:
+    table = Table(title="ECS Log Level Update", show_lines=False)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Action", plan.action)
+    table.add_row("Cluster", plan.cluster)
+    table.add_row("Service", plan.service)
+    table.add_row("Container", plan.container)
+    table.add_row("Current task definition", plan.current_task_definition)
+    table.add_row("Current level", plan.current_level or "<unset>")
+    table.add_row("New level", plan.level or "<unset>")
+    table.add_row("Deployment", "register new task definition and force deployment")
+    return table
+
+
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: Any) -> int:
     payload = stack_lib.ensure_stack_payload(
@@ -495,16 +516,26 @@ def _run(catalog: stack_lib.Catalog, args: Any) -> int:
         service = args.service or stack_lib.require_registry_service(payload)
         ecs_client = stack_lib.aws_client("ecs", payload)
         level = None if args.reset_level else args.set_level
-        dry_run = not bool(getattr(args, "yes", False))
-        ecs_lib.set_log_level(
+        plan = ecs_lib.build_log_level_plan(
             ecs_client,
             cluster=cluster,
             service=service,
             container=args.container,
             level=level,
-            dry_run=dry_run,
         )
-        if not dry_run and not args.no_wait:
+        console.print(_render_log_level_plan(plan))
+        if args.dry_run:
+            return 0
+        if not args.yes:
+            if not Confirm.ask("Apply this update?", default=False):
+                console.print("Aborted.")
+                return 1
+        result = ecs_lib.apply_log_level_plan(ecs_client, plan)
+        console.print(
+            f"Updated {service} to {result.task_definition_arn} "
+            f"with QUILT_LOG_LEVEL={level or '<unset>'}"
+        )
+        if not args.no_wait:
             status_tool.wait_for_stable(
                 ecs_client,
                 cluster=cluster,

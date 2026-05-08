@@ -340,20 +340,20 @@ def test_set_log_level_dry_run_updates_task_definition(capsys) -> None:
                 }
             }
 
-    result = ecs_lib.set_log_level(
+    plan = ecs_lib.build_log_level_plan(
         FakeEcsClient(),
         cluster="quilt",
         service="registry-service",
         container="registry",
         level="DEBUG",
-        dry_run=True,
     )
 
-    register_args = result["registerTaskDefinition"]
+    register_args = plan.register_task_definition
     container = register_args["containerDefinitions"][0]
     assert {"name": "QUILT_LOG_LEVEL", "value": "DEBUG"} in container["environment"]
     assert "taskDefinitionArn" not in register_args
-    assert '"service": "registry-service"' in capsys.readouterr().out
+    assert plan.container == "registry"
+    assert plan.current_level is None
 
 
 def test_set_log_level_defaults_to_registry_container() -> None:
@@ -399,15 +399,14 @@ def test_set_log_level_defaults_to_registry_container() -> None:
                 }
             }
 
-    result = ecs_lib.set_log_level(
+    plan = ecs_lib.build_log_level_plan(
         FakeEcsClient(),
         cluster="quilt",
         service="registry-service",
         level="DEBUG",
-        dry_run=True,
     )
 
-    containers = result["registerTaskDefinition"]["containerDefinitions"]
+    containers = plan.register_task_definition["containerDefinitions"]
     levels = {
         container["name"]: [
             entry["value"]
