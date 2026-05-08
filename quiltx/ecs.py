@@ -310,7 +310,7 @@ def _set_container_env(
         for entry in env_entries
         if isinstance(entry, dict) and entry.get("name") != name
     ]
-    if value:
+    if value is not None:
         environment.append({"name": name, "value": value})
     updated["environment"] = environment
     return updated
