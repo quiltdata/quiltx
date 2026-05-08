@@ -36,9 +36,10 @@ arguments and normalized to the bare DNS.
   - **catalog acl** — Declarative access-control-list (ACL) reconciliation from YAML
   - **catalog stack** — Discover the Quilt CloudFormation stack and cache metadata
 - **ecs** — ECS task tools:
+  - **ecs logs** — Display/tail catalog CloudWatch logs and update ECS log level
   - **ecs shell** — Interactive shell access to running ECS tasks via Session Manager
+  - **ecs status** — Show or wait for ECS service rollout status
   - **ecs run-migration** — Re-run the registry migration task for a stack
-- **logs** — Display and tail CloudWatch logs for the configured catalog
 
 ### Python API
 
@@ -155,6 +156,18 @@ it must be passed on every command that hits the catalog.
 ```bash
 # Open an interactive shell inside the registry service task
 uvx quiltx ecs shell
+
+# Display and tail CloudWatch logs
+uvx quiltx ecs logs
+
+# Dry-run setting the registry container log level
+uvx quiltx ecs logs --set-level DEBUG
+
+# Apply a log-level change and wait for service stability
+uvx quiltx ecs logs --set-level DEBUG --yes
+
+# Show ECS service rollout status
+uvx quiltx ecs status
 
 # Dry-run the registry migration relaunch using cached stack metadata
 uvx quiltx ecs run-migration --dry-run

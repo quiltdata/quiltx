@@ -10,7 +10,12 @@
 
 ### ECS Tool (`quiltx ecs`)
 
-Opens interactive shell in running ECS tasks. Requires AWS Session Manager plugin (CLI will prompt with install instructions).
+Provides catalog ECS operations:
+
+- `quiltx ecs logs` displays/tails CloudWatch logs and can set/reset ECS log level.
+- `quiltx ecs status` shows or waits for service rollout status.
+- `quiltx ecs shell` opens an interactive shell in running ECS tasks. Requires AWS Session Manager plugin (CLI will prompt with install instructions).
+- `quiltx ecs run-migration` re-runs the registry migration task.
 
 ### Stack API (`quiltx.stack`)
 

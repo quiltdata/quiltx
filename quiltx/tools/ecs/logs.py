@@ -21,6 +21,7 @@ from quiltx import ecs as ecs_lib
 from quiltx import logs as logs_lib
 from quiltx import stack as stack_lib
 from quiltx.cli_common import add_catalog_args
+from quiltx.tools.ecs import status as status_tool
 
 _LOG_LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
 _LOG_LEVEL_ALIASES = {"WARNING": "WARN"}
@@ -151,6 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Perform the changes instead of a dry-run (used with --set-level).",
+    )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Do not wait for ECS service stability after applying --set-level.",
     )
     return parser
 
@@ -498,6 +504,13 @@ def _run(catalog: stack_lib.Catalog, args: Any) -> int:
             level=level,
             dry_run=dry_run,
         )
+        if not dry_run and not args.no_wait:
+            status_tool.wait_for_stable(
+                ecs_client,
+                cluster=cluster,
+                service=service,
+                console=console,
+            )
         return 0
 
     if args.list:

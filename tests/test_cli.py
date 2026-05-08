@@ -75,6 +75,7 @@ def test_ecs_no_subcommand(capsys) -> None:
     captured = capsys.readouterr()
     assert "shell" in captured.out
     assert "run-migration" in captured.out
+    assert "status" in captured.out
 
 
 def test_catalog_acl_help() -> None:
@@ -95,6 +96,13 @@ def test_ecs_run_migration_help() -> None:
     """Test that 'quiltx ecs run-migration --help' works."""
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["ecs", "run-migration", "--help"])
+    assert exc_info.value.code == 0
+
+
+def test_ecs_status_help() -> None:
+    """Test that 'quiltx ecs status --help' works."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["ecs", "status", "--help"])
     assert exc_info.value.code == 0
 
 

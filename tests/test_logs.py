@@ -354,6 +354,60 @@ def test_set_level_autocompletes_unique_prefix(monkeypatch) -> None:
     assert calls["level"] == "DEBUG"
 
 
+def test_set_level_yes_waits_for_stability(monkeypatch) -> None:
+    fake = make_fake_catalog("nightly.quilttest.com")
+    payload = {
+        "region": "us-east-1",
+        "stack_name": "quilt",
+        "ecs_resources": [
+            {
+                "logical_id": "Cluster",
+                "physical_id": "quilt",
+                "resource_type": "AWS::ECS::Cluster",
+            },
+            {
+                "logical_id": "RegistryService",
+                "physical_id": "registry-service",
+                "resource_type": "AWS::ECS::Service",
+            },
+        ],
+        "log_groups": [],
+    }
+    calls = {}
+
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **_kw: fake,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "ensure_stack_payload",
+        lambda catalog, **_kw: payload,
+    )
+    monkeypatch.setattr(
+        logs_tool.stack_lib,
+        "aws_client",
+        lambda service, stack_payload, **_kw: "ecs-client",
+    )
+    monkeypatch.setattr(logs_tool.ecs_lib, "set_log_level", lambda *a, **kw: {})
+
+    def _wait_for_stable(ecs_client, **kwargs):
+        calls["ecs_client"] = ecs_client
+        calls.update(kwargs)
+
+    monkeypatch.setattr(logs_tool.status_tool, "wait_for_stable", _wait_for_stable)
+
+    rc = logs_tool.main(
+        ["--catalog", "nightly.quilttest.com", "--set-level", "DEBUG", "--yes"]
+    )
+
+    assert rc == 0
+    assert calls["ecs_client"] == "ecs-client"
+    assert calls["cluster"] == "quilt"
+    assert calls["service"] == "registry-service"
+
+
 def test_set_level_rejects_invalid_value_before_stack_lookup(
     monkeypatch, capsys
 ) -> None:

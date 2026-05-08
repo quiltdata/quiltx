@@ -41,6 +41,33 @@ class MigrationLaunchError(RuntimeError):
         super().__init__(", ".join(parts) or "Migration task failed to launch")
 
 
+@dataclass(frozen=True)
+class ServiceStatus:
+    cluster: str
+    service: str
+    desired_count: int
+    running_count: int
+    pending_count: int
+    task_definition: str
+    deployments: list[Mapping[str, Any]]
+    events: list[Mapping[str, Any]]
+
+    @property
+    def stable(self) -> bool:
+        primary = [item for item in self.deployments if item.get("status") == "PRIMARY"]
+        return (
+            len(self.deployments) == 1
+            and len(primary) == 1
+            and primary[0].get("rolloutState") == "COMPLETED"
+            and self.running_count == self.desired_count
+            and self.pending_count == 0
+        )
+
+    @property
+    def failed(self) -> bool:
+        return any(item.get("rolloutState") == "FAILED" for item in self.deployments)
+
+
 def _coerce_str(value: object | None) -> str | None:
     if isinstance(value, str):
         return value
@@ -195,6 +222,32 @@ def run_migration_for_catalog(
     return wait_for_task(ecs_client, cluster, task_arn)
 
 
+def describe_service_status(
+    ecs_client: Any,
+    *,
+    cluster: str,
+    service: str,
+) -> ServiceStatus:
+    """Return deployment status for one ECS service."""
+    response = ecs_client.describe_services(cluster=cluster, services=[service])
+    services = response.get("services", [])
+    if not services:
+        raise ValueError(f"ECS service '{service}' was not found")
+    info = services[0]
+    return ServiceStatus(
+        cluster=cluster,
+        service=service,
+        desired_count=int(info.get("desiredCount") or 0),
+        running_count=int(info.get("runningCount") or 0),
+        pending_count=int(info.get("pendingCount") or 0),
+        task_definition=str(info.get("taskDefinition") or ""),
+        deployments=[
+            item for item in info.get("deployments", []) if isinstance(item, dict)
+        ],
+        events=[item for item in info.get("events", []) if isinstance(item, dict)],
+    )
+
+
 def _task_definition_registration_args(
     task_definition: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -242,6 +295,19 @@ def _set_container_env(
     return updated
 
 
+def _default_log_level_container(container_definitions: list[Any]) -> str | None:
+    """Pick the application container for log-level changes."""
+    names = [
+        definition.get("name")
+        for definition in container_definitions
+        if isinstance(definition, dict) and isinstance(definition.get("name"), str)
+    ]
+    for preferred in ("registry",):
+        if preferred in names:
+            return preferred
+    return names[0] if names else None
+
+
 def set_log_level(
     ecs_client: Any,
     *,
@@ -274,7 +340,7 @@ def set_log_level(
 
     selected = container
     if selected is None:
-        selected = str(container_definitions[0].get("name") or "")
+        selected = _default_log_level_container(container_definitions)
     if not selected:
         raise ValueError("Could not determine target container")
 
