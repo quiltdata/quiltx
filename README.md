@@ -75,6 +75,7 @@ policies:
     sso.groups: [Employees]
     buckets.read_write: [quilt-bake, quilt-dev]
     buckets.read: [quilt-leadership]
+    config.is_admin: true
 
 roles:
   exec:
@@ -88,6 +89,10 @@ Policy order matters. In this example `public` synthesizes the `public` role,
 and `internal` synthesizes `internal_public`, which cumulatively includes both
 `public` and `internal`. Reordering the policies changes those synthesized role
 names and who receives which cumulative grants.
+
+Policy `config.is_admin` also composes cumulatively for synthesized roles.
+Unset is neutral, `true` grants admin, and an explicit `false` vetoes any prior
+`true` in that generated role and is reported as a warning.
 
 ### Usage
 
