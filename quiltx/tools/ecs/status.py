@@ -22,13 +22,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="Show or wait for the configured catalog ECS service rollout.",
     )
     add_catalog_args(parser, auth_required=False)
+    parser.add_argument(
+        "--region",
+        help="AWS region override. Required with --cluster/--service when no stack payload is available.",
+    )
     parser.add_argument("--cluster", help="ECS cluster override.")
     parser.add_argument(
         "--service",
         help="ECS service override (defaults to RegistryService from stack payload).",
     )
     parser.add_argument(
-        "--watch",
+        "--wait",
         action="store_true",
         help="Poll until the service is stable or failed.",
     )
@@ -36,15 +40,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval",
         type=float,
         default=5.0,
-        help="Polling interval in seconds when watching (default 5).",
+        help="Polling interval in seconds when waiting (default 5).",
     )
     parser.add_argument(
         "--timeout",
         type=int,
         default=600,
-        help="Maximum seconds to wait when watching (default 600).",
+        help="Maximum seconds to wait (default 600).",
     )
     return parser
+
+
+def _ecs_client_from_explicit_args(
+    catalog: stack_lib.Catalog,
+    args: argparse.Namespace,
+) -> Any | None:
+    if not args.cluster or not args.service:
+        return None
+    region = args.region
+    if region is None:
+        try:
+            catalog_config = stack_lib.fetch_catalog_config(catalog.catalog_url)
+            region = stack_lib.fetch_region(catalog, catalog_config)
+        except Exception:
+            return None
+    return stack_lib.aws_client("ecs", region=region)
 
 
 def render_status(status: ecs_lib.ServiceStatus) -> Table:
@@ -118,16 +138,23 @@ def wait_for_stable(
 
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
-    payload = stack_lib.ensure_stack_payload(
-        catalog,
-        announce=lambda message: print(message, file=sys.stderr),
-    )
-    cluster = args.cluster or stack_lib.require_ecs_cluster(payload)
-    service = args.service or stack_lib.require_registry_service(payload)
-    ecs_client = stack_lib.aws_client("ecs", payload)
+    ecs_client = _ecs_client_from_explicit_args(catalog, args)
+    if ecs_client is not None:
+        cluster = args.cluster
+        service = args.service
+        assert cluster is not None
+        assert service is not None
+    else:
+        payload = stack_lib.ensure_stack_payload(
+            catalog,
+            announce=lambda message: print(message, file=sys.stderr),
+        )
+        cluster = args.cluster or stack_lib.require_ecs_cluster(payload)
+        service = args.service or stack_lib.require_registry_service(payload)
+        ecs_client = stack_lib.aws_client("ecs", payload, region=args.region)
     console = Console()
 
-    if args.watch:
+    if args.wait:
         wait_for_stable(
             ecs_client,
             cluster=cluster,

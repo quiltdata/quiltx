@@ -106,6 +106,17 @@ def test_ecs_status_help() -> None:
     assert exc_info.value.code == 0
 
 
+def test_ecs_status_help_uses_wait_not_watch(capsys) -> None:
+    """Status polling flag is --wait for consistency with other ECS commands."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["ecs", "status", "--help"])
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    assert "--wait" in captured.out
+    assert "--watch" not in captured.out
+
+
 def test_catalog_stack_help() -> None:
     """Test that 'quiltx catalog stack --help' works."""
     with pytest.raises(SystemExit) as exc_info:

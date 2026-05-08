@@ -174,6 +174,9 @@ uvx quiltx ecs logs --set-level DEBUG --yes
 # Show ECS service rollout status
 uvx quiltx ecs status
 
+# Wait for ECS service rollout stability
+uvx quiltx ecs status --wait
+
 # Dry-run the registry migration relaunch using cached stack metadata
 uvx quiltx ecs run-migration --dry-run
 
