@@ -547,6 +547,10 @@ def _format_command(cmd: Iterable[str]) -> str:
     return " ".join(cmd)
 
 
+def _print_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
@@ -638,9 +642,17 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             if payload
             else stack_lib.aws_client("ecs", region=region)
         )
+        _print_progress(
+            "Resolving ECS target"
+            f" cluster={cluster}"
+            f" service={service or '<any>'}"
+            f" region={region or '<aws-default>'}"
+        )
         task_arn = _select_task(ecs_client, cluster, args.task, service)
+        _print_progress(f"Selected task {task_arn}")
 
         # Check if Execute Command is enabled before proceeding
+        _print_progress("Checking ECS Execute Command support...")
         is_enabled, error_msg = _check_execute_command_enabled(
             ecs_client, cluster, task_arn
         )
@@ -656,6 +668,7 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             return exit_code
 
         container = _select_container(ecs_client, cluster, task_arn, container)
+        _print_progress(f"Selected container {container}")
 
         if args.reachability:
             targets = _collect_reachability_targets(payload)
@@ -683,27 +696,15 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             _print_plugin_installation_help(console)
             return 2
 
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        _print_progress(f"Starting ECS shell: {_format_command(cmd)}")
+        result = subprocess.run(cmd, check=False)
 
         # Check for specific execute command error
         if result.returncode != 0:
-            error_output = result.stderr + result.stdout
-            if "execute command was not enabled" in error_output.lower():
-                exit_code = _print_execute_command_not_enabled_error(
-                    console,
-                    cluster,
-                    service,
-                    region,
-                    args.enable_execute_command,
-                    error_output.strip(),
-                )
-                return exit_code
-            else:
-                # Print the actual error for other failures
-                if result.stderr:
-                    print(result.stderr, file=sys.stderr)
-                if result.stdout:
-                    print(result.stdout)
+            print(
+                f"aws ecs execute-command exited with {result.returncode}",
+                file=sys.stderr,
+            )
 
         return result.returncode
     except Exception as exc:
