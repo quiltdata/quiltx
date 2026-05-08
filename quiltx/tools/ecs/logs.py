@@ -426,7 +426,7 @@ def _follow_logs_dynamic(
 
                     message = structured["message"]
                     if not wrap:
-                        max_msg_len = console_width - 30
+                        max_msg_len = max(160, console_width - 30)
                         if len(message) > max_msg_len:
                             message = message[: max_msg_len - 3] + "..."
                     text.append(message)
