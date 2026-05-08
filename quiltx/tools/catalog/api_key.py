@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from quiltx import credentials
 from quiltx.cli_common import add_catalog_args
 from quiltx.identity import build_catalog_url, normalize_dns
 from quiltx.tools.catalog import login as login_cmd
@@ -14,7 +15,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="quiltx catalog api-key",
         description=(
-            "Mint a new qk_... API key, store it locally, and print the secret."
+            "Print the stored qk_... API key for a catalog. Use --new to "
+            "mint, store, and print a replacement key."
         ),
     )
     add_catalog_args(parser, auth_required=False)
@@ -60,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=365,
         help="API key expiration window in days (1-365). Default: 365.",
     )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Mint and store a new API key instead of printing the stored key.",
+    )
     return parser
 
 
@@ -79,6 +86,15 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+
+    if not args.new:
+        stored = credentials.get(dns)
+        if stored is not None:
+            print(stored["api_key"])
+            return 0
+        if args.no_prompt:
+            print(f"Error: no stored API key for {dns}.", file=sys.stderr)
+            return 1
 
     catalog_url = build_catalog_url(dns, insecure=args.insecure)
 

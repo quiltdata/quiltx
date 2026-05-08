@@ -221,7 +221,34 @@ def test_login_browser_flow_default_on_tty(tmp_path, monkeypatch, capsys):
     assert stored["api_key"] == "qk_browser"
 
 
-def test_api_key_command_mints_stores_and_prints_secret(tmp_path, monkeypatch, capsys):
+def test_api_key_command_prints_stored_secret_without_auth_flow(
+    tmp_path, monkeypatch, capsys
+):
+    _setup_no_keyring(monkeypatch, tmp_path)
+    credentials.store(
+        "nightly.quilttest.com",
+        "qk_stored",
+        name="stored",
+        expires_at=None,
+    )
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        api_key_cmd.login_cmd.quilt_auth,
+        "open_browser",
+        lambda url: opened.append(url) or True,
+    )
+
+    rc = api_key_cmd.main(["--catalog", "nightly.quilttest.com"])
+
+    assert rc == 0
+    assert capsys.readouterr().out == "qk_stored\n"
+    assert opened == []
+
+
+def test_api_key_command_mints_stores_and_prints_new_secret(
+    tmp_path, monkeypatch, capsys
+):
     _setup_no_keyring(monkeypatch, tmp_path)
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
@@ -250,7 +277,7 @@ def test_api_key_command_mints_stores_and_prints_secret(tmp_path, monkeypatch, c
         quilt_auth, "bootstrap_api_key_from_refresh_token", fake_bootstrap
     )
 
-    rc = api_key_cmd.main(["--catalog", "nightly.quilttest.com"])
+    rc = api_key_cmd.main(["--catalog", "nightly.quilttest.com", "--new"])
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -258,6 +285,55 @@ def test_api_key_command_mints_stores_and_prints_secret(tmp_path, monkeypatch, c
     stored = credentials.get("nightly.quilttest.com")
     assert stored is not None
     assert stored["api_key"] == "qk_printed"
+
+
+def test_api_key_command_mints_when_no_stored_secret(tmp_path, monkeypatch, capsys):
+    _setup_no_keyring(monkeypatch, tmp_path)
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        api_key_cmd.login_cmd.quilt_auth,
+        "open_browser",
+        lambda _url: True,
+    )
+    monkeypatch.setattr(
+        api_key_cmd.login_cmd.quilt_auth,
+        "browser_login_url",
+        lambda _catalog_url: "https://nightly.quilttest.com/login",
+    )
+    monkeypatch.setattr("builtins.input", lambda *_a, **_kw: "rt_pasted")
+
+    def fake_bootstrap(catalog_url, *, refresh_token, name, expires_in_days):
+        assert catalog_url == "https://nightly.quilttest.com"
+        assert refresh_token == "rt_pasted"
+        return {
+            "secret": "qk_first",
+            "name": name,
+            "expires_at": "2027-05-04T00:00:00Z",
+        }
+
+    monkeypatch.setattr(
+        quilt_auth, "bootstrap_api_key_from_refresh_token", fake_bootstrap
+    )
+
+    rc = api_key_cmd.main(["--catalog", "nightly.quilttest.com"])
+
+    assert rc == 0
+    assert "qk_first" in capsys.readouterr().out
+    stored = credentials.get("nightly.quilttest.com")
+    assert stored is not None
+    assert stored["api_key"] == "qk_first"
+
+
+def test_api_key_command_no_prompt_errors_without_stored_secret(
+    tmp_path, monkeypatch, capsys
+):
+    _setup_no_keyring(monkeypatch, tmp_path)
+
+    rc = api_key_cmd.main(["--catalog", "nightly.quilttest.com", "--no-prompt"])
+
+    assert rc == 1
+    assert "no stored API key" in capsys.readouterr().err
 
 
 def test_login_no_browser_falls_back_to_username_prompt(tmp_path, monkeypatch, capsys):
