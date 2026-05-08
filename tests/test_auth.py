@@ -91,39 +91,52 @@ def test_cli_skip_keyring(monkeypatch, tmp_path):
         auth.resolve_cli(FAKE_CATALOG, args, skip_keyring=True)
 
 
-def test_cli_prompt_stores_key(monkeypatch, tmp_path):
-    """Interactive prompt stores the pasted API key."""
+def test_cli_auth_flow_mints_and_stores_key(monkeypatch, tmp_path):
+    """Interactive auth flow mints and stores an API key."""
     _clear_env(monkeypatch)
     _no_keyring(monkeypatch)
     _tmp_fallback(monkeypatch, tmp_path)
     args = SimpleNamespace(api_key=None, no_prompt=False)
 
-    with (
-        patch("sys.stdin.isatty", return_value=True),
-        patch("getpass.getpass", return_value="qk_prompted"),
-    ):
+    from quiltx.tools.catalog import login as login_tool
+
+    def fake_mint(catalog_url, dns, **_kw):
+        assert catalog_url == "https://nightly.quilttest.com"
+        assert dns == "nightly.quilttest.com"
+        credentials.store(dns, "qk_minted", name="minted", expires_at=None)
+        return login_tool.MintedApiKey(
+            secret="qk_minted", name="minted", expires_at=None
+        )
+
+    monkeypatch.setattr(login_tool, "mint_api_key", fake_mint)
+
+    with (patch("sys.stdin.isatty", return_value=True),):
         result = auth.resolve_cli(FAKE_CATALOG, args)
 
-    assert result.api_key == "qk_prompted"
-    assert result.source == "prompt"
+    assert result.api_key == "qk_minted"
+    assert result.source == "auth-flow"
     stored = credentials.get("nightly.quilttest.com")
     assert stored is not None
-    assert stored["api_key"] == "qk_prompted"
-    # Paste-only bootstrap leaves metadata null per [05 §3].
-    assert stored.get("name") is None
+    assert stored["api_key"] == "qk_minted"
+    assert stored.get("name") == "minted"
     assert stored.get("expires_at") is None
 
 
-def test_cli_prompt_empty_rejected(monkeypatch, tmp_path):
+def test_cli_auth_flow_error_propagates(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     _no_keyring(monkeypatch)
     _tmp_fallback(monkeypatch, tmp_path)
     args = SimpleNamespace(api_key=None, no_prompt=False)
-    with (
-        patch("sys.stdin.isatty", return_value=True),
-        patch("getpass.getpass", return_value="   "),
-    ):
-        with pytest.raises(auth.CredentialError, match="Empty API key"):
+
+    from quiltx.tools.catalog import login as login_tool
+
+    def fake_mint(*_a, **_kw):
+        raise login_tool.LoginError("No code provided.")
+
+    monkeypatch.setattr(login_tool, "mint_api_key", fake_mint)
+
+    with (patch("sys.stdin.isatty", return_value=True),):
+        with pytest.raises(auth.CredentialError, match="No code provided"):
             auth.resolve_cli(FAKE_CATALOG, args)
 
 

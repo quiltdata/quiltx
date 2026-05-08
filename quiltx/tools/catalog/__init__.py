@@ -8,6 +8,7 @@ from importlib import import_module
 
 SUBCOMMANDS = {
     "acl": "quiltx.tools.catalog.acl",
+    "api-key": "quiltx.tools.catalog.api_key",
     "default": "quiltx.tools.catalog.default",
     "forget": "quiltx.tools.catalog.forget",
     "list": "quiltx.tools.catalog.list_",
@@ -31,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "acl",
         help="Reconcile Quilt bucket, role, policy, and SSO ACLs from YAML.",
+        add_help=False,
+    )
+    subparsers.add_parser(
+        "api-key",
+        help="Mint, store, and print a new qk_... API key.",
         add_help=False,
     )
     subparsers.add_parser(
