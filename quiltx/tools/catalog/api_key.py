@@ -36,8 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--password",
         help=(
-            "Catalog admin password. If --username is given without --password "
-            "in interactive mode, you will be prompted."
+            "Catalog admin password. INSECURE: visible in `ps`/process listings; "
+            "prefer omitting it so you are prompted via getpass on TTY."
         ),
     )
     parser.add_argument(
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except login_cmd.LoginError as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        return 2 if login_cmd.is_usage_error(exc) else 1
+        return 2 if isinstance(exc, login_cmd.LoginUsageError) else 1
 
     login_cmd.print_stored_message(minted, dns)
     print(minted.secret)

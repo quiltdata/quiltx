@@ -60,9 +60,8 @@ class LoginError(RuntimeError):
     """Raised when an interactive catalog login flow cannot complete."""
 
 
-def is_usage_error(exc: LoginError) -> bool:
-    message = str(exc)
-    return "--password is required" in message or "interactive TTY" in message
+class LoginUsageError(LoginError):
+    """Raised when the caller invoked the login flow with bad arguments."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--password",
         help=(
-            "Catalog admin password. If --username is given without --password "
-            "in interactive mode, you will be prompted."
+            "Catalog admin password. INSECURE: visible in `ps`/process listings; "
+            "prefer omitting it so you are prompted via getpass on TTY."
         ),
     )
     parser.add_argument(
@@ -190,7 +189,7 @@ def mint_api_key(
         resolved_password = password
         if resolved_password is None:
             if not interactive:
-                raise LoginError(
+                raise LoginUsageError(
                     "--password is required when --username is set headlessly."
                 )
             try:
@@ -214,7 +213,7 @@ def mint_api_key(
         )
     else:
         if not interactive:
-            raise LoginError(
+            raise LoginUsageError(
                 "--username/--password or interactive TTY is required "
                 "(browser flow needs a TTY for paste-back)."
             )
@@ -251,7 +250,7 @@ def print_stored_message(minted: MintedApiKey, dns: str) -> None:
     if minted.expires_at:
         expiry_dt = _dt.datetime.fromtimestamp(minted.expires_at, _dt.timezone.utc)
         pretty_expiry = f" (expires {expiry_dt.strftime('%Y-%m-%d')})"
-    print(f"Stored API key '{minted.name}' for {dns}{pretty_expiry}.")
+    print(f"Stored API key '{minted.name}' for {dns}{pretty_expiry}.", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -304,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except LoginError as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        return 2 if is_usage_error(exc) else 1
+        return 2 if isinstance(exc, LoginUsageError) else 1
 
     print_stored_message(minted, dns)
     return 0
