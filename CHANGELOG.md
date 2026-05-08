@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-05-07
+
+### Added
+
+- `quiltx catalog acl` accepts arbitrary `sso.<claim>` selectors, not only `sso.groups`, and emits SSO JSON Schema mappings for scalar or array-valued custom claims.
+
+### Fixed
+
+- `quiltx catalog acl` uses role and policy IDs from fetched state when updating or deleting existing resources, avoiding quilt3 name-as-ID lookup failures that surfaced as opaque `Internal Server Error` GraphQL errors.
+- `quiltx catalog acl` now detaches users, SSO mappings, policy associations, and policy role associations before deleting roles or policies, allowing stale managed roles and inline policies to be removed cleanly.
+- GraphQL error formatting no longer repeats identical wrapper and nested messages such as `Internal Server Error: Internal Server Error`.
+
 ## [0.14.1] - 2026-05-07
 
 ### Fixed
