@@ -43,6 +43,7 @@ _ACTIVE_CATALOG_URL: ContextVar[str | None] = ContextVar(
 # <catalog>/config.json. Quilt3 calls get_registry_url repeatedly, and we
 # don't want to refetch config.json on every call.
 _REGISTRY_URL_CACHE: dict[str, str] = {}
+_PATCH_INSTALLED = False
 
 
 def _resolve_registry_for_active_catalog(catalog_url: str) -> str:
@@ -67,7 +68,15 @@ def _resolve_registry_for_active_catalog(catalog_url: str) -> str:
 
 
 def _install_registry_url_patch() -> None:
-    from quilt3 import session as _session
+    global _PATCH_INSTALLED
+    if _PATCH_INSTALLED:
+        return
+    try:
+        from quilt3 import session as _session
+    except ImportError:
+        # Some tests and bootstrap paths only need quilt3.config(). Defer the
+        # session patch until a real quilt3 runtime is importable.
+        return
 
     original = _session.get_registry_url
 
@@ -78,6 +87,7 @@ def _install_registry_url_patch() -> None:
         return original()
 
     _session.get_registry_url = get_registry_url
+    _PATCH_INSTALLED = True
 
 
 _install_registry_url_patch()
@@ -90,6 +100,7 @@ def bind_active_catalog(catalog_url: str):
     manager so the binding is cleaned up automatically. Direct callers are
     responsible for calling ``reset_active_catalog(token)`` when done.
     """
+    _install_registry_url_patch()
     return _ACTIVE_CATALOG_URL.set(catalog_url)
 
 
@@ -106,6 +117,7 @@ def use_catalog(catalog_url: str) -> Iterator[None]:
     quilt3 call that resolves ``session.get_registry_url`` sees
     *catalog_url*; on exit the previous binding is restored.
     """
+    _install_registry_url_patch()
     token = _ACTIVE_CATALOG_URL.set(catalog_url)
     try:
         yield

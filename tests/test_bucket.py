@@ -800,6 +800,11 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
         lambda stack, name, region: [],
     )
     monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "list_ecs_resources",
+        lambda stack, name, region: [],
+    )
+    monkeypatch.setattr(
         bucket_tool.stack_lib, "write_stack_payload", lambda *a, **kw: None
     )
 

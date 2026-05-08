@@ -154,7 +154,7 @@ minutes). After the task stops:
 
 - Exit code 0 from the container -> success
 - Non-zero exit code -> print `stoppedReason` and `stopCode`, exit non-zero
-- Print a hint to check logs via `quiltx logs`
+- Print a hint to check logs via `quiltx ecs logs`
 
 Pass `--no-wait` to start the task and return immediately.
 

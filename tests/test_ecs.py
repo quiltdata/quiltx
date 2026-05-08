@@ -301,3 +301,151 @@ def test_run_migration_success() -> None:
     task_arn = task.get("taskArn")
     assert isinstance(task_arn, str)
     assert task_arn.endswith("/abc")
+
+
+def test_set_log_level_dry_run_updates_task_definition(capsys) -> None:
+    class FakeEcsClient:
+        def describe_services(self, *, cluster: str, services: list[str]):
+            assert cluster == "quilt"
+            assert services == ["registry-service"]
+            return {
+                "services": [
+                    {
+                        "taskDefinition": (
+                            "arn:aws:ecs:us-east-1:123:task-definition/quilt-registry:1"
+                        )
+                    }
+                ]
+            }
+
+        def describe_task_definition(self, *, taskDefinition: str):
+            assert taskDefinition.endswith(":1")
+            return {
+                "taskDefinition": {
+                    "family": "quilt-registry",
+                    "networkMode": "awsvpc",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "cpu": "1024",
+                    "memory": "2048",
+                    "taskDefinitionArn": taskDefinition,
+                    "revision": 1,
+                    "status": "ACTIVE",
+                    "containerDefinitions": [
+                        {
+                            "name": "registry",
+                            "image": "registry:latest",
+                            "environment": [{"name": "EXISTING", "value": "1"}],
+                        }
+                    ],
+                }
+            }
+
+    plan = ecs_lib.build_log_level_plan(
+        FakeEcsClient(),
+        cluster="quilt",
+        service="registry-service",
+        container="registry",
+        level="DEBUG",
+    )
+
+    register_args = plan.register_task_definition
+    container = register_args["containerDefinitions"][0]
+    assert {"name": "QUILT_LOG_LEVEL", "value": "DEBUG"} in container["environment"]
+    assert "taskDefinitionArn" not in register_args
+    assert plan.container == "registry"
+    assert plan.current_level is None
+
+
+def test_set_log_level_defaults_to_registry_container() -> None:
+    class FakeEcsClient:
+        def describe_services(self, *, cluster: str, services: list[str]):
+            return {
+                "services": [
+                    {
+                        "taskDefinition": (
+                            "arn:aws:ecs:us-east-1:123:task-definition/quilt-registry:1"
+                        )
+                    }
+                ]
+            }
+
+        def describe_task_definition(self, *, taskDefinition: str):
+            return {
+                "taskDefinition": {
+                    "family": "quilt-registry",
+                    "networkMode": "awsvpc",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "cpu": "1024",
+                    "memory": "2048",
+                    "containerDefinitions": [
+                        {
+                            "name": "registry-tmp-volume-chmod",
+                            "image": "init:latest",
+                            "environment": [],
+                        },
+                        {
+                            "name": "registry",
+                            "image": "registry:latest",
+                            "environment": [
+                                {"name": "QUILT_LOG_LEVEL", "value": "INFO"}
+                            ],
+                        },
+                        {
+                            "name": "nginx",
+                            "image": "nginx:latest",
+                            "environment": [],
+                        },
+                    ],
+                }
+            }
+
+    plan = ecs_lib.build_log_level_plan(
+        FakeEcsClient(),
+        cluster="quilt",
+        service="registry-service",
+        level="DEBUG",
+    )
+
+    containers = plan.register_task_definition["containerDefinitions"]
+    levels = {
+        container["name"]: [
+            entry["value"]
+            for entry in container.get("environment", [])
+            if entry.get("name") == "QUILT_LOG_LEVEL"
+        ]
+        for container in containers
+    }
+    assert levels["registry"] == ["DEBUG"]
+    assert levels["registry-tmp-volume-chmod"] == []
+
+
+def test_service_status_stable() -> None:
+    class FakeEcsClient:
+        def describe_services(self, *, cluster: str, services: list[str]):
+            return {
+                "services": [
+                    {
+                        "desiredCount": 1,
+                        "runningCount": 1,
+                        "pendingCount": 0,
+                        "taskDefinition": "task-def:1",
+                        "deployments": [
+                            {
+                                "status": "PRIMARY",
+                                "rolloutState": "COMPLETED",
+                                "desiredCount": 1,
+                                "runningCount": 1,
+                                "pendingCount": 0,
+                            }
+                        ],
+                        "events": [{"message": "steady state"}],
+                    }
+                ]
+            }
+
+    status = ecs_lib.describe_service_status(
+        FakeEcsClient(), cluster="cluster", service="service"
+    )
+
+    assert status.stable is True
+    assert status.failed is False

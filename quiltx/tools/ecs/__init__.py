@@ -18,8 +18,10 @@ from .shell import (
 )
 
 SUBCOMMANDS = {
+    "logs": "quiltx.tools.ecs.logs",
     "run-migration": "quiltx.tools.ecs.run_migration",
     "shell": "quiltx.tools.ecs.shell",
+    "status": "quiltx.tools.ecs.status",
 }
 
 
@@ -34,8 +36,18 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SUBCOMMAND",
     )
     subparsers.add_parser(
+        "logs",
+        help="Display CloudWatch logs for the configured Quilt catalog.",
+        add_help=False,
+    )
+    subparsers.add_parser(
         "shell",
         help="Open an interactive shell inside a running ECS task.",
+        add_help=False,
+    )
+    subparsers.add_parser(
+        "status",
+        help="Show or wait for the configured catalog ECS service rollout.",
         add_help=False,
     )
     subparsers.add_parser(

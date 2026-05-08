@@ -19,11 +19,17 @@ print(stack["StackName"])
 ## ECS
 
 ```python
-from quiltx.ecs import run_migration_for_catalog
+import boto3
+
+from quiltx.ecs import describe_service_status, run_migration_for_catalog
 
 result = run_migration_for_catalog("https://open.quiltdata.com", wait=True)
 print(result.task_arn)
 print(result.exit_code)
+
+ecs_client = boto3.client("ecs", region_name="us-east-1")
+status = describe_service_status(ecs_client, cluster="quilt", service="registry-service")
+print(status.stable)
 ```
 
 ## Stack ACL

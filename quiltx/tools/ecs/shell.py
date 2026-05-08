@@ -7,9 +7,8 @@ import json
 import shlex
 import subprocess
 import sys
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
-import boto3
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.prompt import Prompt
@@ -132,18 +131,18 @@ https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-wor
     console.print(Markdown(message))
 
 
-def _load_stack_payload(catalog_name: str) -> Mapping[str, object] | None:
+def _load_stack_payload(catalog_name: str) -> Mapping[str, Any] | None:
     return stack_lib.load_stack_payload(catalog_name)
 
 
-def _write_stack_payload(catalog_name: str, payload: Mapping[str, object]) -> None:
+def _write_stack_payload(catalog_name: str, payload: Mapping[str, Any]) -> None:
     stack_lib.write_stack_payload(catalog_name, payload)
 
 
 def _prompt_resource(
     console: Console,
     title: str,
-    resources: list[Mapping[str, str]],
+    resources: Sequence[Mapping[str, str]],
     default_value: str | None,
     allow_skip: bool,
 ) -> str | None:
@@ -186,10 +185,10 @@ def _prompt_resource(
 
 def _render_resource_list(
     console: Console,
-    clusters: list[Mapping[str, str]],
-    services: list[Mapping[str, str]],
+    clusters: Sequence[Mapping[str, str]],
+    services: Sequence[Mapping[str, str]],
 ) -> None:
-    def render_table(title: str, rows: list[Mapping[str, str]]) -> None:
+    def render_table(title: str, rows: Sequence[Mapping[str, str]]) -> None:
         if not rows:
             return
         table = Table(show_header=True, header_style="bold cyan")
@@ -234,29 +233,9 @@ def _default_cluster_from_resources(
 
 
 def _extract_ecs_resources(
-    payload: Mapping[str, object] | None,
-) -> tuple[list[Mapping[str, str]], list[Mapping[str, str]]]:
-    if not payload:
-        return [], []
-    entries = payload.get("ecs_resources", [])
-    if not isinstance(entries, list):
-        return [], []
-    clusters: list[Mapping[str, str]] = []
-    services: list[Mapping[str, str]] = []
-    for item in entries:
-        if not isinstance(item, dict):
-            continue
-        resource_type = item.get("resource_type")
-        normalized = {
-            "logical_id": str(item.get("logical_id") or ""),
-            "physical_id": str(item.get("physical_id") or ""),
-            "resource_type": str(resource_type or ""),
-        }
-        if resource_type == "AWS::ECS::Cluster":
-            clusters.append(normalized)
-        elif resource_type == "AWS::ECS::Service":
-            services.append(normalized)
-    return clusters, services
+    payload: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    return stack_lib.ecs_clusters(payload), stack_lib.ecs_services(payload)
 
 
 def _merge_ecs_defaults(
@@ -449,9 +428,7 @@ def _print_execute_command_not_enabled_error(
 
         if should_enable:
             console.print("\n[dim]Enabling Execute Command on service...[/dim]")
-            import boto3
-
-            ecs_client = boto3.client("ecs", region_name=region)
+            ecs_client = stack_lib.aws_client("ecs", region=region)
 
             if _enable_execute_command_on_service(ecs_client, cluster, service, region):
                 console.print("[green]✓[/green] Execute Command enabled!")
@@ -570,11 +547,29 @@ def _format_command(cmd: Iterable[str]) -> str:
     return " ".join(cmd)
 
 
+def _print_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
         console = Console()
-        payload = _load_stack_payload(catalog.catalog_name)
+        needs_payload = bool(
+            args.list
+            or args.prompt
+            or args.reachability
+            or not args.cluster
+            or not args.region
+        )
+        payload = (
+            stack_lib.ensure_stack_payload(
+                catalog,
+                announce=lambda message: print(message, file=sys.stderr),
+            )
+            if needs_payload
+            else _load_stack_payload(catalog.catalog_name)
+        )
         saved_defaults: dict[str, object] = {}
         if payload:
             defaults_value = payload.get("ecs_defaults")
@@ -594,16 +589,10 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
         # Default region from stack payload if not provided
         region = args.region
         if not region and payload:
-            payload_region = payload.get("region")
-            if isinstance(payload_region, str):
-                region = payload_region
+            region = stack_lib.require_region(payload)
 
         clusters, services = _extract_ecs_resources(payload)
         if args.list:
-            if not payload:
-                raise ValueError(
-                    "No stack payload found. Run 'quiltx catalog stack <dns>' first."
-                )
             _render_resource_list(console, clusters, services)
             return 0
 
@@ -616,12 +605,12 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
                 allow_skip=False,
             )
         elif not cluster:
-            if not payload:
+            if payload is None:
                 raise ValueError(
                     "No cluster provided and no stack payload found. "
                     "Run 'quiltx catalog stack <dns>' or pass --cluster."
                 )
-            default_cluster = _default_cluster_from_resources(clusters)
+            default_cluster = stack_lib.default_ecs_cluster(payload)
             if default_cluster:
                 cluster = default_cluster
             elif clusters:
@@ -636,7 +625,7 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             raise ValueError("No ECS cluster selected")
 
         if not args.task and service is None:
-            default_service = _default_service_from_resources(services)
+            default_service = stack_lib.registry_service(payload) if payload else None
             if args.prompt and services:
                 service = _prompt_resource(
                     console,
@@ -648,10 +637,22 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             else:
                 service = default_service
 
-        ecs_client = boto3.client("ecs", region_name=region)
+        ecs_client = (
+            stack_lib.aws_client("ecs", payload, region=region)
+            if payload
+            else stack_lib.aws_client("ecs", region=region)
+        )
+        _print_progress(
+            "Resolving ECS target"
+            f" cluster={cluster}"
+            f" service={service or '<any>'}"
+            f" region={region or '<aws-default>'}"
+        )
         task_arn = _select_task(ecs_client, cluster, args.task, service)
+        _print_progress(f"Selected task {task_arn}")
 
         # Check if Execute Command is enabled before proceeding
+        _print_progress("Checking ECS Execute Command support...")
         is_enabled, error_msg = _check_execute_command_enabled(
             ecs_client, cluster, task_arn
         )
@@ -667,6 +668,7 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             return exit_code
 
         container = _select_container(ecs_client, cluster, task_arn, container)
+        _print_progress(f"Selected container {container}")
 
         if args.reachability:
             targets = _collect_reachability_targets(payload)
@@ -694,27 +696,15 @@ def _run(catalog: stack_lib.Catalog, args: argparse.Namespace) -> int:
             _print_plugin_installation_help(console)
             return 2
 
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        _print_progress(f"Starting ECS shell: {_format_command(cmd)}")
+        result = subprocess.run(cmd, check=False)
 
         # Check for specific execute command error
         if result.returncode != 0:
-            error_output = result.stderr + result.stdout
-            if "execute command was not enabled" in error_output.lower():
-                exit_code = _print_execute_command_not_enabled_error(
-                    console,
-                    cluster,
-                    service,
-                    region,
-                    args.enable_execute_command,
-                    error_output.strip(),
-                )
-                return exit_code
-            else:
-                # Print the actual error for other failures
-                if result.stderr:
-                    print(result.stderr, file=sys.stderr)
-                if result.stdout:
-                    print(result.stdout)
+            print(
+                f"aws ecs execute-command exited with {result.returncode}",
+                file=sys.stderr,
+            )
 
         return result.returncode
     except Exception as exc:

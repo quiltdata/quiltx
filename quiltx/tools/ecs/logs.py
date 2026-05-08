@@ -1,4 +1,8 @@
-"""Quilt catalog logs tool."""
+"""Quilt catalog logs tool (under `quiltx ecs logs`).
+
+Displays CloudWatch logs for the configured Quilt catalog, and optionally
+sets the container log level via `--set-level`.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +12,44 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-import boto3
 from rich.console import Console
 from rich.live import Live
+from rich.prompt import Confirm
 from rich.table import Table
 from rich.text import Text
 
+from quiltx import ecs as ecs_lib
 from quiltx import logs as logs_lib
 from quiltx import stack as stack_lib
 from quiltx.cli_common import add_catalog_args
+from quiltx.tools.ecs import status as status_tool
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
+_LOG_LEVEL_ALIASES = {"WARNING": "WARN"}
+
+
+def _normalize_set_level(value: str) -> str:
+    """Normalize a --set-level value, accepting unique prefixes."""
+    candidate = value.strip().upper()
+    if not candidate:
+        raise argparse.ArgumentTypeError(
+            f"invalid log level {value!r}; expected one of {', '.join(_LOG_LEVELS)}"
+        )
+    if candidate in _LOG_LEVEL_ALIASES:
+        return _LOG_LEVEL_ALIASES[candidate]
+    if candidate in _LOG_LEVELS:
+        return candidate
+
+    matches = [level for level in _LOG_LEVELS if level.startswith(candidate)]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise argparse.ArgumentTypeError(
+            f"ambiguous log level {value!r}; matches {', '.join(matches)}"
+        )
+    raise argparse.ArgumentTypeError(
+        f"invalid log level {value!r}; expected one of {', '.join(_LOG_LEVELS)}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -95,6 +128,42 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Wrap long messages instead of truncating (default when filtering by stream).",
     )
+    parser.add_argument(
+        "--set-level",
+        dest="set_level",
+        nargs="?",
+        const="DEBUG",
+        type=_normalize_set_level,
+        help="Set the container log level (default DEBUG). Prompts unless --yes or --dry-run is provided.",
+    )
+    parser.add_argument(
+        "--reset-level",
+        action="store_true",
+        help="Remove QUILT_LOG_LEVEL from the target container.",
+    )
+    parser.add_argument(
+        "--service",
+        help="ECS service to update (defaults to RegistryService from the stack payload).",
+    )
+    parser.add_argument(
+        "--container",
+        help="Container to update (defaults to the first container in the task definition).",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Apply --set-level without prompting.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Summarize the --set-level update without applying it.",
+    )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Do not wait for ECS service stability after applying --set-level.",
+    )
     return parser
 
 
@@ -116,8 +185,6 @@ def _list_available_logs(console: Console, payload: Mapping[str, Any]) -> None:
         key = entry.get("logical_id", "unknown")
         log_group_name = entry.get("log_group_name", "")
 
-        # Generate AWS Console URL for this log group
-        # URL encode the log group name
         import urllib.parse
 
         encoded_name = urllib.parse.quote(log_group_name, safe="")
@@ -130,9 +197,9 @@ def _list_available_logs(console: Console, payload: Mapping[str, Any]) -> None:
 
     console.print("\n[bold cyan]Available Log Groups[/bold cyan]")
     console.print(table)
-    console.print("\n[dim]Usage: quiltx logs [STREAM...][/dim]")
-    console.print("[dim]Example: quiltx logs registry/registry[/dim]")
-    console.print("[dim]Default: quiltx logs (shows all streams)[/dim]")
+    console.print("\n[dim]Usage: quiltx ecs logs [STREAM...][/dim]")
+    console.print("[dim]Example: quiltx ecs logs registry/registry[/dim]")
+    console.print("[dim]Default: quiltx ecs logs (shows all streams)[/dim]")
 
 
 def _get_all_log_groups(log_entries: list[Mapping[str, Any]]) -> dict[str, str]:
@@ -164,11 +231,7 @@ def _get_level_style(level: str) -> str:
 def _coalesce_health_checks(
     events: list[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
-    """Coalesce consecutive health check log entries into a single summary.
-
-    Replaces consecutive health check entries with a single entry showing
-    the most recent timestamp and a count of coalesced checks.
-    """
+    """Coalesce consecutive health check log entries into a single summary."""
     if not events:
         return events
 
@@ -180,12 +243,9 @@ def _coalesce_health_checks(
         if logs_lib.is_health_check(message):
             health_check_group.append(event)
         else:
-            # Flush any accumulated health checks
             if health_check_group:
-                # Keep only the most recent health check
                 most_recent = health_check_group[-1]
                 count = len(health_check_group)
-                # Add count to message if more than one
                 if count > 1:
                     modified_event = dict(most_recent)
                     modified_event["message"] = (
@@ -198,7 +258,6 @@ def _coalesce_health_checks(
                 health_check_group = []
             result.append(event)
 
-    # Flush any remaining health checks at the end
     if health_check_group:
         most_recent = health_check_group[-1]
         count = len(health_check_group)
@@ -225,31 +284,24 @@ def _display_log_section(
     if not events:
         return
 
-    # Coalesce health checks first
     events = _coalesce_health_checks(events)
 
-    # Apply limit if specified
     if limit > 0:
         events = events[-limit:]
 
-    # Print section header
     console.print(f"\n[bold cyan]─── {logical_id} ───[/bold cyan]")
 
-    # Print each log entry
     for event in events:
         structured = logs_lib.format_event_structured(event)
         text = Text()
 
-        # Timestamp in dim gray
         text.append(structured["timestamp"], style="dim")
         text.append(" ")
 
-        # Level with color
         level_style = _get_level_style(structured["level"])
         text.append(f"[{structured['level']}]", style=level_style)
         text.append(" ")
 
-        # Message
         text.append(structured["message"])
 
         console.print(text)
@@ -266,7 +318,6 @@ def _display_logs_by_group(
 ) -> None:
     """Fetch and display logs organized by log stream."""
     for logical_id, log_group_name in log_groups.items():
-        # Fetch events for this log group
         events = list(
             logs_lib.iter_log_events(
                 [log_group_name],
@@ -280,7 +331,6 @@ def _display_logs_by_group(
         if not events:
             continue
 
-        # Group events by log stream
         from collections import defaultdict
 
         events_by_stream: dict[str, list] = defaultdict(list)
@@ -288,10 +338,9 @@ def _display_logs_by_group(
         for event in events:
             structured = logs_lib.format_event_structured(event)
             stream_name = structured["log_stream"]
-            if stream_name:  # Only include if we have a stream name
+            if stream_name:
                 events_by_stream[stream_name].append(event)
 
-        # Display each stream as its own section
         for stream_name in sorted(events_by_stream.keys()):
             stream_events = events_by_stream[stream_name]
             _display_log_section(console, stream_name, stream_events, limit)
@@ -307,24 +356,15 @@ def _follow_logs_dynamic(
     wrap: bool = False,
     stream_filters: list[str] | None = None,
 ) -> None:
-    """Follow logs in real-time with dynamic single-screen display.
-
-    Uses Rich Live to create a dynamic display that:
-    - Shows recent log entries organized by stream
-    - Automatically drops older streams to fit the screen
-    - Updates in real-time as new logs arrive
-    """
+    """Follow logs in real-time with dynamic single-screen display."""
     from collections import defaultdict, deque
     from urllib.parse import urlparse
 
     last_timestamp = start_ms
-    # Store events by stream, keeping only recent ones
-    # Key: (logical_id, stream_name), Value: deque of events
     events_by_stream: dict[tuple[str, str], deque[Any]] = defaultdict(
         lambda: deque(maxlen=50)
     )
 
-    # Extract header information
     catalog_url = payload.get("catalog_url", "")
     host = urlparse(catalog_url).hostname or "unknown"
     stack_name = payload.get("stack_name", "unknown")
@@ -332,33 +372,25 @@ def _follow_logs_dynamic(
     account_id = payload.get("account_id", "unknown")
 
     def create_display() -> Table:
-        """Create a table displaying recent log events."""
-        # Get console size
         console_height = console.height or 40
         console_width = console.width or 120
 
-        # Reserve space for header, borders, and status line
         available_lines = max(10, console_height - 7)
 
-        # Collect all events across all streams
         all_events: list[tuple[str, str, Any]] = []
         for (logical_id, stream_name), stream_events in events_by_stream.items():
             for event in stream_events:
                 all_events.append((logical_id, stream_name, event))
 
-        # Sort by timestamp (oldest first)
         all_events.sort(key=lambda x: x[2].get("timestamp", 0))
 
-        # Keep only the most recent events that fit on screen
         if len(all_events) > available_lines:
             all_events = all_events[-available_lines:]
 
-        # Group by stream again for display
         display_by_stream: dict[tuple[str, str], list[Any]] = defaultdict(list)
         for logical_id, stream_name, event in all_events:
             display_by_stream[(logical_id, stream_name)].append(event)
 
-        # Create table
         table = Table(
             show_header=False,
             show_edge=False,
@@ -368,7 +400,6 @@ def _follow_logs_dynamic(
         )
         table.add_column("content", overflow="fold")
 
-        # Add header with host - stack - region - account
         header_text = Text()
         header_text.append(host, style="bold cyan")
         header_text.append(" - ", style="dim")
@@ -378,51 +409,40 @@ def _follow_logs_dynamic(
         header_text.append(" - ", style="dim")
         header_text.append(account_id, style="magenta")
         table.add_row(header_text)
-        table.add_row("")  # Empty line after header
+        table.add_row("")
 
-        # Display events by stream
         for (logical_id, stream_name), display_events in display_by_stream.items():
             if display_events:
-                # Add stream header
                 header = Text()
                 header.append(f"─── {stream_name} ───", style="bold cyan")
                 table.add_row(header)
 
-                # Coalesce health checks for this stream
                 coalesced_events = _coalesce_health_checks(display_events)
 
-                # Add events
                 for event in coalesced_events:
                     structured = logs_lib.format_event_structured(event)
                     text = Text()
 
-                    # Timestamp in dim gray
                     text.append(structured["timestamp"], style="dim")
                     text.append(" ")
 
-                    # Level with color
                     level_style = _get_level_style(structured["level"])
                     text.append(f"[{structured['level']}]", style=level_style)
                     text.append(" ")
 
-                    # Message (truncate if too long, unless wrap is enabled)
                     message = structured["message"]
                     if not wrap:
-                        max_msg_len = (
-                            console_width - 30
-                        )  # Reserve space for timestamp and level
+                        max_msg_len = max(160, console_width - 30)
                         if len(message) > max_msg_len:
                             message = message[: max_msg_len - 3] + "..."
                     text.append(message)
 
                     table.add_row(text)
 
-                # Add spacing between streams
                 table.add_row("")
 
         return table
 
-    # Convert log_groups dict to list for iter_log_events
     log_group_names = list(log_groups.values())
 
     with Live(console=console, refresh_per_second=2, screen=False) as live:
@@ -439,88 +459,116 @@ def _follow_logs_dynamic(
                     )
                 )
 
-                # Add new events to the appropriate streams
                 for event in new_events:
                     structured = logs_lib.format_event_structured(event)
                     log_group_name = event.get("logGroupName", "")
                     stream_name = structured["log_stream"] or "unknown"
 
-                    # Apply stream filters if specified
                     if stream_filters:
                         if not any(sf in stream_name for sf in stream_filters):
                             continue
 
-                    # Find the logical_id for this log group
                     logical_id = "unknown"
                     for lid, lgn in log_groups.items():
                         if lgn == log_group_name:
                             logical_id = lid
                             break
 
-                    # Add to stream's deque
                     stream_key = (logical_id, stream_name)
                     events_by_stream[stream_key].append(event)
 
-                    # Update last timestamp
                     event_ts = event.get("timestamp")
                     if event_ts:
                         last_timestamp = max(last_timestamp, int(event_ts) + 1)
 
-                # Update display
                 live.update(create_display())
                 time.sleep(2)
         except KeyboardInterrupt:
             pass
 
 
+def _render_log_level_plan(plan: ecs_lib.LogLevelPlan) -> Table:
+    table = Table(title="ECS Log Level Update", show_lines=False)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Action", plan.action)
+    table.add_row("Cluster", plan.cluster)
+    table.add_row("Service", plan.service)
+    table.add_row("Container", plan.container)
+    table.add_row("Current task definition", plan.current_task_definition)
+    table.add_row("Current level", plan.current_level or "<unset>")
+    table.add_row("New level", plan.level or "<unset>")
+    table.add_row("Deployment", "register new task definition and force deployment")
+    return table
+
+
 @stack_lib.catalog_command(auth=False)
 def _run(catalog: stack_lib.Catalog, args: Any) -> int:
-    try:
-        payload = logs_lib.load_stack_payload(catalog.catalog_name)
-    except FileNotFoundError:
-        print(
-            f"No cached stack payload for {catalog.catalog_name}. "
-            f"Run quiltx catalog stack {catalog.catalog_name} first.",
-            file=sys.stderr,
-        )
-        return 2
+    payload = stack_lib.ensure_stack_payload(
+        catalog,
+        announce=lambda message: print(message, file=sys.stderr),
+    )
 
-    # Create console for Rich output
     console = Console(force_terminal=not args.no_color)
 
-    # Handle --list flag
+    if getattr(args, "set_level", None) or getattr(args, "reset_level", False):
+        cluster = stack_lib.require_ecs_cluster(payload)
+        service = args.service or stack_lib.require_registry_service(payload)
+        ecs_client = stack_lib.aws_client("ecs", payload)
+        level = None if args.reset_level else args.set_level
+        plan = ecs_lib.build_log_level_plan(
+            ecs_client,
+            cluster=cluster,
+            service=service,
+            container=args.container,
+            level=level,
+        )
+        console.print(_render_log_level_plan(plan))
+        if args.dry_run:
+            return 0
+        if not args.yes:
+            if not Confirm.ask("Apply this update?", default=False):
+                console.print("Aborted.")
+                return 1
+        result = ecs_lib.apply_log_level_plan(ecs_client, plan)
+        console.print(
+            f"Updated {service} to {result.task_definition_arn} "
+            f"with QUILT_LOG_LEVEL={level or '<unset>'}"
+        )
+        if not args.no_wait:
+            status_tool.wait_for_stable(
+                ecs_client,
+                cluster=cluster,
+                service=service,
+                console=console,
+            )
+        return 0
+
     if args.list:
         _list_available_logs(console, payload)
         return 0
 
-    # Get all log groups from payload
-    log_entries = payload.get("log_groups", [])
-    log_groups = _get_all_log_groups(log_entries)
+    log_groups = stack_lib.log_groups(payload)
 
     if not log_groups:
         console.print("[red]Error:[/red] No log groups found in stack payload")
         console.print(
-            "\n[dim]Run 'quiltx logs --list' to see available log groups.[/dim]"
+            "\n[dim]Run 'quiltx ecs logs --list' to see available log groups.[/dim]"
         )
         return 1
 
-    # Determine stream filters from positional arguments
     stream_filters = args.streams if args.streams else None
 
-    region = payload.get("region")
-    if not region:
-        raise ValueError("Region missing from stack payload")
+    region = stack_lib.require_region(payload)
 
     start_ms, end_ms = logs_lib.resolve_time_range(
         args.since, args.until, args.minutes, args.hours, args.days, args.ago
     )
 
-    logs_client = boto3.client("logs", region_name=region)
+    logs_client = stack_lib.aws_client("logs", payload, region=region)
 
-    # Auto-enable wrap when stream filter is specified
     wrap = args.wrap or bool(stream_filters)
 
-    # Handle follow mode vs static display
     if args.follow:
         _follow_logs_dynamic(
             console,
@@ -533,7 +581,6 @@ def _run(catalog: stack_lib.Catalog, args: Any) -> int:
             stream_filters,
         )
     else:
-        # Display static logs organized by group
         _display_logs_by_group(
             console,
             logs_client,

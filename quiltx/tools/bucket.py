@@ -325,40 +325,11 @@ def _reindex_post(
 
 def _ensure_stack_payload(stack: stack_lib.Catalog) -> Mapping[str, Any]:
     """Load cached stack payload, or derive a lightweight one from the Quilt session."""
-    payload = stack_lib.load_stack_payload(stack.catalog_name)
-    if payload is not None:
-        return payload
-
-    catalog_config = stack_lib.fetch_catalog_config(stack.catalog_url)
-    region = stack_lib.fetch_region(stack, catalog_config)
-
-    print(f"Discovering stack for {stack.catalog_name}...")
-    try:
-        stack_info = stack_lib.find_matching_stack(stack, region=region)
-        log_groups = stack_lib.list_log_group_resources(
-            stack, stack_info["StackName"], region=region
-        )
-        payload = stack_lib.build_stack_payload(
-            stack.catalog_name,
-            stack.catalog_url,
-            region,
-            stack_info,
-            log_groups,
-            catalog_config=catalog_config,
-        )
-        stack_lib.write_stack_payload(stack.catalog_name, payload)
-        cached = stack_lib.load_stack_payload(stack.catalog_name)
-        if cached is not None:
-            return cached
-    except Exception as exc:
-        print(
-            f"CloudFormation discovery unavailable ({exc}); "
-            "using Quilt session identity for account/region.",
-            file=sys.stderr,
-        )
-
-    return _lightweight_stack_payload(
-        stack, stack.catalog_name, stack.catalog_url, region, catalog_config
+    return stack_lib.ensure_stack_payload(
+        stack,
+        allow_lightweight=True,
+        announce=print,
+        warn=lambda message: print(message, file=sys.stderr),
     )
 
 
@@ -375,30 +346,18 @@ def _lightweight_stack_payload(
     against the ambient AWS credential chain. If that chain has no credentials,
     boto3 raises NoCredentialsError, which we surface with a hint to configure AWS.
     """
-    session = stack.aws_session()
-    try:
-        account_id = session.client("sts").get_caller_identity()["Account"]
-    except Exception as exc:
-        raise RuntimeError(
-            f"AWS credentials unavailable for {catalog_name}: {exc}. "
-            "Configure AWS credentials (e.g. AWS_PROFILE, ~/.aws/credentials) "
-            f"or run `quiltx catalog stack --catalog {catalog_name}` first."
-        ) from exc
-
-    return {
-        "catalog_name": catalog_name,
-        "catalog_url": catalog_url,
-        "web_url": catalog_url,
-        "region": region,
-        "account_id": account_id,
-        "stack_name": None,
-        "stack_id": None,
-        "outputs": [],
-        "parameters": [],
-        "log_groups": [],
-        "ecs_resources": [],
-        "catalog_config": dict(catalog_config),
-    }
+    if catalog_name != stack.catalog_name or catalog_url != stack.catalog_url:
+        stack = stack_lib.Catalog(
+            catalog_name=catalog_name,
+            catalog_url=catalog_url,
+            source=stack.source,
+            auth_required=stack.auth_required,
+        )
+    return stack_lib.lightweight_stack_payload(
+        stack,
+        catalog_config=catalog_config,
+        region=region,
+    )
 
 
 @stack_lib.catalog_command

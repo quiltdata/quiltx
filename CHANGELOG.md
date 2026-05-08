@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-05-07
+
+### Added
+
+- `quiltx ecs logs --set-level LEVEL` updates `QUILT_LOG_LEVEL` on the registry service via a new task definition revision and forced deployment; `--reset-level` removes the override. Auto-discovers stack, cluster, service, and container.
+- `quiltx ecs status` shows or waits for ECS service rollout status (primary deployment, running/desired counts, recent events). Supports `--wait` with timeout.
+
+### Changed
+
+- Moved log viewing under the `ecs` group: `quiltx logs` is now `quiltx ecs logs`. The old top-level `logs` command has been removed.
+- Centralized stack/context resolution in `quiltx.stack`: catalog lookup, stack discovery, region selection, and ECS resource extraction now follow one shared path across `catalog`, `ecs`, and `bucket` commands. Read-only commands auto-discover the stack payload; mutating commands auto-discover then fail with explicit remediation when required fields are missing.
+- `ecs logs` truncation floor raised to 160 characters so long log lines remain readable.
+
 ## [0.14.2] - 2026-05-07
 
 ### Added
@@ -354,7 +367,7 @@ This release reshapes `quiltx`'s identity and auth surface around a per-catalog 
 ### Added
 
 - `logs` tool: Enhanced log display and filtering capabilities
-  - Stream-based filtering: Filter logs by stream name with substring matching (e.g., `quiltx logs registry/registry`)
+  - Stream-based filtering: Filter logs by stream name with substring matching (e.g., `quiltx ecs logs registry/registry`)
   - `--wrap` flag: Option to wrap long log messages instead of truncating (auto-enabled when filtering by stream)
   - Health check coalescing: Consecutive health check log entries are automatically summarized to reduce noise
   - Default behavior now shows all log streams instead of just LogGroup
