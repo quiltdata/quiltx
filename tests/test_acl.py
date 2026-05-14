@@ -1129,6 +1129,56 @@ def test_apply_acl_uses_cross_account_registration_when_stack_available(
     assert calls == [("register", "bucket-a", "111", True)]
 
 
+def test_apply_acl_no_preflight_uses_graphql_only(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_add_without_preflight(
+        stack: Any, bucket: str, *, title: str | None = None
+    ):
+        calls.append((bucket, title or ""))
+
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight", fake_add_without_preflight
+    )
+    stack = _fake_stack(payload={"account_id": "111"})
+
+    warnings = acl.apply_acl(
+        stack,
+        acl.AclDiff(buckets_to_add=["bucket-a", "bucket-b"]),
+        _empty_current_state(),
+        no_preflight=True,
+    )
+
+    assert warnings == []
+    assert calls == [("bucket-a", "bucket-a"), ("bucket-b", "bucket-b")]
+
+
+def test_apply_acl_no_preflight_failure_does_not_rollback(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_add_without_preflight(
+        stack: Any, bucket: str, *, title: str | None = None
+    ):
+        calls.append(bucket)
+        if bucket == "bad-bucket":
+            raise RuntimeError("BucketDoesNotExist")
+
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight", fake_add_without_preflight
+    )
+    stack = _fake_stack(payload={"account_id": "111"})
+
+    warnings = acl.apply_acl(
+        stack,
+        acl.AclDiff(buckets_to_add=["good-bucket", "bad-bucket"]),
+        _empty_current_state(),
+        no_preflight=True,
+    )
+
+    assert calls == ["good-bucket", "bad-bucket"]
+    assert warnings == ["Bucket 'bad-bucket' could not be added: BucketDoesNotExist"]
+
+
 def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:
     diff = acl.AclDiff(buckets_to_add=["bucket-a"])
     current = _empty_current_state()
@@ -1193,6 +1243,85 @@ def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
 
     assert result == 0
     assert applied == ["applied"]
+
+
+def test_acl_tool_no_preflight_threads_to_apply(monkeypatch) -> None:
+    current = _empty_current_state()
+    no_preflight_values: list[bool] = []
+    _install_acl_tool_stack(monkeypatch)
+
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "parse_acl_config",
+        lambda path: acl.AclConfig(policies=[], roles={}),
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "compute_diff",
+        lambda desired, state: acl.AclDiff(buckets_to_add=["bucket-a"]),
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "print_diff", lambda *args, **kwargs: None)
+
+    def _apply_acl(*_args: Any, **kwargs: Any) -> list[str]:
+        no_preflight_values.append(kwargs["no_preflight"])
+        return []
+
+    monkeypatch.setattr(acl_tool.acl_lib, "apply_acl", _apply_acl)
+
+    result = acl_tool.main(["config.yml", "--yes", "--no-preflight"])
+
+    assert result == 0
+    assert no_preflight_values == [True]
+
+
+def test_policy_drift_reapply_preserves_no_preflight(monkeypatch) -> None:
+    desired = acl.AclConfig(policies=[], roles={})
+    current = _empty_current_state()
+    post_reset = _empty_current_state()
+    new_diff = acl.AclDiff(buckets_to_add=["bucket-a"])
+    no_preflight_values: list[bool] = []
+    stack = _fake_stack(users=SimpleNamespace(list=lambda: []))
+
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "reset_policy",
+        lambda *args, **kwargs: ([], []),
+    )
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "fetch_current_state",
+        lambda _stack: post_reset,
+    )
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "compute_diff",
+        lambda _desired, _current: new_diff,
+    )
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "detect_policy_drift",
+        lambda _desired, _current: [],
+    )
+
+    def _apply_acl(*_args: Any, **kwargs: Any) -> list[str]:
+        no_preflight_values.append(kwargs["no_preflight"])
+        return []
+
+    monkeypatch.setattr(acl_tool.acl_lib, "apply_acl", _apply_acl)
+
+    warnings, _ = acl_tool._handle_policy_drift(
+        stack,
+        [acl.PolicyDrift(title="public", desired=[], actual=[])],
+        desired,
+        current,
+        auto=True,
+        verbose=False,
+        no_preflight=True,
+    )
+
+    assert warnings == []
+    assert no_preflight_values == [True]
 
 
 def test_acl_tool_no_config_shows_current_state(monkeypatch, capsys) -> None:

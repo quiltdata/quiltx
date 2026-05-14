@@ -46,6 +46,25 @@ arguments and normalized to the bare DNS.
 See [README_DEV.md](README_DEV.md) for programmatic usage of ECS, ACL, config,
 and stack APIs.
 
+## Bucket registration
+
+`quiltx bucket add BUCKET` defaults to bucket-owner mode: it uses your local
+AWS profile to probe the bucket, update the bucket policy, configure SNS, and
+wire S3 notifications before registering the bucket with the catalog.
+
+Use `--no-preflight` when the catalog stack can already access the bucket but
+your local AWS identity cannot or should not modify it, such as public AWS Open
+Data buckets or buckets already plumbed by Quilt infrastructure:
+
+```bash
+uvx quiltx bucket add igvf-public --catalog example.quiltdata.com --no-preflight --yes
+uvx quiltx catalog acl acl.yml --catalog example.quiltdata.com --no-preflight --yes
+```
+
+`--no-preflight` submits the GraphQL registration directly, lets the stack probe
+with its IAM, skips local S3/SNS setup, and implies `--no-test`. Set
+`QUILTX_NO_PREFLIGHT=1` to use the same mode for scripted runs.
+
 ### Persistent install (optional)
 
 ```bash

@@ -8,6 +8,13 @@
 
 ## Tools
 
+### Bucket Tool (`quiltx bucket`)
+
+`quiltx bucket add --no-preflight` skips local S3/SNS bucket-owner setup and
+registers through GraphQL only, letting the catalog stack probe with its own
+IAM. The same mode is available for ACL reconciliation with
+`quiltx catalog acl --no-preflight` or `QUILTX_NO_PREFLIGHT=1`.
+
 ### ECS Tool (`quiltx ecs`)
 
 Provides catalog ECS operations:

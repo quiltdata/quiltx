@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `quiltx bucket add --no-preflight` and `quiltx catalog acl --no-preflight` register buckets through GraphQL only, skipping local S3/SNS bucket-owner setup and letting the catalog stack probe with its own IAM. `QUILTX_NO_PREFLIGHT=1` enables the same mode for scripted runs.
+
 ## [0.16.0] - 2026-05-08
 
 ### Added

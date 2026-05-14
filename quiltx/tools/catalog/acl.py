@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from quiltx import acl as acl_lib
@@ -38,6 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show planned changes without applying them.",
+    )
+    parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help=(
+            "Register new buckets via GraphQL only, skipping local AWS "
+            "bucket-owner setup."
+        ),
     )
     return parser
 
@@ -86,15 +95,31 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             return 1
 
         print("Applying...")
+        no_preflight = bool(
+            args.no_preflight
+            or os.environ.get("QUILTX_NO_PREFLIGHT", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         warnings = acl_lib.apply_acl(
-            stack, diff, current, verbose=args.verbose, assume_yes=args.yes
+            stack,
+            diff,
+            current,
+            verbose=args.verbose,
+            assume_yes=args.yes,
+            no_preflight=no_preflight,
         )
 
         post_current = acl_lib.fetch_current_state(stack)
         drift = acl_lib.detect_policy_drift(desired, post_current)
         if drift:
             reset_warnings, post_current = _handle_policy_drift(
-                stack, drift, desired, post_current, auto=args.yes, verbose=args.verbose
+                stack,
+                drift,
+                desired,
+                post_current,
+                auto=args.yes,
+                verbose=args.verbose,
+                no_preflight=no_preflight,
             )
             warnings.extend(reset_warnings)
 
@@ -128,6 +153,7 @@ def _handle_policy_drift(
     *,
     auto: bool,
     verbose: bool,
+    no_preflight: bool = False,
 ) -> tuple[list[str], acl_lib.CurrentState]:
     """Prompt for (or auto-apply) policy resets when server state has drifted.
 
@@ -212,7 +238,12 @@ def _handle_policy_drift(
         print("Reapplying after reset...")
         warnings.extend(
             acl_lib.apply_acl(
-                stack, new_diff, post_reset, verbose=verbose, assume_yes=auto
+                stack,
+                new_diff,
+                post_reset,
+                verbose=verbose,
+                assume_yes=auto,
+                no_preflight=no_preflight,
             )
         )
         post_reset = acl_lib.fetch_current_state(stack)
