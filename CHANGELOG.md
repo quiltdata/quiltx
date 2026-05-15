@@ -8,9 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-05-14
+
 ### Added
 
 - `quiltx bucket add --no-preflight` and `quiltx catalog acl --no-preflight` register buckets through GraphQL only, skipping local S3/SNS bucket-owner setup and letting the catalog stack probe with its own IAM. `QUILTX_NO_PREFLIGHT=1` enables the same mode for scripted runs.
+- `quiltx catalog acl --no-preflight --dry-run` now lists the local AWS steps that would be skipped (per `spec/7-no-preflight.md` §140).
+
+### Changed
+
+- `quiltx bucket add --no-preflight` never prompts for confirmation; `--yes` help, `--no-preflight` help, and the README example document `--yes` as unnecessary in that mode (spec §144).
+
+### Fixed
+
+- `quiltx bucket add --no-preflight` now has CLI-boundary test coverage asserting that `BucketAddError` is rendered to stderr with a non-zero exit code.
 
 ## [0.16.0] - 2026-05-08
 
