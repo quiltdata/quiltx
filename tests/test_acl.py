@@ -1721,3 +1721,33 @@ def test_describe_policy_state_reports_refetch_failure() -> None:
     out = acl._describe_policy_state(stack, "internal")
     assert out.startswith("refetch failed: ")
     assert "graphql down" in out
+
+
+def test_acl_tool_dry_run_no_preflight_lists_skipped_steps(monkeypatch, capsys) -> None:
+    diff = acl.AclDiff(buckets_to_add=["bucket-a"])
+    current = _empty_current_state()
+    _install_acl_tool_stack(monkeypatch)
+
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "parse_acl_config",
+        lambda path: acl.AclConfig(policies=[], roles={}),
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    monkeypatch.setattr(acl_tool.acl_lib, "compute_diff", lambda desired, state: diff)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "apply_acl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("apply_acl should not be called")
+        ),
+    )
+
+    result = acl_tool.main(["config.yml", "--dry-run", "--no-preflight"])
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "--no-preflight" in out
+    assert "GraphQL only" in out
+    assert "GetBucketPolicy" in out
+    assert "SNS topic" in out

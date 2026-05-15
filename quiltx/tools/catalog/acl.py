@@ -84,10 +84,20 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         diff = acl_lib.compute_diff(desired, current)
         acl_lib.print_diff(diff, verbose=args.verbose, desired=desired, current=current)
 
+        no_preflight = bool(
+            args.no_preflight
+            or os.environ.get("QUILTX_NO_PREFLIGHT", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+
         if not diff.has_changes():
+            if args.dry_run and no_preflight:
+                _print_no_preflight_dry_run_notice()
             return 0
 
         if args.dry_run:
+            if no_preflight:
+                _print_no_preflight_dry_run_notice()
             return 0
 
         if not args.yes and not _confirm_apply():
@@ -95,11 +105,6 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             return 1
 
         print("Applying...")
-        no_preflight = bool(
-            args.no_preflight
-            or os.environ.get("QUILTX_NO_PREFLIGHT", "").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
         warnings = acl_lib.apply_acl(
             stack,
             diff,
@@ -143,6 +148,22 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
 
 def _confirm_apply() -> bool:
     return input("Apply ACL changes? [y/N]: ").strip().lower() in {"y", "yes"}
+
+
+def _print_no_preflight_dry_run_notice() -> None:
+    print()
+    print(
+        "--no-preflight: new buckets would be registered via GraphQL only; "
+        "skipped local AWS steps per bucket:"
+    )
+    for item in (
+        "GetBucketLocation",
+        "GetBucketPolicy / PutBucketPolicy",
+        "SNS topic creation and policy configuration",
+        "bucket-notification configuration",
+        "post-add verification",
+    ):
+        print(f"  - {item}")
 
 
 def _handle_policy_drift(

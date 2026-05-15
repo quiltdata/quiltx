@@ -57,7 +57,7 @@ your local AWS identity cannot or should not modify it, such as public AWS Open
 Data buckets or buckets already plumbed by Quilt infrastructure:
 
 ```bash
-uvx quiltx bucket add igvf-public --catalog example.quiltdata.com --no-preflight --yes
+uvx quiltx bucket add igvf-public --catalog example.quiltdata.com --no-preflight
 uvx quiltx catalog acl acl.yml --catalog example.quiltdata.com --no-preflight --yes
 ```
 

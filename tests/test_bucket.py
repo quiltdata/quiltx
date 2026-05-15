@@ -2159,3 +2159,46 @@ def test_reindex_rejects_non_s3_uri(capsys) -> None:
     assert rc == 2
     err = capsys.readouterr().err
     assert "s3://" in err
+
+
+def test_add_no_preflight_bucket_add_error_exits_nonzero(monkeypatch, capsys) -> None:
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    _install_stack_context(monkeypatch)
+
+    def boom(stack, bucket, *, title=None):
+        raise bucket_lib.BucketAddError("BucketDoesNotExist: cannot reach bucket")
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        boom,
+    )
+
+    rc = bucket_tool.main(["add", "bucket", "--no-preflight"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "BucketDoesNotExist" in captured.err
+    assert captured.err.startswith("Error: ")
+    assert "BucketDoesNotExist" not in captured.out
+
+
+def test_add_no_preflight_does_not_prompt_without_yes(monkeypatch) -> None:
+    """Spec 7-no-preflight §144: --no-preflight should not need or trigger prompts."""
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    _install_stack_context(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt="": (_ for _ in ()).throw(
+            AssertionError("--no-preflight must not prompt")
+        ),
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        lambda stack, bucket, *, title=None: AddBucketResult(
+            bucket, title or bucket, "", False
+        ),
+    )
+
+    assert bucket_tool.main(["add", "bucket", "--no-preflight"]) == 0

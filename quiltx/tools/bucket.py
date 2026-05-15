@@ -53,7 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument(
         "--yes",
         action="store_true",
-        help="Apply changes without prompting for confirmation.",
+        help=(
+            "Apply changes without prompting for confirmation. "
+            "Not needed with --no-preflight, which never prompts."
+        ),
     )
     add_parser.add_argument(
         "--no-test",
@@ -65,7 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Skip local AWS preflight/setup and submit bucketAdd directly, "
-            "letting the catalog stack probe the bucket."
+            "letting the catalog stack probe the bucket. Never prompts for "
+            "confirmation (--yes is not required)."
         ),
     )
     add_parser.add_argument(
