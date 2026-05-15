@@ -16,7 +16,7 @@ from rich.table import Table
 
 from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
-from quiltx.cli_common import add_catalog_args
+from quiltx.cli_common import add_catalog_args, env_flag as _env_flag
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,10 +208,6 @@ def _print_exception(exc: BaseException) -> None:
     print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)
     if os.environ.get("QUILTX_VERBOSE"):
         traceback.print_exception(exc, file=sys.stderr)
-
-
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -559,12 +555,15 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
 
 
 def _cmd_add_no_preflight(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
-    bucket_title = args.title or args.bucket_name
+    existing_bucket = stack.admin.buckets.get(args.bucket_name)
+    prior_title = (
+        getattr(existing_bucket, "title", None) if existing_bucket is not None else None
+    )
+    bucket_title = args.title or prior_title or args.bucket_name
     if args.dry_run:
         _print_no_preflight_dry_run(stack, args.bucket_name, bucket_title)
         return 0
 
-    existing_bucket = stack.admin.buckets.get(args.bucket_name)
     if existing_bucket is not None and args.force:
         print(
             f"Bucket {args.bucket_name}: already registered in Quilt; "

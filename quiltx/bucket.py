@@ -491,14 +491,14 @@ def _field_value(source: Any, field: str, default: str) -> str:
 def _bucket_add_error_message(result: Any, typename: str) -> str:
     if typename == "BucketDoesNotExist":
         return (
-            "The stack cannot access this bucket; check the stack's IAM role "
-            "or the bucket's public-access settings."
+            "BucketDoesNotExist: The stack cannot access this bucket; check "
+            "the stack's IAM role or the bucket's public-access settings."
         )
     if typename == "InsufficientPermissions":
         detail = _field_value(result, "message", "")
         if detail:
-            return f"Insufficient permissions for stack bucket access: {detail}"
-        return "Insufficient permissions for stack bucket access."
+            return f"InsufficientPermissions: {detail}"
+        return "InsufficientPermissions: stack lacks required access to this bucket."
     if typename in {
         "NotificationConfigurationError",
         "NotificationTopicNotFound",

@@ -62,7 +62,9 @@ from their roles and left SSO config drifted, requiring manual recovery.
 The fix is to give quiltx a path that **mirrors the admin UI**: submit the
 GraphQL `bucketAdd` mutation directly, let the stack probe with its own
 IAM, and surface the structured GraphQL error union (`BucketDoesNotExist`,
-`InsufficientPermissions`, etc.) verbatim. The local owner-setup routine
+`InsufficientPermissions`, etc.) — mapping each union typename to a
+typename-tagged, actionable CLI message rather than dropping it on the
+floor. The local owner-setup routine
 stays available for the genuine cross-account-grant case where it is the
 only thing that can work — but it stops being the only option.
 

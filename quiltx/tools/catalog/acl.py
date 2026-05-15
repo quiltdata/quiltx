@@ -7,8 +7,7 @@ import sys
 
 from quiltx import acl as acl_lib
 from quiltx import stack as stack_lib
-from quiltx.cli_common import add_catalog_args
-from quiltx.tools.bucket import _env_flag
+from quiltx.cli_common import add_catalog_args, env_flag
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,7 +83,7 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         diff = acl_lib.compute_diff(desired, current)
         acl_lib.print_diff(diff, verbose=args.verbose, desired=desired, current=current)
 
-        no_preflight = bool(args.no_preflight or _env_flag("QUILTX_NO_PREFLIGHT"))
+        no_preflight = bool(args.no_preflight or env_flag("QUILTX_NO_PREFLIGHT"))
 
         if not diff.has_changes():
             return 0

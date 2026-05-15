@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
+
+
+def env_flag(name: str) -> bool:
+    """Return True if env var *name* is set to a truthy value (1/true/yes/on)."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def add_catalog_args(

@@ -503,14 +503,9 @@ def _register_bucket_with_retry(
     control_account_id: str,
     *,
     assume_yes: bool,
-    no_preflight: bool = False,
 ) -> None:
     """Run the full cross-account bucket registration, probing profiles on failure."""
     from quiltx import bucket as bucket_lib
-
-    if no_preflight:
-        bucket_lib.add_bucket_without_preflight(stack, bucket, title=bucket)
-        return
 
     session, s3_client, region, _profile = bucket_lib.resolve_bucket_session(
         bucket, None, assume_yes=assume_yes
@@ -636,13 +631,9 @@ def apply_acl(
         try:
             _print_apply_step(f"add bucket {bucket}", verbose=verbose)
             if no_preflight:
-                _register_bucket_with_retry(
-                    stack,
-                    bucket,
-                    control_account_id or "",
-                    assume_yes=assume_yes,
-                    no_preflight=True,
-                )
+                from quiltx import bucket as bucket_lib
+
+                bucket_lib.add_bucket_without_preflight(stack, bucket, title=bucket)
             elif control_account_id is None:
                 stack.admin.buckets.add(bucket, bucket)
             else:
@@ -653,7 +644,7 @@ def apply_acl(
                     assume_yes=assume_yes,
                 )
             print(f"  + bucket {bucket}")
-        except Exception as exc:  # pragma: no cover - external API surface
+        except Exception as exc:
             failed_buckets.add(bucket)
             warnings.append(f"Bucket '{bucket}' could not be added: {exc}")
             print(f"  ! bucket {bucket}: {exc}", file=sys.stderr)
