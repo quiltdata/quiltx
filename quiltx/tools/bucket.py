@@ -386,7 +386,7 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             and not no_preflight
         ):
             print(
-                "Error: --no-prompt requires --yes (or --dry-run) to avoid interactive prompts.",
+                "Error: --no-prompt requires --yes (or --no-preflight) to avoid interactive prompts.",
                 file=sys.stderr,
             )
             return 1

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 from quiltx import acl as acl_lib
 from quiltx import stack as stack_lib
 from quiltx.cli_common import add_catalog_args
+from quiltx.tools.bucket import _env_flag
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,19 +84,13 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         diff = acl_lib.compute_diff(desired, current)
         acl_lib.print_diff(diff, verbose=args.verbose, desired=desired, current=current)
 
-        no_preflight = bool(
-            args.no_preflight
-            or os.environ.get("QUILTX_NO_PREFLIGHT", "").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        no_preflight = bool(args.no_preflight or _env_flag("QUILTX_NO_PREFLIGHT"))
 
         if not diff.has_changes():
-            if args.dry_run and no_preflight:
-                _print_no_preflight_dry_run_notice()
             return 0
 
         if args.dry_run:
-            if no_preflight:
+            if no_preflight and diff.buckets_to_add:
                 _print_no_preflight_dry_run_notice()
             return 0
 
