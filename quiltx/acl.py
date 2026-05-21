@@ -266,6 +266,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
 
     _validate_policy_ladder(policies)
     _validate_synthetic_role_names(policies, role_names)
+    _validate_bucket_pool_size(policies, roles)
 
     return AclConfig(
         policies=policies,
@@ -386,7 +387,31 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         diff.sso_is_create = current.sso_config_text is None
         diff.sso_needs_update = True
 
+    _check_bucket_pool_against_current(desired, current, diff)
+
     return diff
+
+
+def _check_bucket_pool_against_current(
+    desired: AclConfig, current: CurrentState, diff: AclDiff
+) -> None:
+    """Predict whether the post-apply BucketWritePolicy / BucketReadPolicy will
+    overflow IAM's 6,144-byte limit. The registry pool is monotonic in catalog
+    buckets — quiltx adds buckets via `bucketAdd` but never removes them — so
+    the predicted pool is `current.buckets ∪ desired.all_buckets`.
+    """
+    predicted = set(current.buckets) | all_buckets(desired)
+    size = _estimate_pool_policy_bytes(predicted)
+    if size > IAM_MANAGED_POLICY_MAX_BYTES:
+        overflow = size - IAM_MANAGED_POLICY_MAX_BYTES
+        raise ValueError(
+            f"Predicted bucket-pool policy size is ~{size} bytes "
+            f"({len(predicted)} buckets, total name length "
+            f"{sum(len(b) for b in predicted)}), exceeds AWS managed-policy "
+            f"limit of {IAM_MANAGED_POLICY_MAX_BYTES} by ~{overflow} bytes. "
+            f"Role creation will fail with 'Internal Server Error' from "
+            f"`roleCreateManaged`. Reduce buckets or split across stacks."
+        )
 
 
 def build_sso_config(config: AclConfig) -> str | None:
@@ -1612,6 +1637,63 @@ def _validate_synthetic_role_names(
 
 def _synthesized_role_name(policy_titles: list[str]) -> str:
     return "_".join(reversed(policy_titles))
+
+
+# AWS managed-policy document size limit (bytes). The catalog backend pools all
+# read_write buckets into a single shared `BucketWritePolicy`, and all read-only
+# buckets into `BucketReadPolicy`, attached to the stack's ManagedUserRole.
+# Each policy is one IAM managed policy capped at 6,144 chars of compact JSON.
+IAM_MANAGED_POLICY_MAX_BYTES = 6144
+
+# Empirical model for the compact-JSON size of a bucket-permission pool policy:
+#     size ≈ FIXED + PER_BUCKET * N + 2 * L
+# where N is the bucket count and L is the sum of bucket-name lengths.
+# Fitted against a live BucketWritePolicy (N=64, L=1328, actual=5176 bytes).
+# Per-bucket structural cost is two ARN entries plus quotes/commas:
+#   "arn:aws:s3:::NAME"     -> 15 + len(NAME)
+#   "arn:aws:s3:::NAME/*"   -> 17 + len(NAME)
+#   plus 2 commas           -> +2
+_POOL_POLICY_FIXED_BYTES = 350
+_POOL_POLICY_PER_BUCKET_BYTES = 34
+
+
+def _estimate_pool_policy_bytes(buckets: set[str]) -> int:
+    n = len(buckets)
+    l = sum(len(b) for b in buckets)
+    return _POOL_POLICY_FIXED_BYTES + _POOL_POLICY_PER_BUCKET_BYTES * n + 2 * l
+
+
+def _validate_bucket_pool_size(
+    policies: list[AclPolicy], roles: dict[str, AclStaticRole]
+) -> None:
+    """Pre-flight check that BucketRead/WritePolicy pools will fit under IAM's
+    6,144-byte managed-policy limit. The registry stuffs every read_write
+    bucket across all managed roles into one shared policy (and similarly for
+    read-only); exceeding the limit surfaces as an opaque 500 from
+    `roleCreateManaged` mid-apply.
+    """
+    read_write: set[str] = set()
+    read: set[str] = set()
+    for policy in policies:
+        read_write.update(policy.read_write)
+        read.update(policy.read)
+    for role in roles.values():
+        read_write.update(role.read_write)
+        read.update(role.read)
+    # RW implies R; the registry drops duplicates (see `_permissions_for_buckets`).
+    read -= read_write
+
+    for label, buckets in (("read_write", read_write), ("read", read)):
+        size = _estimate_pool_policy_bytes(buckets)
+        if size > IAM_MANAGED_POLICY_MAX_BYTES:
+            overflow = size - IAM_MANAGED_POLICY_MAX_BYTES
+            raise ValueError(
+                f"Estimated {label} bucket-pool policy size is ~{size} bytes "
+                f"({len(buckets)} buckets, total name length "
+                f"{sum(len(b) for b in buckets)}), exceeds AWS managed-policy "
+                f"limit of {IAM_MANAGED_POLICY_MAX_BYTES} by ~{overflow} bytes. "
+                f"Reduce buckets in {label} grants or split across stacks."
+            )
 
 
 def _print_permissions(permissions: list[Permission]) -> None:

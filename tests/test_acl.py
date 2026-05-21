@@ -319,6 +319,24 @@ roles: {}
         acl.parse_acl_config(config_path)
 
 
+def test_parse_acl_config_rejects_oversized_bucket_pool(tmp_path: Path) -> None:
+    # ~5800 bytes / (34 + 2*20) = ~78 buckets of length 20 to overflow the pool.
+    buckets = [f"bucket-name-padded-{i:04d}" for i in range(120)]
+    bucket_yaml = "\n".join(f"      - {b}" for b in buckets)
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text(f"""
+policies:
+  everyone:
+    sso.groups: [Everyone]
+    buckets.read_write:
+{bucket_yaml}
+roles: {{}}
+""")
+
+    with pytest.raises(ValueError, match="exceeds AWS managed-policy limit"):
+        acl.parse_acl_config(config_path)
+
+
 def test_parse_acl_config_rejects_reserved_inline_names(tmp_path: Path) -> None:
     suffix_path = tmp_path / "suffix.yml"
     suffix_path.write_text("""
@@ -628,6 +646,27 @@ def test_compute_diff_is_idempotent_against_matching_current_state() -> None:
 
     assert diff.has_changes() is False
     assert diff.warnings == []
+
+
+def test_compute_diff_rejects_predicted_pool_overflow(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  everyone:
+    sso.groups: [Everyone]
+    buckets.read_write: [new-bucket-1, new-bucket-2]
+roles: {}
+""")
+    desired = acl.parse_acl_config(config_path)
+    current = _empty_current_state()
+    # Seed current.buckets with enough existing buckets to push the union over
+    # the 6,144-byte limit. ~80 buckets of 20-char names => ~5,800 bytes alone.
+    for i in range(120):
+        name = f"existing-bucket-pad-{i:04d}"
+        current.buckets[name] = FakeBucket(name=name, title=name)
+
+    with pytest.raises(ValueError, match="exceeds AWS managed-policy limit"):
+        acl.compute_diff(desired, current)
 
 
 def test_compute_diff_warns_and_skips_unmanaged_name_collisions() -> None:
