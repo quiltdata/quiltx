@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-08-10
+
+### Fixed
+
+- `quiltx catalog acl` preserves the registry-managed `Canary` role and `CanaryBucketAccess` policy during reconciliation, preventing disruption to the `_canary` service user.
+
 ## [0.16.1] - 2026-05-14
 
 ### Added
