@@ -849,16 +849,17 @@ def apply_acl(
     for policy in diff.policies_to_update:
         _print_apply_step(f"update policy {policy.title}", verbose=verbose)
         affected = _policy_uses_buckets(policy.permissions, failed_buckets)
-        # Resolve by id when possible — quilt3's update_managed(title) first
-        # calls _get_by_id which currently 500s on non-UUID inputs instead of
-        # returning None, so the title fallback never runs.
+        # Quilt3 resolves update references by trying policy(id:) first. Never
+        # pass a title there: registry policy IDs are UUIDs, and a title causes
+        # a server-side UUID parse failure before quilt3 can try its title list.
         existing = known_policies.get(policy.title)
-        policy_ref = existing.id if existing is not None else policy.title
-        existing_role_ids = (
-            [role.id for role in getattr(existing, "roles", []) or []]
-            if existing is not None
-            else []
-        )
+        if existing is None:
+            detail = "policy not found in the fetched current state"
+            warnings.append(f"Policy '{policy.title}' could not be updated: {detail}")
+            print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
+            continue
+        policy_ref = str(existing.id)
+        existing_role_ids = [role.id for role in getattr(existing, "roles", []) or []]
         try:
             updated = stack.admin.policies.update_managed(
                 policy_ref,
@@ -1165,7 +1166,11 @@ def _role_ref(role_name: str, current: CurrentState) -> str:
 
 def _policy_ref(policy_title: str, current: CurrentState) -> str:
     policy = current.all_policies.get(policy_title)
-    return str(policy.id) if policy is not None else policy_title
+    if policy is None:
+        raise ValueError(
+            f"Policy '{policy_title}' was not present in the fetched current state"
+        )
+    return str(policy.id)
 
 
 def detach_all_policies_from_roles(
@@ -1545,8 +1550,9 @@ def reset_policy(
         finally:
             deleted.add(role_name)
     try:
+        policy_ref = _policy_ref(title, current)
         _print_apply_step(f"delete policy {title}", verbose=verbose)
-        stack.admin.policies.delete(title)
+        stack.admin.policies.delete(policy_ref)
         print(f"  - policy {title}")
     except Exception as exc:
         detail = format_exception(exc)

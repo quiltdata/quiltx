@@ -862,6 +862,15 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         sso_needs_update=True,
     )
     current = _empty_current_state()
+    legacy_policy = FakePolicy(
+        id="id-legacy-policy",
+        title="legacy_policy",
+        managed=True,
+        permissions=[],
+        roles=[],
+    )
+    current.managed_policies[legacy_policy.title] = legacy_policy
+    current.all_policies[legacy_policy.title] = legacy_policy
 
     acl.apply_acl(stack, diff, current)
 
@@ -871,7 +880,7 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         ("role_create", "public", ["id-public"]),
         ("sso_set", "public"),
         ("role_delete", "legacy_role"),
-        ("policy_delete", "legacy_policy"),
+        ("policy_delete", "id-legacy-policy"),
     ]
 
 
