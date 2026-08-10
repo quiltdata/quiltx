@@ -8,6 +8,8 @@
 #
 # A user qualifies for a policy if they belong to any of its listed groups.
 # Their synthetic role is the union of all policies they qualify for.
+# Set `name` on a policy to replace that ladder rung's synthesized role name
+# with a shorter display name without creating a duplicate static role.
 
 policies:
 
