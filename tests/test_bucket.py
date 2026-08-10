@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import boto3
+import pytest
 from botocore.stub import Stubber
 
 from quiltx import bucket as bucket_lib
@@ -601,6 +602,147 @@ def test_add_already_registered_skips_post_test_when_no_test_flag(monkeypatch) -
     s3_stubber.deactivate()
     sns_stubber.deactivate()
     sts_stubber.deactivate()
+
+
+def test_add_no_preflight_registers_without_boto3(monkeypatch, capsys) -> None:
+    add_calls: list[tuple[str, str | None]] = []
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    _install_stack_context(monkeypatch)
+    monkeypatch.setattr(
+        bucket_tool.boto3,
+        "Session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("boto3 should not be used")
+        ),
+    )
+    monkeypatch.setattr(
+        bucket_tool,
+        "_verify_bucket_registration_and_access",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("post-add test should not run")
+        ),
+    )
+
+    def fake_add_without_preflight(stack, bucket, *, title=None):
+        add_calls.append((bucket, title))
+        return AddBucketResult(bucket, title or bucket, "", False)
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        fake_add_without_preflight,
+    )
+
+    assert bucket_tool.main(["add", "bucket", "--yes", "--no-preflight"]) == 0
+    captured = capsys.readouterr()
+    assert "via GraphQL only" in captured.out
+    assert "local AWS preflight/setup skipped" in captured.out
+    assert add_calls == [("bucket", "bucket")]
+
+
+def test_add_no_preflight_env_var(monkeypatch) -> None:
+    add_calls: list[str] = []
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    _install_stack_context(monkeypatch)
+    monkeypatch.setenv("QUILTX_NO_PREFLIGHT", "1")
+    monkeypatch.setattr(
+        bucket_tool.boto3,
+        "Session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("boto3 should not be used")
+        ),
+    )
+
+    def fake_add_without_preflight(stack, bucket, *, title=None):
+        add_calls.append(bucket)
+        return AddBucketResult(bucket, title or bucket, "", False)
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        fake_add_without_preflight,
+    )
+
+    assert bucket_tool.main(["add", "bucket", "--yes"]) == 0
+    assert add_calls == ["bucket"]
+
+
+def test_add_no_preflight_no_prompt_does_not_require_yes(monkeypatch) -> None:
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    _install_stack_context(monkeypatch)
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        lambda stack, bucket, *, title=None: AddBucketResult(
+            bucket, title or bucket, "", False
+        ),
+    )
+
+    assert bucket_tool.main(["add", "bucket", "--no-preflight", "--no-prompt"]) == 0
+
+
+def test_add_no_preflight_force_removes_then_adds(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    _install_stack_context(monkeypatch)
+
+    buckets = SimpleNamespace()
+    buckets.get = lambda name: FakeBucket(name, "Existing")
+    buckets.remove = lambda name: calls.append(("remove", name))
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kw: make_fake_catalog("demo", buckets=buckets),
+    )
+
+    def fake_add_without_preflight(stack, bucket, *, title=None):
+        calls.append(("add", bucket))
+        return AddBucketResult(bucket, title or bucket, "", False)
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        fake_add_without_preflight,
+    )
+
+    assert (
+        bucket_tool.main(["add", "bucket", "--yes", "--no-preflight", "--force"]) == 0
+    )
+    assert calls == [("remove", "bucket"), ("add", "bucket")]
+
+
+@pytest.mark.parametrize(
+    ("typename", "message", "expected"),
+    [
+        (
+            "BucketDoesNotExist",
+            "",
+            "The stack cannot access this bucket",
+        ),
+        (
+            "InsufficientPermissions",
+            "missing s3:ListBucket",
+            "missing s3:ListBucket",
+        ),
+        ("NotificationConfigurationError", "", "NotificationConfigurationError"),
+        ("NotificationTopicNotFound", "", "NotificationTopicNotFound"),
+        ("SnsInvalid", "", "SnsInvalid"),
+        ("SubscriptionInvalid", "", "SubscriptionInvalid"),
+        (
+            "BucketFileExtensionsToIndexInvalid",
+            "",
+            "BucketFileExtensionsToIndexInvalid",
+        ),
+        (
+            "BucketIndexContentBytesInvalid",
+            "",
+            "BucketIndexContentBytesInvalid",
+        ),
+    ],
+)
+def test_bucket_add_union_error_messages(typename, message, expected) -> None:
+    result = SimpleNamespace(typename__=typename, message=message)
+
+    assert expected in bucket_lib._bucket_add_error_message(result, typename)
 
 
 def _stub_s3_for_full_add():
@@ -2017,3 +2159,46 @@ def test_reindex_rejects_non_s3_uri(capsys) -> None:
     assert rc == 2
     err = capsys.readouterr().err
     assert "s3://" in err
+
+
+def test_add_no_preflight_bucket_add_error_exits_nonzero(monkeypatch, capsys) -> None:
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    _install_stack_context(monkeypatch)
+
+    def boom(stack, bucket, *, title=None):
+        raise bucket_lib.BucketAddError("BucketDoesNotExist: cannot reach bucket")
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        boom,
+    )
+
+    rc = bucket_tool.main(["add", "bucket", "--no-preflight"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "BucketDoesNotExist" in captured.err
+    assert captured.err.startswith("Error: ")
+    assert "BucketDoesNotExist" not in captured.out
+
+
+def test_add_no_preflight_does_not_prompt_without_yes(monkeypatch) -> None:
+    """Spec 7-no-preflight §144: --no-preflight should not need or trigger prompts."""
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    _install_stack_context(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt="": (_ for _ in ()).throw(
+            AssertionError("--no-preflight must not prompt")
+        ),
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        lambda stack, bucket, *, title=None: AddBucketResult(
+            bucket, title or bucket, "", False
+        ),
+    )
+
+    assert bucket_tool.main(["add", "bucket", "--no-preflight"]) == 0

@@ -7,7 +7,7 @@ import sys
 
 from quiltx import acl as acl_lib
 from quiltx import stack as stack_lib
-from quiltx.cli_common import add_catalog_args
+from quiltx.cli_common import add_catalog_args, env_flag
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show planned changes without applying them.",
+    )
+    parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help=(
+            "Register new buckets via GraphQL only, skipping local AWS "
+            "bucket-owner setup."
+        ),
     )
     return parser
 
@@ -75,10 +83,14 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         diff = acl_lib.compute_diff(desired, current)
         acl_lib.print_diff(diff, verbose=args.verbose, desired=desired, current=current)
 
+        no_preflight = bool(args.no_preflight or env_flag("QUILTX_NO_PREFLIGHT"))
+
         if not diff.has_changes():
             return 0
 
         if args.dry_run:
+            if no_preflight and diff.buckets_to_add:
+                _print_no_preflight_dry_run_notice()
             return 0
 
         if not args.yes and not _confirm_apply():
@@ -87,14 +99,25 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
 
         print("Applying...")
         warnings = acl_lib.apply_acl(
-            stack, diff, current, verbose=args.verbose, assume_yes=args.yes
+            stack,
+            diff,
+            current,
+            verbose=args.verbose,
+            assume_yes=args.yes,
+            no_preflight=no_preflight,
         )
 
         post_current = acl_lib.fetch_current_state(stack)
         drift = acl_lib.detect_policy_drift(desired, post_current)
         if drift:
             reset_warnings, post_current = _handle_policy_drift(
-                stack, drift, desired, post_current, auto=args.yes, verbose=args.verbose
+                stack,
+                drift,
+                desired,
+                post_current,
+                auto=args.yes,
+                verbose=args.verbose,
+                no_preflight=no_preflight,
             )
             warnings.extend(reset_warnings)
 
@@ -120,6 +143,22 @@ def _confirm_apply() -> bool:
     return input("Apply ACL changes? [y/N]: ").strip().lower() in {"y", "yes"}
 
 
+def _print_no_preflight_dry_run_notice() -> None:
+    print()
+    print(
+        "--no-preflight: new buckets would be registered via GraphQL only; "
+        "skipped local AWS steps per bucket:"
+    )
+    for item in (
+        "GetBucketLocation",
+        "GetBucketPolicy / PutBucketPolicy",
+        "SNS topic creation and policy configuration",
+        "bucket-notification configuration",
+        "post-add verification",
+    ):
+        print(f"  - {item}")
+
+
 def _handle_policy_drift(
     stack: stack_lib.Catalog,
     drift: list[acl_lib.PolicyDrift],
@@ -128,6 +167,7 @@ def _handle_policy_drift(
     *,
     auto: bool,
     verbose: bool,
+    no_preflight: bool = False,
 ) -> tuple[list[str], acl_lib.CurrentState]:
     """Prompt for (or auto-apply) policy resets when server state has drifted.
 
@@ -212,7 +252,12 @@ def _handle_policy_drift(
         print("Reapplying after reset...")
         warnings.extend(
             acl_lib.apply_acl(
-                stack, new_diff, post_reset, verbose=verbose, assume_yes=auto
+                stack,
+                new_diff,
+                post_reset,
+                verbose=verbose,
+                assume_yes=auto,
+                no_preflight=no_preflight,
             )
         )
         post_reset = acl_lib.fetch_current_state(stack)

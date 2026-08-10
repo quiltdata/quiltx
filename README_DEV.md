@@ -16,6 +16,18 @@ stack = find_matching_stack(get_catalog_url())
 print(stack["StackName"])
 ```
 
+## Bucket registration paths
+
+Bucket registration has two explicit paths. The default bucket-owner path uses
+local AWS credentials to probe S3, merge the Quilt bucket-policy statement,
+configure SNS, configure bucket notifications, and then call GraphQL
+`bucketAdd` with the SNS topic ARN.
+
+The `--no-preflight` path is GraphQL-only. It skips local S3/SNS calls and
+submits `bucketAdd` without an SNS ARN so the catalog stack probes the bucket
+with its own IAM, matching the admin UI behavior. Use this for public buckets
+or buckets already configured outside the caller's local AWS account.
+
 ## ECS
 
 ```python

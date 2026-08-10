@@ -318,6 +318,50 @@ class AddBucketResult:
     already_registered: bool
 
 
+class BucketAddError(RuntimeError):
+    """Human-readable error for a GraphQL bucketAdd failure."""
+
+
+def add_bucket_without_preflight(
+    stack: stack_lib.Catalog,
+    bucket: str,
+    *,
+    title: str | None = None,
+) -> AddBucketResult:
+    """Register a bucket by GraphQL only, without local AWS preflight/setup."""
+    stack.ensure_auth()
+
+    from quilt3 import _graphql_client
+    from quilt3.admin import util
+
+    bucket_title = title or bucket
+    result = util.get_client().bucket_add(
+        input=_graphql_client.BucketAddInput(
+            name=bucket,
+            title=bucket_title,
+            sns_notification_arn=None,
+        )
+    )
+    typename = _bucket_add_typename(result)
+    if typename == "BucketAddSuccess":
+        config = getattr(result, "bucket_config", None)
+        return AddBucketResult(
+            bucket=_field_value(config, "name", bucket),
+            title=_field_value(config, "title", bucket_title),
+            sns_topic_arn=_field_value(config, "sns_notification_arn", ""),
+            already_registered=False,
+        )
+    if typename == "BucketAlreadyAdded":
+        return AddBucketResult(
+            bucket=bucket,
+            title=bucket_title,
+            sns_topic_arn="",
+            already_registered=True,
+        )
+
+    raise BucketAddError(_bucket_add_error_message(result, typename))
+
+
 def add_bucket(
     stack: stack_lib.Catalog,
     bucket: str,
@@ -423,6 +467,49 @@ def add_bucket(
         sns_topic_arn=sns_topic_arn,
         already_registered=False,
     )
+
+
+def _bucket_add_typename(result: Any) -> str:
+    if isinstance(result, Mapping):
+        value = result.get("__typename") or result.get("typename__")
+        return str(value or "")
+    return str(
+        getattr(result, "typename__", None)
+        or getattr(result, "__typename", None)
+        or result.__class__.__name__
+    )
+
+
+def _field_value(source: Any, field: str, default: str) -> str:
+    if source is None:
+        return default
+    if isinstance(source, Mapping):
+        return str(source.get(field) or default)
+    return str(getattr(source, field, None) or default)
+
+
+def _bucket_add_error_message(result: Any, typename: str) -> str:
+    if typename == "BucketDoesNotExist":
+        return (
+            "BucketDoesNotExist: The stack cannot access this bucket; check "
+            "the stack's IAM role or the bucket's public-access settings."
+        )
+    if typename == "InsufficientPermissions":
+        detail = _field_value(result, "message", "")
+        if detail:
+            return f"InsufficientPermissions: {detail}"
+        return "InsufficientPermissions: stack lacks required access to this bucket."
+    if typename in {
+        "NotificationConfigurationError",
+        "NotificationTopicNotFound",
+        "SnsInvalid",
+        "SubscriptionInvalid",
+        "BucketFileExtensionsToIndexInvalid",
+        "BucketIndexContentBytesInvalid",
+    }:
+        detail = _field_value(result, "message", "")
+        return f"{typename}: {detail}" if detail else typename
+    return f"bucketAdd returned {typename or 'an unknown error'}: {result}"
 
 
 def _merge_policy_statements(

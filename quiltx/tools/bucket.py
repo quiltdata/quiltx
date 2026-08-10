@@ -16,7 +16,7 @@ from rich.table import Table
 
 from quiltx import bucket as bucket_lib
 from quiltx import stack as stack_lib
-from quiltx.cli_common import add_catalog_args
+from quiltx.cli_common import add_catalog_args, env_flag as _env_flag
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,12 +53,24 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument(
         "--yes",
         action="store_true",
-        help="Apply changes without prompting for confirmation.",
+        help=(
+            "Apply changes without prompting for confirmation. "
+            "Not needed with --no-preflight, which never prompts."
+        ),
     )
     add_parser.add_argument(
         "--no-test",
         action="store_true",
         help="Skip the post-add registration/read verification.",
+    )
+    add_parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help=(
+            "Skip local AWS preflight/setup and submit bucketAdd directly, "
+            "letting the catalog stack probe the bucket. Never prompts for "
+            "confirmation (--yes is not required)."
+        ),
     )
     add_parser.add_argument(
         "--force",
@@ -363,9 +375,14 @@ def _lightweight_stack_payload(
 @stack_lib.catalog_command
 def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
-        if getattr(args, "no_prompt", False) and not getattr(args, "yes", False):
+        no_preflight = bool(args.no_preflight or _env_flag("QUILTX_NO_PREFLIGHT"))
+        if (
+            getattr(args, "no_prompt", False)
+            and not getattr(args, "yes", False)
+            and not no_preflight
+        ):
             print(
-                "Error: --no-prompt requires --yes (or --dry-run) to avoid interactive prompts.",
+                "Error: --no-prompt requires --yes (or --no-preflight) to avoid interactive prompts.",
                 file=sys.stderr,
             )
             return 1
@@ -381,6 +398,9 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
+
+        if no_preflight:
+            return _cmd_add_no_preflight(stack, args)
 
         catalog_name = stack.catalog_name
         stack_payload = _ensure_stack_payload(stack)
@@ -532,6 +552,55 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             raise
         _print_exception(exc)
         return 1
+
+
+def _cmd_add_no_preflight(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
+    existing_bucket = stack.admin.buckets.get(args.bucket_name)
+    prior_title = (
+        getattr(existing_bucket, "title", None) if existing_bucket is not None else None
+    )
+    bucket_title = args.title or prior_title or args.bucket_name
+    if args.dry_run:
+        _print_no_preflight_dry_run(stack, args.bucket_name, bucket_title)
+        return 0
+
+    if existing_bucket is not None and args.force:
+        print(
+            f"Bucket {args.bucket_name}: already registered in Quilt; "
+            "removing and re-adding (--force) via GraphQL only."
+        )
+        stack.admin.buckets.remove(args.bucket_name)
+    elif existing_bucket is not None:
+        print(
+            f"Bucket {args.bucket_name}: already registered in Quilt; "
+            "local preflight/setup skipped."
+        )
+        return 0
+
+    try:
+        result = bucket_lib.add_bucket_without_preflight(
+            stack,
+            args.bucket_name,
+            title=bucket_title,
+        )
+    except bucket_lib.BucketAddError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if result.already_registered:
+        print(
+            f"Bucket {args.bucket_name}: already registered in Quilt; "
+            "local preflight/setup skipped."
+        )
+    else:
+        print(
+            f"Registered bucket {result.bucket} as {result.title} "
+            "via GraphQL only; local AWS preflight/setup skipped."
+        )
+    print(
+        f"Run `quiltx bucket test {args.bucket_name}` to verify registration and access."
+    )
+    return 0
 
 
 @stack_lib.catalog_command
@@ -877,6 +946,34 @@ def _print_dry_run_plan(
             ],
         },
     )
+
+
+def _print_no_preflight_dry_run(
+    stack: stack_lib.Catalog, bucket_name: str, bucket_title: str
+) -> None:
+    console = Console(width=120)
+    table = Table(
+        title="Bucket add dry-run (--no-preflight)",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+        expand=False,
+    )
+    table.add_column("Resource", style="green", overflow="fold")
+    table.add_column("Action", overflow="fold")
+    table.add_row(stack.catalog_name, "use catalog API key for GraphQL bucketAdd")
+    table.add_row(f"s3://{bucket_name}", f"register as {bucket_title!r}")
+    console.print(table)
+    print()
+    print("Skipped local AWS preflight/setup:")
+    for item in (
+        "GetBucketLocation",
+        "GetBucketPolicy / PutBucketPolicy",
+        "SNS topic creation and policy configuration",
+        "bucket-notification configuration",
+        "post-add verification (--no-preflight implies --no-test)",
+    ):
+        print(f"  - {item}")
 
 
 def _print_context_table(

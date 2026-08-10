@@ -498,7 +498,11 @@ def print_current_state(current: CurrentState) -> None:
 
 
 def _register_bucket_with_retry(
-    stack: stack_lib.Catalog, bucket: str, control_account_id: str, *, assume_yes: bool
+    stack: stack_lib.Catalog,
+    bucket: str,
+    control_account_id: str,
+    *,
+    assume_yes: bool,
 ) -> None:
     """Run the full cross-account bucket registration, probing profiles on failure."""
     from quiltx import bucket as bucket_lib
@@ -606,6 +610,7 @@ def apply_acl(
     *,
     verbose: bool = False,
     assume_yes: bool = False,
+    no_preflight: bool = False,
 ) -> list[str]:
     """Apply ACL changes. Returns any runtime warnings."""
 
@@ -625,14 +630,21 @@ def apply_acl(
     for bucket in diff.buckets_to_add:
         try:
             _print_apply_step(f"add bucket {bucket}", verbose=verbose)
-            if control_account_id is None:
+            if no_preflight:
+                from quiltx import bucket as bucket_lib
+
+                bucket_lib.add_bucket_without_preflight(stack, bucket, title=bucket)
+            elif control_account_id is None:
                 stack.admin.buckets.add(bucket, bucket)
             else:
                 _register_bucket_with_retry(
-                    stack, bucket, control_account_id, assume_yes=assume_yes
+                    stack,
+                    bucket,
+                    control_account_id,
+                    assume_yes=assume_yes,
                 )
             print(f"  + bucket {bucket}")
-        except Exception as exc:  # pragma: no cover - external API surface
+        except Exception as exc:
             failed_buckets.add(bucket)
             warnings.append(f"Bucket '{bucket}' could not be added: {exc}")
             print(f"  ! bucket {bucket}: {exc}", file=sys.stderr)
