@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-08-10
+
+### Added
+
+- `quiltx catalog acl` current-state output now includes users and role assignments, and `--json` exports the complete ACL state for automation and migration.
+
 ## [0.16.3] - 2026-08-10
 
 ### Added

@@ -116,9 +116,17 @@ Unset is neutral, `true` grants admin, and an explicit `false` vetoes any prior
 
 ### Usage
 
+With no config file, the command reports the complete server ACL state, including
+users and their active and extra role assignments. Pass `--json` for a
+machine-readable export of the catalog, buckets, policies, roles, users, SSO
+configuration, and default role.
+
 ```bash
 # Show current server ACL state
 uvx quiltx catalog acl
+
+# Export the current server ACL state as JSON
+uvx quiltx catalog acl --json
 
 # Preview changes (dry run)
 uvx quiltx catalog acl config.yml --dry-run
