@@ -22,6 +22,8 @@ ACL_ENTRY_KEYS = {
 }
 CONFIG_POLICIES_KEY = "config.policies"
 EVERYONE_GROUP = "Everyone"
+REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
+REGISTRY_MANAGED_ROLE_EXCLUSIONS = frozenset({"Canary"})
 
 
 @dataclass(frozen=True)
@@ -350,6 +352,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         title
         for title in current.managed_policies
         if title not in desired_policy_titles
+        and title not in REGISTRY_MANAGED_POLICY_EXCLUSIONS
     )
 
     desired_role_names = set(desired_state.role_updates)
@@ -375,7 +378,10 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
             )
 
     diff.roles_to_delete = sorted(
-        name for name in current.managed_roles if name not in desired_role_names
+        name
+        for name in current.managed_roles
+        if name not in desired_role_names
+        and name not in REGISTRY_MANAGED_ROLE_EXCLUSIONS
     )
 
     desired_sso_text = build_sso_config(desired)

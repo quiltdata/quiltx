@@ -630,6 +630,50 @@ def test_compute_diff_is_idempotent_against_matching_current_state() -> None:
     assert diff.warnings == []
 
 
+def test_compute_diff_preserves_registry_managed_canary_resources() -> None:
+    desired = acl.AclConfig(policies=[], roles={})
+    current = _empty_current_state()
+    current.managed_policies.update(
+        {
+            "CanaryBucketAccess": FakePolicy(
+                id="id-canary-policy",
+                title="CanaryBucketAccess",
+                managed=True,
+                permissions=[],
+                roles=[],
+            ),
+            "other-policy": FakePolicy(
+                id="id-other-policy",
+                title="other-policy",
+                managed=True,
+                permissions=[],
+                roles=[],
+            ),
+        }
+    )
+    current.managed_roles.update(
+        {
+            "Canary": FakeRole(
+                id="id-canary-role",
+                name="Canary",
+                policies=[],
+                permissions=[],
+            ),
+            "other-role": FakeRole(
+                id="id-other-role",
+                name="other-role",
+                policies=[],
+                permissions=[],
+            ),
+        }
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.policies_to_delete == ["other-policy"]
+    assert diff.roles_to_delete == ["other-role"]
+
+
 def test_compute_diff_warns_and_skips_unmanaged_name_collisions() -> None:
     desired = acl.parse_acl_config(Path("stack-acl.example.yaml"))
     current = _empty_current_state()
