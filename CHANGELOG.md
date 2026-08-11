@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-08-10
+
+### Added
+
+- Policy entries in `quiltx catalog acl` accept a `name` field that gives the cumulative synthesized role a short display name without creating duplicate roles or SSO mappings.
+
 ## [0.16.2] - 2026-08-10
 
 ### Fixed

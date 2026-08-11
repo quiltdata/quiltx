@@ -20,6 +20,7 @@ ACL_ENTRY_KEYS = {
     "config.default_role",
     "config.is_admin",
 }
+POLICY_ROLE_NAME_KEY = "name"
 CONFIG_POLICIES_KEY = "config.policies"
 EVERYONE_GROUP = "Everyone"
 REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
@@ -34,6 +35,7 @@ class AclPolicy:
     read_write: list[str] = field(default_factory=list)
     default_role: bool = False
     is_admin: bool | None = None
+    role_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -207,6 +209,11 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 "inline-role policies"
             )
         entry = _parse_acl_entry(value, f"policies.{name}")
+        role_name = value.get(POLICY_ROLE_NAME_KEY)
+        if role_name is not None:
+            if not isinstance(role_name, str) or not role_name.strip():
+                raise ValueError(f"policies.{name}.name must be a non-empty string")
+            role_name = role_name.strip()
         policy = AclPolicy(
             name=name,
             sso=entry.sso,
@@ -214,6 +221,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             read_write=entry.read_write,
             is_admin=entry.is_admin,
             default_role=entry.default_role,
+            role_name=role_name,
         )
         policies.append(policy)
         policy_names.add(name)
@@ -1424,7 +1432,9 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         cumulative_policy_titles.append(policy.name)
         if policy.is_admin is not None:
             cumulative_admin_votes.append((policy.name, policy.is_admin))
-        synthesized_role_name = _synthesized_role_name(cumulative_policy_titles)
+        synthesized_role_name = policy.role_name or _synthesized_role_name(
+            cumulative_policy_titles
+        )
         synthesized_admin = _resolve_policy_admin_vote(
             cumulative_admin_votes,
             synthesized_role_name,
@@ -1534,6 +1544,8 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
 
 def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) -> None:
     allowed_keys = set(ACL_ENTRY_KEYS)
+    if section == "policies":
+        allowed_keys.add(POLICY_ROLE_NAME_KEY)
     if section == "roles":
         allowed_keys.add(CONFIG_POLICIES_KEY)
     unknown_keys = sorted(
@@ -1617,15 +1629,24 @@ def _validate_synthetic_role_names(
     policies: list[AclPolicy], declared_role_names: set[str]
 ) -> None:
     cumulative_policy_titles: list[str] = []
+    generated_role_sources: dict[str, list[str]] = {}
     for policy in policies:
         cumulative_policy_titles.append(policy.name)
-        role_name = _synthesized_role_name(cumulative_policy_titles)
+        role_name = policy.role_name or _synthesized_role_name(cumulative_policy_titles)
         if role_name in declared_role_names:
             raise ValueError(
                 f"Synthesized role '{role_name}' from policy ladder "
                 f"{', '.join(cumulative_policy_titles)} conflicts with declared role "
                 f"'{role_name}'"
             )
+        previous_source = generated_role_sources.get(role_name)
+        if previous_source is not None:
+            raise ValueError(
+                f"Synthesized role '{role_name}' from policy ladder "
+                f"{', '.join(cumulative_policy_titles)} conflicts with the role "
+                f"generated from {', '.join(previous_source)}"
+            )
+        generated_role_sources[role_name] = list(cumulative_policy_titles)
 
 
 def _synthesized_role_name(policy_titles: list[str]) -> str:
