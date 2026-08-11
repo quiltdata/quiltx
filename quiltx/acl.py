@@ -381,6 +381,15 @@ def parse_acl_config(path: str | Path) -> AclConfig:
     _validate_policy_ladder(policies)
     _validate_synthetic_role_names(policies, role_names)
 
+    has_sso_selectors = any(policy.sso for policy in policies) or any(
+        role.sso for role in roles.values()
+    )
+    if has_sso_selectors and not default_role_sources:
+        raise ValueError(
+            "ACL configs with sso.<claim> selectors must set "
+            "config.default_role: true on exactly one policy or role"
+        )
+
     return AclConfig(
         policies=policies,
         roles=roles,
@@ -564,6 +573,11 @@ def build_sso_config(config: AclConfig) -> str | None:
     desired_state = _build_desired_acl_state(config)
     if not desired_state.sso_mappings:
         return None
+    if desired_state.default_role_name is None:
+        raise ValueError(
+            "ACL configs with sso.<claim> selectors must set "
+            "config.default_role: true on exactly one policy or role"
+        )
 
     payload: dict[str, Any] = {"version": "1.0", "union_roles": True, "mappings": []}
     if desired_state.default_role_name is not None:

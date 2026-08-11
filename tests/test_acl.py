@@ -88,6 +88,7 @@ policies:
   public:
     sso.groups: [Everyone]
     buckets.read: [bucket-a]
+    config.default_role: true
 roles: {}
 """)
 
@@ -169,6 +170,7 @@ def test_parse_acl_config_accepts_arbitrary_sso_claims(tmp_path: Path) -> None:
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
   sales:
     sso.department: [Sales]
 roles:
@@ -191,6 +193,7 @@ def test_parse_acl_config_accepts_user_policy_after_group_policy(
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
   exec:
     sso.users: [ernest@quilt.bio]
 roles: {}
@@ -268,7 +271,9 @@ roles:
         acl.parse_acl_config(config_path)
 
 
-def test_parse_acl_config_rejects_multiple_default_entries(tmp_path: Path) -> None:
+def test_parse_acl_config_rejects_missing_or_multiple_sso_defaults(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
 policies:
@@ -287,6 +292,28 @@ roles:
         ValueError, match="Only one ACL entry may set config.default_role"
     ):
         acl.parse_acl_config(config_path)
+
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles: {}
+""")
+
+    with pytest.raises(
+        ValueError, match="sso.<claim> selectors must set config.default_role"
+    ):
+        acl.parse_acl_config(config_path)
+
+    with pytest.raises(
+        ValueError, match="sso.<claim> selectors must set config.default_role"
+    ):
+        acl.build_sso_config(
+            acl.AclConfig(
+                policies=[acl.AclPolicy(name="public", sso={"groups": ["Everyone"]})],
+                roles={},
+            )
+        )
 
 
 def test_parse_acl_config_rejects_broken_policy_ladder(tmp_path: Path) -> None:
@@ -450,6 +477,7 @@ def test_build_sso_config_emits_arbitrary_sso_claim_schema(tmp_path: Path) -> No
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
   sales:
     sso.department: [Sales]
 roles:
@@ -675,6 +703,7 @@ def test_switching_synthesized_policy_to_reusable_deletes_old_role() -> None:
                 name="SharedPolicy",
                 sso={"groups": ["Everyone"]},
                 read=["shared"],
+                default_role=True,
             )
         ],
         roles={},
@@ -701,6 +730,7 @@ def test_static_role_without_sso_manages_role_without_sso_update(
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
 roles:
   password-users:
     config.policies: [public]
@@ -760,6 +790,7 @@ def test_policy_config_is_admin_marks_synthesized_role_admin(tmp_path: Path) -> 
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
     config.is_admin: true
 roles: {}
 """)
@@ -782,6 +813,7 @@ def test_policy_config_is_admin_false_vetoes_generated_role_admin_and_warns(
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
     config.is_admin: true
   internal:
     sso.groups: [Employees]
@@ -869,7 +901,10 @@ def test_reordering_policies_changes_synthesized_role_names() -> None:
     first = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="public", sso={"groups": ["Everyone"]}, read=["bucket-a"]
+                name="public",
+                sso={"groups": ["Everyone"]},
+                read=["bucket-a"],
+                default_role=True,
             ),
             acl.AclPolicy(
                 name="internal", sso={"groups": ["Everyone"]}, read=["bucket-b"]
@@ -880,7 +915,10 @@ def test_reordering_policies_changes_synthesized_role_names() -> None:
     second = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="internal", sso={"groups": ["Everyone"]}, read=["bucket-b"]
+                name="internal",
+                sso={"groups": ["Everyone"]},
+                read=["bucket-b"],
+                default_role=True,
             ),
             acl.AclPolicy(
                 name="public", sso={"groups": ["Everyone"]}, read=["bucket-a"]
@@ -1059,7 +1097,10 @@ def test_changing_policy_groups_updates_sso_config() -> None:
     original = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="public", sso={"groups": ["Everyone"]}, read=["bucket-a"]
+                name="public",
+                sso={"groups": ["Everyone"]},
+                read=["bucket-a"],
+                default_role=True,
             )
         ],
         roles={},
@@ -1067,7 +1108,10 @@ def test_changing_policy_groups_updates_sso_config() -> None:
     updated = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="public", sso={"groups": ["Employees"]}, read=["bucket-a"]
+                name="public",
+                sso={"groups": ["Employees"]},
+                read=["bucket-a"],
+                default_role=True,
             )
         ],
         roles={},

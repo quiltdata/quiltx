@@ -118,6 +118,7 @@ Unset is neutral, `true` grants admin, and an explicit `false` vetoes any prior
 `config.default_role: true` reconciles the settings-level role assigned to new
 password signups. A selector-less static role may be the default; when the file
 also generates SSO configuration, the same role is used as its fallback default.
+Files with any `sso.<claim>` selectors must declare exactly one default role.
 
 ### Usage
 
