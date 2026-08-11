@@ -483,6 +483,34 @@ roles:
     assert payload["mappings"][2]["schema"]["required"] == ["email"]
 
 
+def test_static_role_without_sso_manages_role_without_sso_update(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles:
+  password-users:
+    config.policies: [public]
+    buckets.read: [private]
+""")
+
+    config = acl.parse_acl_config(config_path)
+    desired = acl._build_desired_acl_state(config)
+
+    assert config.roles["password-users"].sso == {}
+    assert desired.role_updates["password-users"].policy_titles == [
+        "public",
+        "password-users__inline",
+    ]
+    sso_text = acl.build_sso_config(config)
+    assert sso_text is not None
+    sso = yaml.safe_load(sso_text)
+    assert all(mapping["roles"] != ["password-users"] for mapping in sso["mappings"])
+
+
 def test_static_role_can_be_default_role(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
@@ -747,6 +775,63 @@ def test_compute_diff_warns_and_skips_unmanaged_name_collisions() -> None:
     )
     assert "public" not in [policy.title for policy in diff.policies_to_create]
     assert "exec" not in [role.name for role in diff.roles_to_create]
+
+
+def test_policy_drift_skips_unmanaged_name_collision() -> None:
+    desired = acl.AclConfig(
+        policies=[acl.AclPolicy(name="public", sso={"groups": ["Everyone"]})],
+        roles={},
+    )
+    current = _empty_current_state()
+    unmanaged = FakePolicy(
+        id="u-policy", title="public", managed=False, permissions=[], roles=[]
+    )
+    current.unmanaged_policies["public"] = unmanaged
+    current.all_policies["public"] = unmanaged
+
+    assert acl.detect_policy_drift(desired, current) == []
+
+
+def test_apply_acl_refetches_policy_after_failed_create() -> None:
+    persisted = FakePolicy(
+        id="policy-id", title="public", managed=True, permissions=[], roles=[]
+    )
+    role_policy_ids: list[list[str]] = []
+
+    def fail_create(_title: str, *, permissions: list[Any]) -> None:
+        raise RuntimeError("Internal Server Error")
+
+    stack = _fake_stack(
+        policies=SimpleNamespace(
+            create_managed=fail_create,
+            list=lambda: [persisted],
+        ),
+        roles=SimpleNamespace(
+            create_managed=lambda _name, *, policies: role_policy_ids.append(policies)
+        ),
+    )
+    diff = acl.AclDiff(
+        policies_to_create=[acl.PolicyUpdate(title="public", permissions=[])],
+        roles_to_create=[acl.RoleUpdate(name="public", policy_titles=["public"])],
+    )
+
+    warnings = acl.apply_acl(stack, diff, _empty_current_state())
+
+    assert role_policy_ids == [["policy-id"]]
+    assert any("could not be created" in warning for warning in warnings)
+
+
+def test_reset_policy_missing_on_server_is_directly_reapplied() -> None:
+    stack = _fake_stack(
+        policies=SimpleNamespace(
+            delete=lambda _ref: pytest.fail("missing policy must not be deleted")
+        )
+    )
+
+    warnings, users = acl.reset_policy(stack, "missing", _empty_current_state())
+
+    assert warnings == []
+    assert users == []
 
 
 def test_changing_policy_groups_updates_sso_config() -> None:

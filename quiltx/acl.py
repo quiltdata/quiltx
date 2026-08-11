@@ -852,6 +852,25 @@ def apply_acl(
                 f"  ! policy {policy.title}: {detail}{suffix}",
                 file=sys.stderr,
             )
+            # A registry mutation may persist successfully and still return a
+            # generic 500. Refetch so dependent roles can use the real policy
+            # ID instead of being skipped until a second run.
+            try:
+                persisted = next(
+                    (
+                        item
+                        for item in stack.admin.policies.list()
+                        if getattr(item, "title", None) == policy.title
+                        and bool(getattr(item, "managed", False))
+                    ),
+                    None,
+                )
+            except Exception:
+                persisted = None
+            if persisted is None:
+                continue
+            known_policies[policy.title] = persisted
+            print(f"  ~ policy {policy.title} (found after failed create)")
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
@@ -1148,6 +1167,10 @@ def detect_policy_drift(desired: AclConfig, current: CurrentState) -> list[Polic
     desired_state = _build_desired_acl_state(desired)
     drift: list[PolicyDrift] = []
     for title, policy_update in desired_state.policy_updates.items():
+        # Name collisions with unmanaged policies are intentionally skipped by
+        # reconciliation and must never be escalated into delete/reset recovery.
+        if title in current.unmanaged_policies:
+            continue
         current_policy = current.managed_policies.get(title)
         actual_permissions = (
             list(current_policy.permissions) if current_policy is not None else []
@@ -1181,7 +1204,7 @@ def _role_ref(role_name: str, current: CurrentState) -> str:
 
 
 def _policy_ref(policy_title: str, current: CurrentState) -> str:
-    policy = current.all_policies.get(policy_title)
+    policy = current.managed_policies.get(policy_title)
     if policy is None:
         raise ValueError(
             f"Policy '{policy_title}' was not present in the fetched current state"
@@ -1536,6 +1559,10 @@ def reset_policy(
     """
     warnings: list[str] = []
     user_snapshot: list[UserRoleBinding] = []
+    # A missing policy is the normal failed-create drift case. There is
+    # nothing destructive to reset; the caller's reapply will create it.
+    if title not in current.managed_policies:
+        return warnings, user_snapshot
     deleted = already_deleted_roles if already_deleted_roles is not None else set()
     roles_to_delete = [
         r for r in managed_roles_using_policy(title, current) if r not in deleted
@@ -1557,7 +1584,7 @@ def reset_policy(
     for role_name in roles_to_delete:
         try:
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
-            stack.admin.roles.delete(role_name)
+            stack.admin.roles.delete(_role_ref(role_name, current))
             print(f"  - role {role_name}")
         except Exception as exc:
             detail = format_exception(exc)
