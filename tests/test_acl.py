@@ -626,6 +626,30 @@ roles:
     assert acl.build_sso_config(config) is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("sso.groups", "[Everyone]", "cannot include sso"),
+        ("config.is_admin", "true", "config.is_admin is not valid"),
+        ("name", "CustomRole", "name is not valid"),
+    ],
+)
+def test_non_synthesizing_policy_rejects_role_only_fields(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text(f"""
+policies:
+  SharedPolicy:
+    config.synthesize: false
+    {field}: {value}
+roles: {{}}
+""")
+
+    with pytest.raises(ValueError, match=message):
+        acl.parse_acl_config(config_path)
+
+
 def test_static_role_without_sso_manages_role_without_sso_update(
     tmp_path: Path,
 ) -> None:
