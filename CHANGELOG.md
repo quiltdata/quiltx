@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-08-10
+
+### Fixed
+
+- ACL policy updates and deletes now resolve titles from the fetched policy list and pass UUIDs to quilt3, avoiding registry 500s from `policy(id:)` queries with policy titles.
+
 ## [0.16.4] - 2026-08-10
 
 ### Added
