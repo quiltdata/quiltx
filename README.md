@@ -19,11 +19,26 @@ uvx quiltx catalog default open.quiltdata.com
 uvx quiltx <tool> --help
 ```
 
-`quiltx catalog login` accepts either `--username` / `--password` (admin
-catalogs) or `--api-key qk_...` (paste an existing key, or the only path
-for SSO-only catalogs — see below). Both DNS names (`open.quiltdata.com`)
-and full URLs (`https://open.quiltdata.com/`) are accepted as `--catalog`
-arguments and normalized to the bare DNS.
+`quiltx catalog login` accepts either `--username` with a password supplied by
+an interactive prompt, `--password-stdin`, `QUILTX_PASSWORD`, or the legacy
+`--password` flag (admin catalogs), or `--api-key qk_...` (paste an existing
+key, or the only path for SSO-only catalogs — see below). Both DNS names
+(`open.quiltdata.com`) and full URLs (`https://open.quiltdata.com/`) are
+accepted as `--catalog` arguments and normalized to the bare DNS.
+
+For CI, use `--no-store` to avoid keyring and plaintext-file persistence. The
+command prints only the minted key to stdout, so it can be captured for reuse:
+
+```bash
+export QUILTX_API_KEY="$(
+  printf '%s\n' "$CATALOG_PASSWORD" |
+    uvx quiltx catalog login --catalog open.quiltdata.com \
+      --username you@example.com --password-stdin --no-store
+)"
+```
+
+Alternatively, set `QUILTX_PASSWORD` and omit `--password-stdin`. Status
+messages go to stderr; the API key is the only stdout output in no-store mode.
 
 ### Tools
 

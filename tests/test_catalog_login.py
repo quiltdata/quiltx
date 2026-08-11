@@ -373,3 +373,212 @@ def test_login_insecure_rejected_for_non_localhost(tmp_path, monkeypatch, capsys
     )
     assert rc == 2
     assert "localhost" in capsys.readouterr().err
+
+
+def test_login_uses_env_password_without_storing(monkeypatch, capsys):
+    """CI can mint a key without exposing argv or touching credential storage."""
+    bootstrap_calls: list[dict] = []
+
+    def fake_bootstrap(catalog_url, *, username, password, name, expires_in_days):
+        bootstrap_calls.append({"username": username, "password": password})
+        return {
+            "secret": "qk_ephemeral",
+            "name": name,
+            "expires_at": "2027-05-04T00:00:00Z",
+        }
+
+    monkeypatch.setenv("QUILTX_PASSWORD", "env-secret")
+    monkeypatch.setattr(quilt_auth, "bootstrap_api_key", fake_bootstrap)
+    monkeypatch.setattr(
+        credentials,
+        "store",
+        lambda *_a, **_kw: pytest.fail("--no-store touched credential storage"),
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--username",
+            "admin",
+            "--no-prompt",
+            "--no-store",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert bootstrap_calls == [{"username": "admin", "password": "env-secret"}]
+    assert captured.out == "qk_ephemeral\n"
+    assert "not stored" in captured.err
+    assert "qk_ephemeral" not in captured.err
+
+
+def test_login_password_stdin_overrides_environment(monkeypatch, capsys):
+    from io import StringIO
+
+    received_passwords: list[str] = []
+
+    def fake_bootstrap(catalog_url, *, username, password, name, expires_in_days):
+        received_passwords.append(password)
+        return {"secret": "qk_stdin", "name": name, "expires_at": None}
+
+    monkeypatch.setenv("QUILTX_PASSWORD", "env-secret")
+    monkeypatch.setattr("sys.stdin", StringIO("stdin secret\n"))
+    monkeypatch.setattr(quilt_auth, "bootstrap_api_key", fake_bootstrap)
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--username",
+            "admin",
+            "--password-stdin",
+            "--no-store",
+        ]
+    )
+
+    assert rc == 0
+    assert received_passwords == ["stdin secret"]
+    assert capsys.readouterr().out == "qk_stdin\n"
+
+
+def test_login_password_stdin_rejects_empty_input(monkeypatch, capsys):
+    from io import StringIO
+
+    monkeypatch.setattr("sys.stdin", StringIO(""))
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--username",
+            "admin",
+            "--password-stdin",
+            "--no-store",
+        ]
+    )
+
+    assert rc == 2
+    assert "No password was provided on stdin" in capsys.readouterr().err
+
+
+def test_login_password_option_requires_username(capsys):
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--password-stdin",
+            "--no-store",
+        ]
+    )
+
+    assert rc == 2
+    assert "--username is required" in capsys.readouterr().err
+
+
+def test_login_api_key_no_store_validates_without_persisting(monkeypatch, capsys):
+    validated: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        quilt_auth,
+        "validate_api_key",
+        lambda url, key: validated.append((url, key)),
+    )
+    monkeypatch.setattr(
+        credentials,
+        "store",
+        lambda *_a, **_kw: pytest.fail("--no-store touched credential storage"),
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--api-key",
+            "qk_existing",
+            "--no-store",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert validated == [("https://nightly.quilttest.com", "qk_existing")]
+    assert captured.out == "qk_existing\n"
+    assert "not stored" in captured.err
+
+
+def test_login_rejects_api_key_with_password_option(monkeypatch, capsys):
+    monkeypatch.setattr(
+        quilt_auth,
+        "validate_api_key",
+        lambda *_a, **_kw: pytest.fail("conflicting inputs reached validation"),
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--api-key",
+            "qk_existing",
+            "--password-stdin",
+        ]
+    )
+
+    assert rc == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_login_password_stdin_announces_interactive_read(monkeypatch, capsys):
+    from io import StringIO
+
+    stdin = StringIO("stdin-secret\n")
+    monkeypatch.setattr(stdin, "isatty", lambda: True)
+    monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setattr(
+        quilt_auth,
+        "bootstrap_api_key",
+        lambda catalog_url, **kwargs: {
+            "secret": "qk_stdin",
+            "name": kwargs["name"],
+            "expires_at": None,
+        },
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--username",
+            "admin",
+            "--password-stdin",
+            "--no-store",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == "qk_stdin\n"
+    assert "Reading password from stdin" in captured.err
+
+
+def test_login_rejects_empty_env_password(monkeypatch, capsys):
+    monkeypatch.setenv("QUILTX_PASSWORD", "")
+    monkeypatch.setattr(
+        quilt_auth,
+        "bootstrap_api_key",
+        lambda *_a, **_kw: pytest.fail("empty password reached bootstrap"),
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--username",
+            "admin",
+            "--no-prompt",
+            "--no-store",
+        ]
+    )
+
+    assert rc == 2
+    assert "QUILTX_PASSWORD is set but empty" in capsys.readouterr().err
