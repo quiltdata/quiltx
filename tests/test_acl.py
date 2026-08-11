@@ -483,6 +483,97 @@ roles:
     assert payload["mappings"][2]["schema"]["required"] == ["email"]
 
 
+def test_non_synthesizing_policy_is_reusable_without_ladder_role(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  SharedPolicy:
+    config.synthesize: false
+    buckets.read: [shared]
+roles:
+  Analysts:
+    config.policies: [SharedPolicy]
+""")
+
+    config = acl.parse_acl_config(config_path)
+    desired = acl._build_desired_acl_state(config)
+
+    assert config.policies[0].synthesize is False
+    assert list(desired.policy_updates) == ["SharedPolicy"]
+    assert list(desired.role_updates) == ["Analysts"]
+    assert desired.role_updates["Analysts"].policy_titles == ["SharedPolicy"]
+    assert acl.build_sso_config(config) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("sso.groups", "[Everyone]", "cannot include sso"),
+        ("config.is_admin", "true", "config.is_admin is not valid"),
+        ("name", "CustomRole", "name is not valid"),
+    ],
+)
+def test_non_synthesizing_policy_rejects_role_only_fields(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text(f"""
+policies:
+  SharedPolicy:
+    config.synthesize: false
+    {field}: {value}
+roles: {{}}
+""")
+
+    with pytest.raises(ValueError, match=message):
+        acl.parse_acl_config(config_path)
+
+
+def test_reusable_policy_is_excluded_from_mixed_synthesized_ladder() -> None:
+    config = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(name="public", sso={"groups": ["Everyone"]}),
+            acl.AclPolicy(name="SharedPolicy", synthesize=False),
+        ],
+        roles={
+            "Analysts": acl.AclStaticRole(name="Analysts", policies=["SharedPolicy"])
+        },
+    )
+
+    desired = acl._build_desired_acl_state(config)
+
+    assert [role.name for role in desired.synthesized_roles] == ["public"]
+    assert desired.role_updates["public"].policy_titles == ["public"]
+    assert desired.role_updates["Analysts"].policy_titles == ["SharedPolicy"]
+
+
+def test_switching_synthesized_policy_to_reusable_deletes_old_role() -> None:
+    original = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(
+                name="SharedPolicy",
+                sso={"groups": ["Everyone"]},
+                read=["shared"],
+            )
+        ],
+        roles={},
+    )
+    desired = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(name="SharedPolicy", read=["shared"], synthesize=False)
+        ],
+        roles={},
+    )
+
+    diff = acl.compute_diff(desired, _current_state_for_config(original))
+
+    assert diff.roles_to_delete == ["SharedPolicy"]
+    assert diff.policies_to_delete == []
+    assert diff.roles_to_create == []
+
+
 def test_static_role_without_sso_manages_role_without_sso_update(
     tmp_path: Path,
 ) -> None:

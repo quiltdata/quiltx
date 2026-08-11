@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.7] - 2026-08-10
+
+### Added
+
+- Policies may set `config.synthesize: false` to remain reusable managed policies without contributing to the cumulative role ladder or SSO mappings.
+
 ## [0.16.6] - 2026-08-10
 
 ### Added

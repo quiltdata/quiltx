@@ -22,6 +22,7 @@ ACL_ENTRY_KEYS = {
 }
 POLICY_ROLE_NAME_KEY = "name"
 CONFIG_POLICIES_KEY = "config.policies"
+CONFIG_SYNTHESIZE_KEY = "config.synthesize"
 EVERYONE_GROUP = "Everyone"
 REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
 REGISTRY_MANAGED_ROLE_EXCLUSIONS = frozenset({"Canary"})
@@ -36,6 +37,7 @@ class AclPolicy:
     default_role: bool = False
     is_admin: bool | None = None
     role_name: str | None = None
+    synthesize: bool = True
 
 
 @dataclass(frozen=True)
@@ -209,7 +211,37 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 f"'{INLINE_POLICY_SUFFIX}'; that suffix is reserved for generated "
                 "inline-role policies"
             )
-        entry = _parse_acl_entry(value, f"policies.{name}")
+        synthesize = value.get(CONFIG_SYNTHESIZE_KEY, True)
+        if not isinstance(synthesize, bool):
+            raise ValueError(
+                f"policies.{name}.{CONFIG_SYNTHESIZE_KEY} must be a boolean"
+            )
+        entry = _parse_acl_entry(
+            value,
+            f"policies.{name}",
+            require_sso_selector=synthesize,
+        )
+        if not synthesize:
+            if POLICY_ROLE_NAME_KEY in value:
+                raise ValueError(
+                    f"policies.{name}.{POLICY_ROLE_NAME_KEY} is not valid when "
+                    f"{CONFIG_SYNTHESIZE_KEY} is false because no role is synthesized"
+                )
+            if entry.sso:
+                raise ValueError(
+                    f"policies.{name} cannot include sso.<claim> selectors when "
+                    f"{CONFIG_SYNTHESIZE_KEY} is false"
+                )
+            if entry.default_role:
+                raise ValueError(
+                    f"policies.{name}.config.default_role cannot be true when "
+                    f"{CONFIG_SYNTHESIZE_KEY} is false"
+                )
+            if "config.is_admin" in value:
+                raise ValueError(
+                    f"policies.{name}.config.is_admin is not valid when "
+                    f"{CONFIG_SYNTHESIZE_KEY} is false because no role is synthesized"
+                )
         role_name = value.get(POLICY_ROLE_NAME_KEY)
         if role_name is not None:
             if not isinstance(role_name, str) or not role_name.strip():
@@ -223,6 +255,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             is_admin=entry.is_admin,
             default_role=entry.default_role,
             role_name=role_name,
+            synthesize=synthesize,
         )
         policies.append(policy)
         policy_names.add(name)
@@ -1623,6 +1656,8 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
             title=policy.name,
             permissions=_permissions_for_buckets(policy.read, policy.read_write),
         )
+        if not policy.synthesize:
+            continue
         cumulative_policy_titles.append(policy.name)
         if policy.is_admin is not None:
             cumulative_admin_votes.append((policy.name, policy.is_admin))
@@ -1739,7 +1774,7 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
 def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) -> None:
     allowed_keys = set(ACL_ENTRY_KEYS)
     if section == "policies":
-        allowed_keys.add(POLICY_ROLE_NAME_KEY)
+        allowed_keys.update({POLICY_ROLE_NAME_KEY, CONFIG_SYNTHESIZE_KEY})
     if section == "roles":
         allowed_keys.add(CONFIG_POLICIES_KEY)
     unknown_keys = sorted(
@@ -1797,7 +1832,8 @@ def _parse_acl_entry(
 
 
 def _validate_policy_ladder(policies: list[AclPolicy]) -> None:
-    for previous, current in zip(policies, policies[1:]):
+    synthesized_policies = [policy for policy in policies if policy.synthesize]
+    for previous, current in zip(synthesized_policies, synthesized_policies[1:]):
         if _policy_audience_is_compatible(current.sso, previous.sso):
             continue
         raise ValueError(
@@ -1830,6 +1866,8 @@ def _validate_synthetic_role_names(
     cumulative_policy_titles: list[str] = []
     generated_role_sources: dict[str, list[str]] = {}
     for policy in policies:
+        if not policy.synthesize:
+            continue
         cumulative_policy_titles.append(policy.name)
         role_name = policy.role_name or _synthesized_role_name(cumulative_policy_titles)
         if role_name in declared_role_names:
