@@ -483,6 +483,30 @@ roles:
     assert payload["mappings"][2]["schema"]["required"] == ["email"]
 
 
+def test_non_synthesizing_policy_is_reusable_without_ladder_role(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  SharedPolicy:
+    config.synthesize: false
+    buckets.read: [shared]
+roles:
+  Analysts:
+    config.policies: [SharedPolicy]
+""")
+
+    config = acl.parse_acl_config(config_path)
+    desired = acl._build_desired_acl_state(config)
+
+    assert config.policies[0].synthesize is False
+    assert list(desired.policy_updates) == ["SharedPolicy"]
+    assert list(desired.role_updates) == ["Analysts"]
+    assert desired.role_updates["Analysts"].policy_titles == ["SharedPolicy"]
+    assert acl.build_sso_config(config) is None
+
+
 def test_static_role_without_sso_manages_role_without_sso_update(
     tmp_path: Path,
 ) -> None:
