@@ -521,6 +521,12 @@ def print_current_state(current: CurrentState) -> None:
             f"admin={user.is_admin}, active={user.is_active}, "
             f"sso_only={user.is_sso_only}, service={user.is_service}"
         )
+        date_joined = _json_value(user.date_joined)
+        last_login = _json_value(user.last_login)
+        print(
+            f"    date joined: {date_joined if date_joined is not None else '(none)'}"
+        )
+        print(f"    last login: {last_login if last_login is not None else '(none)'}")
 
     if current.sso_config_text:
         print("  sso config")
