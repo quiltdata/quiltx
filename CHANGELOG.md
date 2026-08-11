@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-08-11
+
 ### Added
 
 - `quiltx catalog login` accepts passwords through `QUILTX_PASSWORD` or `--password-stdin`, and `--no-store` prints a minted key without accessing persistent credential storage for secure CI use.
