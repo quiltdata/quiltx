@@ -531,6 +531,49 @@ roles: {{}}
         acl.parse_acl_config(config_path)
 
 
+def test_reusable_policy_is_excluded_from_mixed_synthesized_ladder() -> None:
+    config = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(name="public", sso={"groups": ["Everyone"]}),
+            acl.AclPolicy(name="SharedPolicy", synthesize=False),
+        ],
+        roles={
+            "Analysts": acl.AclStaticRole(name="Analysts", policies=["SharedPolicy"])
+        },
+    )
+
+    desired = acl._build_desired_acl_state(config)
+
+    assert [role.name for role in desired.synthesized_roles] == ["public"]
+    assert desired.role_updates["public"].policy_titles == ["public"]
+    assert desired.role_updates["Analysts"].policy_titles == ["SharedPolicy"]
+
+
+def test_switching_synthesized_policy_to_reusable_deletes_old_role() -> None:
+    original = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(
+                name="SharedPolicy",
+                sso={"groups": ["Everyone"]},
+                read=["shared"],
+            )
+        ],
+        roles={},
+    )
+    desired = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(name="SharedPolicy", read=["shared"], synthesize=False)
+        ],
+        roles={},
+    )
+
+    diff = acl.compute_diff(desired, _current_state_for_config(original))
+
+    assert diff.roles_to_delete == ["SharedPolicy"]
+    assert diff.policies_to_delete == []
+    assert diff.roles_to_create == []
+
+
 def test_static_role_without_sso_manages_role_without_sso_update(
     tmp_path: Path,
 ) -> None:
