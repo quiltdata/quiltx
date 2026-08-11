@@ -502,7 +502,18 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     )
 
     current_users = {user.name: user for user in current.users}
+    available_user_roles = set(desired_state.role_updates) | set(
+        current.unmanaged_roles
+    )
     for name, configured_user in desired.users.items():
+        requested_roles = {configured_user.role, *configured_user.extra_roles}
+        unknown_roles = sorted(requested_roles - available_user_roles)
+        if unknown_roles:
+            diff.warnings.append(
+                f"Configured user '{name}' references unknown or unmanaged-for-deletion "
+                f"roles: {', '.join(unknown_roles)}; skipping."
+            )
+            continue
         current_user = current_users.get(name)
         if current_user is None:
             diff.notices.append(
@@ -923,13 +934,23 @@ def _apply_user_updates(
     failed_roles: set[str],
     *,
     verbose: bool,
+    role_updates_blocked: bool = False,
 ) -> list[str]:
     """Apply configured existing-user changes without creating or deleting users."""
     warnings: list[str] = []
     for update in updates:
+        role_assignment_failed = False
         if update.role_changed:
             unavailable = failed_roles & {update.role, *update.extra_roles}
-            if unavailable:
+            if role_updates_blocked:
+                role_assignment_failed = True
+                detail = "SSO config could not be cleared"
+                warnings.append(
+                    f"User '{update.name}' role assignment skipped: {detail}"
+                )
+                print(f"  ! user {update.name}: {detail}", file=sys.stderr)
+            elif unavailable:
+                role_assignment_failed = True
                 detail = "desired role creation failed: " + ", ".join(
                     sorted(unavailable)
                 )
@@ -948,6 +969,7 @@ def _apply_user_updates(
                     )
                     print(f"  ~ user {update.name} (roles)")
                 except Exception as exc:
+                    role_assignment_failed = True
                     detail = format_exception(exc)
                     warnings.append(
                         f"User '{update.name}' roles could not be updated: {detail}"
@@ -955,6 +977,13 @@ def _apply_user_updates(
                     print(f"  ! user {update.name}: {detail}", file=sys.stderr)
 
         if update.admin_changed:
+            if update.admin and role_assignment_failed:
+                detail = "role assignment failed"
+                warnings.append(
+                    f"User '{update.name}' admin elevation skipped: {detail}"
+                )
+                print(f"  ! user {update.name}: {detail}", file=sys.stderr)
+                continue
             _print_apply_step(f"update user {update.name} admin", verbose=verbose)
             try:
                 stack.admin.users.set_admin(update.name, bool(update.admin))
@@ -1178,10 +1207,12 @@ def apply_acl(
         if not failed_roles.intersection({update.role, *update.extra_roles})
     ]
     sso_cleared_for_user_roles = False
+    role_updates_blocked = False
     if applicable_user_role_updates and current.sso_config_text is not None:
         clear_warnings = clear_sso_config(stack, verbose=verbose)
         warnings.extend(clear_warnings)
         sso_cleared_for_user_roles = not clear_warnings
+        role_updates_blocked = bool(clear_warnings)
 
     if diff.users_to_update:
         warnings.extend(
@@ -1190,6 +1221,7 @@ def apply_acl(
                 diff.users_to_update,
                 failed_roles,
                 verbose=verbose,
+                role_updates_blocked=role_updates_blocked,
             )
         )
 
