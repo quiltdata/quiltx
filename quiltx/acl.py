@@ -13,13 +13,14 @@ from quilt3.admin.types import Permission
 from quiltx import stack as stack_lib
 
 INLINE_POLICY_SUFFIX = "__inline"
-ACL_TOP_LEVEL_KEYS = {"policies", "roles"}
+ACL_TOP_LEVEL_KEYS = {"policies", "roles", "users"}
 ACL_ENTRY_KEYS = {
     "buckets.read",
     "buckets.read_write",
     "config.default_role",
     "config.is_admin",
 }
+USER_ENTRY_KEYS = {"role", "extra_roles", "admin"}
 POLICY_ROLE_NAME_KEY = "name"
 CONFIG_POLICIES_KEY = "config.policies"
 CONFIG_SYNTHESIZE_KEY = "config.synthesize"
@@ -52,9 +53,17 @@ class AclStaticRole:
 
 
 @dataclass(frozen=True)
+class AclUserConfig:
+    role: str
+    extra_roles: tuple[str, ...] = ()
+    admin: bool | None = None
+
+
+@dataclass(frozen=True)
 class AclConfig:
     policies: list[AclPolicy]
     roles: dict[str, AclStaticRole]
+    users: dict[str, AclUserConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,16 @@ class RoleUpdate:
     policy_titles: list[str]
 
 
+@dataclass(frozen=True)
+class AclUserUpdate:
+    name: str
+    role: str
+    extra_roles: tuple[str, ...] = ()
+    role_changed: bool = False
+    admin: bool | None = None
+    admin_changed: bool = False
+
+
 @dataclass
 class AclDiff:
     buckets_to_add: list[str] = field(default_factory=list)
@@ -96,6 +115,8 @@ class AclDiff:
     sso_is_create: bool = False
     sso_needs_update: bool = False
     warnings: list[str] = field(default_factory=list)
+    users_to_update: list[AclUserUpdate] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
 
     def has_changes(self) -> bool:
         return any(
@@ -107,6 +128,7 @@ class AclDiff:
                 self.roles_to_create,
                 self.roles_to_update,
                 self.roles_to_delete,
+                self.users_to_update,
                 self.sso_needs_update,
             )
         )
@@ -190,11 +212,14 @@ def parse_acl_config(path: str | Path) -> AclConfig:
 
     raw_policies = raw.get("policies") or {}
     raw_roles = raw.get("roles") or {}
+    raw_users = raw.get("users", {})
 
     if not isinstance(raw_policies, dict):
         raise ValueError("'policies' must be a mapping")
     if not isinstance(raw_roles, dict):
         raise ValueError("'roles' must be a mapping")
+    if not isinstance(raw_users, dict):
+        raise ValueError("'users' must be a mapping")
 
     policies: list[AclPolicy] = []
     policy_names: set[str] = set()
@@ -312,6 +337,43 @@ def parse_acl_config(path: str | Path) -> AclConfig:
         if entry.default_role:
             default_role_sources.append(f"roles.{name}")
 
+    users: dict[str, AclUserConfig] = {}
+    for name, value in raw_users.items():
+        if not isinstance(name, str):
+            raise ValueError("User names must be strings")
+        if not isinstance(value, dict):
+            raise ValueError(f"User '{name}' must be a mapping")
+        unknown_fields = set(value) - USER_ENTRY_KEYS
+        if unknown_fields:
+            raise ValueError(
+                f"Unknown fields in users.{name}: "
+                + ", ".join(sorted(str(field) for field in unknown_fields))
+            )
+        if "role" not in value:
+            raise ValueError(f"users.{name}.role is required")
+        role = value["role"]
+        if not isinstance(role, str) or not role.strip():
+            raise ValueError(f"users.{name}.role must be a non-empty string")
+        role = role.strip()
+        extra_roles = _coerce_string_list(
+            value.get("extra_roles", []), f"users.{name}.extra_roles"
+        )
+        extra_roles = _dedupe_preserve_order(extra_roles)
+        if role in extra_roles:
+            raise ValueError(
+                f"users.{name}.extra_roles must not include primary role '{role}'"
+            )
+        admin: bool | None = None
+        if "admin" in value:
+            admin = value["admin"]
+            if not isinstance(admin, bool):
+                raise ValueError(f"users.{name}.admin must be a boolean")
+        users[name] = AclUserConfig(
+            role=role,
+            extra_roles=tuple(extra_roles),
+            admin=admin,
+        )
+
     if len(default_role_sources) > 1:
         raise ValueError(
             "Only one ACL entry may set config.default_role: true; found "
@@ -324,6 +386,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
     return AclConfig(
         policies=policies,
         roles=roles,
+        users=users,
     )
 
 
@@ -438,6 +501,37 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         and name not in REGISTRY_MANAGED_ROLE_EXCLUSIONS
     )
 
+    current_users = {user.name: user for user in current.users}
+    for name, configured_user in desired.users.items():
+        current_user = current_users.get(name)
+        if current_user is None:
+            diff.notices.append(
+                f"Configured user '{name}' does not exist on the server; skipping."
+            )
+            continue
+        current_role = current_user.role.name if current_user.role else None
+        current_extras = tuple(
+            role.name for role in (current_user.extra_roles or []) if role is not None
+        )
+        role_changed = (
+            current_role != configured_user.role
+            or current_extras != configured_user.extra_roles
+        )
+        admin_changed = configured_user.admin is not None and (
+            bool(current_user.is_admin) != configured_user.admin
+        )
+        if role_changed or admin_changed:
+            diff.users_to_update.append(
+                AclUserUpdate(
+                    name=name,
+                    role=configured_user.role,
+                    extra_roles=configured_user.extra_roles,
+                    role_changed=role_changed,
+                    admin=configured_user.admin,
+                    admin_changed=admin_changed,
+                )
+            )
+
     desired_sso_text = build_sso_config(desired)
     if desired_sso_text is not None and not _same_yaml(
         current.sso_config_text, desired_sso_text
@@ -489,9 +583,11 @@ def print_diff(
     """Print a readable summary of ACL changes."""
     if verbose and desired is not None:
         _print_verbose_state(diff, desired, current)
+        for notice in diff.notices:
+            print(f"NONFATAL: {notice}")
         for warning in diff.warnings:
             print(f"! {warning}")
-        if not diff.has_changes() and not diff.warnings:
+        if not diff.has_changes() and not diff.warnings and not diff.notices:
             print("Stack ACL is up to date")
         return
 
@@ -512,6 +608,14 @@ def print_diff(
     for name in diff.roles_to_delete:
         print(f"- role {name}")
 
+    for user in diff.users_to_update:
+        changes: list[str] = []
+        if user.role_changed:
+            changes.append("roles")
+        if user.admin_changed:
+            changes.append("admin")
+        print(f"~ user {user.name} ({', '.join(changes)})")
+
     if diff.sso_needs_update:
         prefix = "+" if diff.sso_is_create else "~"
         print(f"{prefix} sso config")
@@ -519,10 +623,12 @@ def print_diff(
             for line in diff.sso_config_text.rstrip().splitlines():
                 print(f"    {line}")
 
+    for notice in diff.notices:
+        print(f"NONFATAL: {notice}")
     for warning in diff.warnings:
         print(f"! {warning}")
 
-    if not diff.has_changes() and not diff.warnings:
+    if not diff.has_changes() and not diff.warnings and not diff.notices:
         print("Stack ACL is up to date")
 
 
@@ -811,6 +917,57 @@ def _prune_sso_config_for_missing_roles(
     return yaml.safe_dump(payload, sort_keys=False), dropped
 
 
+def _apply_user_updates(
+    stack: stack_lib.Catalog,
+    updates: list[AclUserUpdate],
+    failed_roles: set[str],
+    *,
+    verbose: bool,
+) -> list[str]:
+    """Apply configured existing-user changes without creating or deleting users."""
+    warnings: list[str] = []
+    for update in updates:
+        if update.role_changed:
+            unavailable = failed_roles & {update.role, *update.extra_roles}
+            if unavailable:
+                detail = "desired role creation failed: " + ", ".join(
+                    sorted(unavailable)
+                )
+                warnings.append(
+                    f"User '{update.name}' role assignment skipped: {detail}"
+                )
+                print(f"  ! user {update.name}: {detail}", file=sys.stderr)
+            else:
+                _print_apply_step(f"update user {update.name} roles", verbose=verbose)
+                try:
+                    stack.admin.users.set_role(
+                        update.name,
+                        update.role,
+                        extra_roles=list(update.extra_roles) or None,
+                        append=False,
+                    )
+                    print(f"  ~ user {update.name} (roles)")
+                except Exception as exc:
+                    detail = format_exception(exc)
+                    warnings.append(
+                        f"User '{update.name}' roles could not be updated: {detail}"
+                    )
+                    print(f"  ! user {update.name}: {detail}", file=sys.stderr)
+
+        if update.admin_changed:
+            _print_apply_step(f"update user {update.name} admin", verbose=verbose)
+            try:
+                stack.admin.users.set_admin(update.name, bool(update.admin))
+                print(f"  ~ user {update.name} (admin={update.admin})")
+            except Exception as exc:
+                detail = format_exception(exc)
+                warnings.append(
+                    f"User '{update.name}' admin status could not be updated: {detail}"
+                )
+                print(f"  ! user {update.name}: {detail}", file=sys.stderr)
+    return warnings
+
+
 def apply_acl(
     stack: stack_lib.Catalog,
     diff: AclDiff,
@@ -993,7 +1150,32 @@ def apply_acl(
             continue
         print(f"  ~ role {role.name}")
 
+    user_role_updates = [
+        update for update in diff.users_to_update if update.role_changed
+    ]
+    applicable_user_role_updates = [
+        update
+        for update in user_role_updates
+        if not failed_roles.intersection({update.role, *update.extra_roles})
+    ]
+    sso_cleared_for_user_roles = False
+    if applicable_user_role_updates and current.sso_config_text is not None:
+        clear_warnings = clear_sso_config(stack, verbose=verbose)
+        warnings.extend(clear_warnings)
+        sso_cleared_for_user_roles = not clear_warnings
+
+    if diff.users_to_update:
+        warnings.extend(
+            _apply_user_updates(
+                stack,
+                diff.users_to_update,
+                failed_roles,
+                verbose=verbose,
+            )
+        )
+
     sso_text_to_restore = current.sso_config_text
+    sso_update_succeeded = False
     if diff.sso_needs_update and diff.sso_config_text is not None:
         _print_apply_step("update sso config", verbose=verbose)
         # Failed roles would make the registry reject the entire SSO config
@@ -1039,9 +1221,23 @@ def apply_acl(
                 warnings.append(f"SSO config could not be updated: {detail}")
                 print(f"  ! sso config: {detail}", file=sys.stderr)
             else:
+                sso_update_succeeded = True
                 sso_text_to_restore = pruned_text
                 prefix = "+" if diff.sso_is_create else "~"
                 print(f"  {prefix} sso config")
+
+    if sso_cleared_for_user_roles and not sso_update_succeeded:
+        _print_apply_step("restore sso config after user updates", verbose=verbose)
+        try:
+            stack.admin.sso_config.set(sso_text_to_restore)
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"SSO config could not be restored after user updates: {detail}"
+            )
+            print(f"  ! sso config: {detail}", file=sys.stderr)
+        else:
+            print("  ~ sso config (restored after user updates)")
 
     sso_cleared_for_role_delete = False
     roles_to_delete = set(diff.roles_to_delete)
@@ -1928,6 +2124,22 @@ def _print_verbose_state(
             print(f"    inline policy: {role.inline_policy_title}")
         if role.is_admin:
             print("    admin: true")
+
+    updated_users = {user.name for user in diff.users_to_update}
+    current_user_names = (
+        {user.name for user in current.users} if current is not None else set()
+    )
+    for name, user in desired.users.items():
+        prefix = (
+            "~"
+            if name in updated_users
+            else "=" if current is None or name in current_user_names else "?"
+        )
+        print(f"{prefix} user {name}")
+        print(f"    role: {user.role}")
+        print(f"    extra_roles: {', '.join(user.extra_roles) or '(none)'}")
+        if user.admin is not None:
+            print(f"    admin: {str(user.admin).lower()}")
 
     desired_sso_text = build_sso_config(desired)
     if desired_sso_text is not None:

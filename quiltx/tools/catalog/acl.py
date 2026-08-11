@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quiltx catalog acl",
         description=(
             "Reconcile Quilt ACLs from flat YAML with top-level "
-            "'policies:' and 'roles:' blocks."
+            "'policies:', 'roles:', and optional 'users:' blocks."
         ),
     )
     add_catalog_args(parser, auth_required=True)

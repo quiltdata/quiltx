@@ -6,6 +6,8 @@ from quiltx._version import __version__ as __version__
 from quiltx.acl import (
     AclConfig as AclConfig,
     AclDiff as AclDiff,
+    AclUserConfig as AclUserConfig,
+    AclUserUpdate as AclUserUpdate,
     CurrentState as CurrentState,
     all_buckets as all_buckets,
     apply_acl as apply_acl,
@@ -25,6 +27,8 @@ __all__ = [
     "__version__",
     "AclConfig",
     "AclDiff",
+    "AclUserConfig",
+    "AclUserUpdate",
     "Catalog",
     "CurrentState",
     "all_buckets",
