@@ -1,17 +1,20 @@
-"""quiltx catalog login: mint a qk_... API key and store it.
+"""quiltx catalog login: mint a qk_... API key.
 
 Three paths (in priority order):
 
 1. ``--api-key qk_...`` — paste an existing key; validated, then stored.
-2. ``--username`` (and/or ``--password``, or interactive prompt with
-   ``--no-browser``) — POST to ``/api/login``, then exchange refresh_token
-   → access_token → GraphQL ``apiKeyCreate``. SSO-only catalogs reject
-   this path at ``/api/login``.
+2. ``--username`` with a password from ``--password``, ``--password-stdin``,
+   ``QUILTX_PASSWORD``, or an interactive prompt — POST to ``/api/login``, then
+   exchange refresh_token → access_token → GraphQL ``apiKeyCreate``. SSO-only
+   catalogs reject this path at ``/api/login``.
 3. **Default** (interactive TTY, no ``--username``/``--api-key``,
    ``--no-browser`` not set): browser flow. Open ``<registry>/login`` in
    the user's browser, prompt them to paste back the code shown on that
    page (the refresh_token), then mint the API key. Works with any auth
    backend the catalog supports — including SSO.
+
+Keys are stored by default. ``--no-store`` skips all credential persistence and
+prints the key to stdout for use by automation.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import getpass
+import os
 import socket
 import sys
 
@@ -72,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Default: open the catalog login page in a browser, then paste "
             "back the code shown there (works with SSO). Use --username for "
             "username/password bootstrap, or --api-key to store an existing "
-            "key directly."
+            "key directly. Use --no-store for ephemeral automation."
         ),
     )
     add_catalog_args(parser, auth_required=True)
@@ -80,11 +84,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--username",
         help="Catalog admin username for U/P -> API-key bootstrap.",
     )
-    parser.add_argument(
+    password_group = parser.add_mutually_exclusive_group()
+    password_group.add_argument(
         "--password",
         help=(
             "Catalog admin password. INSECURE: visible in `ps`/process listings; "
-            "prefer omitting it so you are prompted via getpass on TTY."
+            "prefer --password-stdin, QUILTX_PASSWORD, or an interactive prompt."
+        ),
+    )
+    password_group.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="Read the catalog admin password from the first line of stdin.",
+    )
+    parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help=(
+            "Do not persist the API key; print only the key to stdout for "
+            "capture as QUILTX_API_KEY."
         ),
     )
     parser.add_argument(
@@ -180,8 +198,9 @@ def mint_api_key(
     no_prompt: bool = False,
     key_name: str | None = None,
     expires_in_days: int = 365,
+    store: bool = True,
 ) -> MintedApiKey:
-    """Mint and store a catalog API key using browser SSO or U/P fallback."""
+    """Mint a catalog API key and optionally store it."""
     interactive = not no_prompt and sys.stdin.isatty()
     name = key_name or _default_key_name()
 
@@ -190,7 +209,8 @@ def mint_api_key(
         if resolved_password is None:
             if not interactive:
                 raise LoginUsageError(
-                    "--password is required when --username is set headlessly."
+                    "A password is required when --username is set headlessly. "
+                    "Use --password-stdin, QUILTX_PASSWORD, or --password."
                 )
             try:
                 resolved_password = getpass.getpass(f"Password for {username}@{dns}: ")
@@ -214,7 +234,7 @@ def mint_api_key(
     else:
         if not interactive:
             raise LoginUsageError(
-                "--username/--password or interactive TTY is required "
+                "--username with a password source or interactive TTY is required "
                 "(browser flow needs a TTY for paste-back)."
             )
         try:
@@ -241,7 +261,8 @@ def mint_api_key(
 
     secret = str(result["secret"])
     expires_at = _parse_expires_at(result.get("expires_at"))
-    credentials.store(dns, secret, name=name, expires_at=expires_at)
+    if store:
+        credentials.store(dns, secret, name=name, expires_at=expires_at)
     return MintedApiKey(secret=secret, name=name, expires_at=expires_at)
 
 
@@ -251,6 +272,41 @@ def print_stored_message(minted: MintedApiKey, dns: str) -> None:
         expiry_dt = _dt.datetime.fromtimestamp(minted.expires_at, _dt.timezone.utc)
         pretty_expiry = f" (expires {expiry_dt.strftime('%Y-%m-%d')})"
     print(f"Stored API key '{minted.name}' for {dns}{pretty_expiry}.", file=sys.stderr)
+
+
+def print_unstored_message(minted: MintedApiKey, dns: str) -> None:
+    """Report a successful ephemeral mint without writing the secret to stderr."""
+    pretty_expiry = ""
+    if minted.expires_at:
+        expiry_dt = _dt.datetime.fromtimestamp(minted.expires_at, _dt.timezone.utc)
+        pretty_expiry = f" (expires {expiry_dt.strftime('%Y-%m-%d')})"
+    print(
+        f"Minted API key '{minted.name}' for {dns}{pretty_expiry}; not stored.",
+        file=sys.stderr,
+    )
+
+
+def _resolve_password(args: argparse.Namespace) -> str | None:
+    """Resolve a password using CLI, stdin, then environment precedence."""
+    if args.username is None:
+        if args.password is not None or args.password_stdin:
+            raise LoginUsageError("--username is required with a password option.")
+        return None
+
+    if args.password is not None:
+        return args.password
+
+    if args.password_stdin:
+        try:
+            password = sys.stdin.readline()
+        except (KeyboardInterrupt, OSError) as exc:
+            raise LoginUsageError("Could not read the password from stdin.") from exc
+        password = password.removesuffix("\n").removesuffix("\r")
+        if not password:
+            raise LoginUsageError("No password was provided on stdin.")
+        return password
+
+    return os.environ.get("QUILTX_PASSWORD") or None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -272,9 +328,8 @@ def main(argv: list[str] | None = None) -> int:
 
     catalog_url = build_catalog_url(dns, insecure=args.insecure)
 
-    # Path 1: explicit --api-key (paste). Validate against the catalog
-    # before persisting so a bad paste does not silently land in the
-    # keyring and surface as a confusing auth error on the next command.
+    # Path 1: explicit --api-key (paste). Validate against the catalog before
+    # optionally persisting so a bad paste never lands in credential storage.
     if args.api_key:
         if not args.api_key.startswith("qk_"):
             print("Error: API key must start with the 'qk_' prefix.", file=sys.stderr)
@@ -286,26 +341,36 @@ def main(argv: list[str] | None = None) -> int:
                 f"Error: pasted API key was rejected by {dns}: {exc}", file=sys.stderr
             )
             return 1
-        credentials.store(dns, args.api_key, name=None, expires_at=None)
-        print(f"Stored API key for {dns}.")
+        if args.no_store:
+            print(args.api_key)
+            print(f"Validated API key for {dns}; not stored.", file=sys.stderr)
+        else:
+            credentials.store(dns, args.api_key, name=None, expires_at=None)
+            print(f"Stored API key for {dns}.")
         return 0
 
     try:
+        password = _resolve_password(args)
         minted = mint_api_key(
             catalog_url,
             dns,
             username=args.username,
-            password=args.password,
+            password=password,
             no_browser=args.no_browser,
             no_prompt=args.no_prompt,
             key_name=args.key_name,
             expires_in_days=args.expires_in_days,
+            store=not args.no_store,
         )
     except LoginError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2 if isinstance(exc, LoginUsageError) else 1
 
-    print_stored_message(minted, dns)
+    if args.no_store:
+        print(minted.secret)
+        print_unstored_message(minted, dns)
+    else:
+        print_stored_message(minted, dns)
     return 0
 
 
