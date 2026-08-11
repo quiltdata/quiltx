@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.8] - 2026-08-10
+
+### Added
+
+- Declarative reconciliation of existing users' primary role, ordered extra roles, and optional administrator status through a top-level `users:` mapping.
+
 ## [0.16.7] - 2026-08-10
 
 ### Added

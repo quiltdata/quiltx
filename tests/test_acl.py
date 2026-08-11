@@ -483,6 +483,125 @@ roles:
     assert payload["mappings"][2]["schema"]["required"] == ["email"]
 
 
+def test_user_block_reconciles_primary_extra_roles_and_admin() -> None:
+    roles = {
+        "Old": acl.AclStaticRole(name="Old"),
+        "New": acl.AclStaticRole(name="New"),
+        "Extra": acl.AclStaticRole(name="Extra"),
+    }
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    current.users.append(
+        SimpleNamespace(
+            name="alice",
+            role=current.managed_roles["Old"],
+            extra_roles=[],
+            is_admin=False,
+        )
+    )
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={
+            "alice": acl.AclUserConfig(role="New", extra_roles=("Extra",), admin=True)
+        },
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.users_to_update == [
+        acl.AclUserUpdate(
+            name="alice",
+            role="New",
+            extra_roles=("Extra",),
+            role_changed=True,
+            admin=True,
+            admin_changed=True,
+        )
+    ]
+
+
+def test_user_role_update_is_skipped_when_sso_clear_fails() -> None:
+    role_calls: list[Any] = []
+    admin_calls: list[Any] = []
+    stack = _fake_stack(
+        users=SimpleNamespace(
+            set_role=lambda *args, **kwargs: role_calls.append((args, kwargs)),
+            set_admin=lambda *args: admin_calls.append(args),
+        ),
+        sso_config=SimpleNamespace(
+            set=lambda _text: (_ for _ in ()).throw(RuntimeError("clear failed"))
+        ),
+    )
+    current = replace(_empty_current_state(), sso_config_text="version: '1.0'")
+    diff = acl.AclDiff(
+        users_to_update=[
+            acl.AclUserUpdate(
+                name="alice",
+                role="New",
+                role_changed=True,
+                admin=True,
+                admin_changed=True,
+            )
+        ]
+    )
+
+    warnings = acl.apply_acl(stack, diff, current)
+
+    assert role_calls == []
+    assert admin_calls == []
+    assert any("SSO config could not be cleared" in warning for warning in warnings)
+    assert any("role assignment skipped" in warning for warning in warnings)
+    assert any("admin elevation skipped" in warning for warning in warnings)
+
+
+def test_user_admin_elevation_is_skipped_when_role_update_fails() -> None:
+    admin_calls: list[Any] = []
+
+    def fail_role(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("role update failed")
+
+    stack = _fake_stack(
+        users=SimpleNamespace(
+            set_role=fail_role,
+            set_admin=lambda *args: admin_calls.append(args),
+        )
+    )
+    diff = acl.AclDiff(
+        users_to_update=[
+            acl.AclUserUpdate(
+                name="alice",
+                role="New",
+                role_changed=True,
+                admin=True,
+                admin_changed=True,
+            )
+        ]
+    )
+
+    warnings = acl.apply_acl(stack, diff, _empty_current_state())
+
+    assert admin_calls == []
+    assert any("roles could not be updated" in warning for warning in warnings)
+    assert any("admin elevation skipped" in warning for warning in warnings)
+
+
+def test_user_block_skips_unknown_role() -> None:
+    current = _empty_current_state()
+    current.users.append(
+        SimpleNamespace(name="alice", role=None, extra_roles=[], is_admin=False)
+    )
+    desired = acl.AclConfig(
+        policies=[],
+        roles={},
+        users={"alice": acl.AclUserConfig(role="Missing")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.users_to_update == []
+    assert any("roles: Missing; skipping" in warning for warning in diff.warnings)
+
+
 def test_non_synthesizing_policy_is_reusable_without_ladder_role(
     tmp_path: Path,
 ) -> None:
