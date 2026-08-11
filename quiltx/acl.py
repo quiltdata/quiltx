@@ -243,7 +243,17 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 f"Role '{name}' conflicts with reserved generated inline policy "
                 f"'{reserved_inline_policy}'"
             )
-        entry = _parse_acl_entry(value, f"roles.{name}")
+        entry = _parse_acl_entry(value, f"roles.{name}", require_sso_selector=False)
+        if not entry.sso and entry.default_role:
+            raise ValueError(
+                f"roles.{name}.config.default_role cannot be true without an "
+                "sso.<claim> selector"
+            )
+        if not entry.sso and entry.is_admin:
+            raise ValueError(
+                f"roles.{name}.config.is_admin cannot be true without an "
+                "sso.<claim> selector"
+            )
         policy_refs = _coerce_string_list(
             value.get(CONFIG_POLICIES_KEY, []), f"roles.{name}.{CONFIG_POLICIES_KEY}"
         )
@@ -842,6 +852,25 @@ def apply_acl(
                 f"  ! policy {policy.title}: {detail}{suffix}",
                 file=sys.stderr,
             )
+            # A registry mutation may persist successfully and still return a
+            # generic 500. Refetch so dependent roles can use the real policy
+            # ID instead of being skipped until a second run.
+            try:
+                persisted = next(
+                    (
+                        item
+                        for item in stack.admin.policies.list()
+                        if getattr(item, "title", None) == policy.title
+                        and bool(getattr(item, "managed", False))
+                    ),
+                    None,
+                )
+            except Exception:
+                persisted = None
+            if persisted is None:
+                continue
+            known_policies[policy.title] = persisted
+            print(f"  ~ policy {policy.title} (found after failed create)")
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
@@ -1138,6 +1167,10 @@ def detect_policy_drift(desired: AclConfig, current: CurrentState) -> list[Polic
     desired_state = _build_desired_acl_state(desired)
     drift: list[PolicyDrift] = []
     for title, policy_update in desired_state.policy_updates.items():
+        # Name collisions with unmanaged policies are intentionally skipped by
+        # reconciliation and must never be escalated into delete/reset recovery.
+        if title in current.unmanaged_policies:
+            continue
         current_policy = current.managed_policies.get(title)
         actual_permissions = (
             list(current_policy.permissions) if current_policy is not None else []
@@ -1171,7 +1204,7 @@ def _role_ref(role_name: str, current: CurrentState) -> str:
 
 
 def _policy_ref(policy_title: str, current: CurrentState) -> str:
-    policy = current.all_policies.get(policy_title)
+    policy = current.managed_policies.get(policy_title)
     if policy is None:
         raise ValueError(
             f"Policy '{policy_title}' was not present in the fetched current state"
@@ -1526,6 +1559,10 @@ def reset_policy(
     """
     warnings: list[str] = []
     user_snapshot: list[UserRoleBinding] = []
+    # A missing policy is the normal failed-create drift case. There is
+    # nothing destructive to reset; the caller's reapply will create it.
+    if title not in current.managed_policies:
+        return warnings, user_snapshot
     deleted = already_deleted_roles if already_deleted_roles is not None else set()
     roles_to_delete = [
         r for r in managed_roles_using_policy(title, current) if r not in deleted
@@ -1547,7 +1584,7 @@ def reset_policy(
     for role_name in roles_to_delete:
         try:
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
-            stack.admin.roles.delete(role_name)
+            stack.admin.roles.delete(_role_ref(role_name, current))
             print(f"  - role {role_name}")
         except Exception as exc:
             detail = format_exception(exc)
@@ -1731,8 +1768,13 @@ def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) 
     )
 
 
-def _parse_acl_entry(value: dict[str, Any], field_name: str) -> _ParsedAclEntry:
-    sso = _coerce_sso_selectors(value, field_name)
+def _parse_acl_entry(
+    value: dict[str, Any],
+    field_name: str,
+    *,
+    require_sso_selector: bool = True,
+) -> _ParsedAclEntry:
+    sso = _coerce_sso_selectors(value, field_name, required=require_sso_selector)
     read = _coerce_string_list(
         value.get("buckets.read", []), f"{field_name}.buckets.read"
     )
@@ -1919,7 +1961,7 @@ def _print_sso_summary(sso_text: str) -> None:
 
 
 def _coerce_sso_selectors(
-    value: dict[str, Any], section_name: str
+    value: dict[str, Any], section_name: str, *, required: bool = True
 ) -> dict[str, list[str]]:
     sso: dict[str, list[str]] = {}
     for key, raw_values in value.items():
@@ -1930,7 +1972,7 @@ def _coerce_sso_selectors(
             raise ValueError(f"'{section_name}.{key}' must include a claim name")
         values = _coerce_non_empty_string_list(raw_values, f"{section_name}.{key}")
         sso[claim] = _dedupe_preserve_order(values)
-    if not sso:
+    if required and not sso:
         raise ValueError(
             f"'{section_name}' must include at least one sso.<claim> selector"
         )
