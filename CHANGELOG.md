@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-10
+
+### Added
+
+- Formal release of declarative catalog ACL management, including managed policies and roles, SSO mappings, user assignments, default-role reconciliation, and replayable YAML export.
+
 ## [0.16.10] - 2026-08-10
 
 ### Fixed
