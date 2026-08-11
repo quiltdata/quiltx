@@ -502,7 +502,18 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     )
 
     current_users = {user.name: user for user in current.users}
+    available_user_roles = set(desired_state.role_updates) | set(
+        current.unmanaged_roles
+    )
     for name, configured_user in desired.users.items():
+        requested_roles = {configured_user.role, *configured_user.extra_roles}
+        unknown_roles = sorted(requested_roles - available_user_roles)
+        if unknown_roles:
+            diff.warnings.append(
+                f"Configured user '{name}' references unknown or unmanaged-for-deletion "
+                f"roles: {', '.join(unknown_roles)}; skipping."
+            )
+            continue
         current_user = current_users.get(name)
         if current_user is None:
             diff.notices.append(
@@ -1172,13 +1183,23 @@ def _apply_user_updates(
     failed_roles: set[str],
     *,
     verbose: bool,
+    role_updates_blocked: bool = False,
 ) -> list[str]:
     """Apply configured existing-user changes without creating or deleting users."""
     warnings: list[str] = []
     for update in updates:
+        role_assignment_failed = False
         if update.role_changed:
             unavailable = failed_roles & {update.role, *update.extra_roles}
-            if unavailable:
+            if role_updates_blocked:
+                role_assignment_failed = True
+                detail = "SSO config could not be cleared"
+                warnings.append(
+                    f"User '{update.name}' role assignment skipped: {detail}"
+                )
+                print(f"  ! user {update.name}: {detail}", file=sys.stderr)
+            elif unavailable:
+                role_assignment_failed = True
                 detail = "desired role creation failed: " + ", ".join(
                     sorted(unavailable)
                 )
@@ -1197,6 +1218,7 @@ def _apply_user_updates(
                     )
                     print(f"  ~ user {update.name} (roles)")
                 except Exception as exc:
+                    role_assignment_failed = True
                     detail = format_exception(exc)
                     warnings.append(
                         f"User '{update.name}' roles could not be updated: {detail}"
@@ -1204,6 +1226,13 @@ def _apply_user_updates(
                     print(f"  ! user {update.name}: {detail}", file=sys.stderr)
 
         if update.admin_changed:
+            if update.admin and role_assignment_failed:
+                detail = "role assignment failed"
+                warnings.append(
+                    f"User '{update.name}' admin elevation skipped: {detail}"
+                )
+                print(f"  ! user {update.name}: {detail}", file=sys.stderr)
+                continue
             _print_apply_step(f"update user {update.name} admin", verbose=verbose)
             try:
                 stack.admin.users.set_admin(update.name, bool(update.admin))
@@ -1291,6 +1320,25 @@ def apply_acl(
                 f"  ! policy {policy.title}: {detail}{suffix}",
                 file=sys.stderr,
             )
+            # A registry mutation may persist successfully and still return a
+            # generic 500. Refetch so dependent roles can use the real policy
+            # ID instead of being skipped until a second run.
+            try:
+                persisted = next(
+                    (
+                        item
+                        for item in stack.admin.policies.list()
+                        if getattr(item, "title", None) == policy.title
+                        and bool(getattr(item, "managed", False))
+                    ),
+                    None,
+                )
+            except Exception:
+                persisted = None
+            if persisted is None:
+                continue
+            known_policies[policy.title] = persisted
+            print(f"  ~ policy {policy.title} (found after failed create)")
             continue
         known_policies[policy.title] = created
         print(f"  + policy {policy.title}")
@@ -1408,10 +1456,12 @@ def apply_acl(
         if not failed_roles.intersection({update.role, *update.extra_roles})
     ]
     sso_cleared_for_user_roles = False
+    role_updates_blocked = False
     if applicable_user_role_updates and current.sso_config_text is not None:
         clear_warnings = clear_sso_config(stack, verbose=verbose)
         warnings.extend(clear_warnings)
         sso_cleared_for_user_roles = not clear_warnings
+        role_updates_blocked = bool(clear_warnings)
 
     if diff.users_to_update:
         warnings.extend(
@@ -1420,6 +1470,7 @@ def apply_acl(
                 diff.users_to_update,
                 failed_roles,
                 verbose=verbose,
+                role_updates_blocked=role_updates_blocked,
             )
         )
 
@@ -1626,6 +1677,10 @@ def detect_policy_drift(desired: AclConfig, current: CurrentState) -> list[Polic
     desired_state = _build_desired_acl_state(desired)
     drift: list[PolicyDrift] = []
     for title, policy_update in desired_state.policy_updates.items():
+        # Name collisions with unmanaged policies are intentionally skipped by
+        # reconciliation and must never be escalated into delete/reset recovery.
+        if title in current.unmanaged_policies:
+            continue
         current_policy = current.managed_policies.get(title)
         actual_permissions = (
             list(current_policy.permissions) if current_policy is not None else []
@@ -1659,7 +1714,7 @@ def _role_ref(role_name: str, current: CurrentState) -> str:
 
 
 def _policy_ref(policy_title: str, current: CurrentState) -> str:
-    policy = current.all_policies.get(policy_title)
+    policy = current.managed_policies.get(policy_title)
     if policy is None:
         raise ValueError(
             f"Policy '{policy_title}' was not present in the fetched current state"
@@ -2014,6 +2069,10 @@ def reset_policy(
     """
     warnings: list[str] = []
     user_snapshot: list[UserRoleBinding] = []
+    # A missing policy is the normal failed-create drift case. There is
+    # nothing destructive to reset; the caller's reapply will create it.
+    if title not in current.managed_policies:
+        return warnings, user_snapshot
     deleted = already_deleted_roles if already_deleted_roles is not None else set()
     roles_to_delete = [
         r for r in managed_roles_using_policy(title, current) if r not in deleted
@@ -2035,7 +2094,7 @@ def reset_policy(
     for role_name in roles_to_delete:
         try:
             _print_apply_step(f"delete role {role_name}", verbose=verbose)
-            stack.admin.roles.delete(role_name)
+            stack.admin.roles.delete(_role_ref(role_name, current))
             print(f"  - role {role_name}")
         except Exception as exc:
             detail = format_exception(exc)
