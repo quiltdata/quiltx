@@ -210,10 +210,10 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             )
         entry = _parse_acl_entry(value, f"policies.{name}")
         role_name = value.get(POLICY_ROLE_NAME_KEY)
-        if role_name is not None and (
-            not isinstance(role_name, str) or not role_name.strip()
-        ):
-            raise ValueError(f"policies.{name}.name must be a non-empty string")
+        if role_name is not None:
+            if not isinstance(role_name, str) or not role_name.strip():
+                raise ValueError(f"policies.{name}.name must be a non-empty string")
+            role_name = role_name.strip()
         policy = AclPolicy(
             name=name,
             sso=entry.sso,

@@ -360,6 +360,47 @@ roles:
         acl.parse_acl_config(config_path)
 
 
+def test_policy_role_alias_is_normalized_and_propagated(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+  leadership:
+    name: "  executives  "
+    sso.groups: [Executives]
+    config.default_role: true
+""")
+
+    config = acl.parse_acl_config(config_path)
+    desired = acl._build_desired_acl_state(config)
+    sso = yaml.safe_load(acl.build_sso_config(config) or "")
+
+    assert config.policies[1].role_name == "executives"
+    assert list(desired.role_updates) == ["public", "executives"]
+    assert desired.default_role_name == "executives"
+    assert [mapping["roles"] for mapping in sso["mappings"]] == [
+        ["public"],
+        ["executives"],
+    ]
+
+
+def test_policy_role_alias_rejects_generated_role_collision(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    name: shared
+    sso.groups: [Everyone]
+  internal:
+    name: shared
+    sso.groups: [Employees]
+""")
+
+    with pytest.raises(ValueError, match="Synthesized role 'shared'.*conflicts"):
+        acl.parse_acl_config(config_path)
+
+
 def test_all_buckets_includes_inline_role_buckets() -> None:
     config = acl.AclConfig(
         policies=[
