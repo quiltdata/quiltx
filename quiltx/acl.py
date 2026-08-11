@@ -211,10 +211,10 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             )
         entry = _parse_acl_entry(value, f"policies.{name}")
         role_name = value.get(POLICY_ROLE_NAME_KEY)
-        if role_name is not None and (
-            not isinstance(role_name, str) or not role_name.strip()
-        ):
-            raise ValueError(f"policies.{name}.name must be a non-empty string")
+        if role_name is not None:
+            if not isinstance(role_name, str) or not role_name.strip():
+                raise ValueError(f"policies.{name}.name must be a non-empty string")
+            role_name = role_name.strip()
         policy = AclPolicy(
             name=name,
             sso=entry.sso,
@@ -521,6 +521,12 @@ def print_current_state(current: CurrentState) -> None:
             f"admin={user.is_admin}, active={user.is_active}, "
             f"sso_only={user.is_sso_only}, service={user.is_service}"
         )
+        date_joined = _json_value(user.date_joined)
+        last_login = _json_value(user.last_login)
+        print(
+            f"    date joined: {date_joined if date_joined is not None else '(none)'}"
+        )
+        print(f"    last login: {last_login if last_login is not None else '(none)'}")
 
     if current.sso_config_text:
         print("  sso config")

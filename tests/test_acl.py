@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -357,6 +359,47 @@ roles:
 """)
 
     with pytest.raises(ValueError, match="Synthesized role 'internal_public'"):
+        acl.parse_acl_config(config_path)
+
+
+def test_policy_role_alias_is_normalized_and_propagated(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+  leadership:
+    name: "  executives  "
+    sso.groups: [Executives]
+    config.default_role: true
+""")
+
+    config = acl.parse_acl_config(config_path)
+    desired = acl._build_desired_acl_state(config)
+    sso = yaml.safe_load(acl.build_sso_config(config) or "")
+
+    assert config.policies[1].role_name == "executives"
+    assert list(desired.role_updates) == ["public", "executives"]
+    assert desired.default_role_name == "executives"
+    assert [mapping["roles"] for mapping in sso["mappings"]] == [
+        ["public"],
+        ["executives"],
+    ]
+
+
+def test_policy_role_alias_rejects_generated_role_collision(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    name: shared
+    sso.groups: [Everyone]
+  internal:
+    name: shared
+    sso.groups: [Employees]
+""")
+
+    with pytest.raises(ValueError, match="Synthesized role 'shared'.*conflicts"):
         acl.parse_acl_config(config_path)
 
 
@@ -784,12 +827,31 @@ def test_print_current_state_summarizes_server_acl(capsys) -> None:
     current = _current_state_for_config(
         acl.parse_acl_config(Path("stack-acl.example.yaml"))
     )
+    current.users.append(
+        SimpleNamespace(
+            name="alice",
+            email="alice@example.com",
+            role=current.managed_roles["exec"],
+            extra_roles=[current.managed_roles["internal_public"]],
+            is_admin=True,
+            is_active=True,
+            is_sso_only=False,
+            is_service=False,
+            date_joined=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            last_login=None,
+        )
+    )
 
     acl.print_current_state(current)
     out = capsys.readouterr().out
 
     assert "policy public (managed)" in out
     assert "role internal_public (default) (managed)" in out
+    assert "user alice" in out
+    assert "active role: exec" in out
+    assert "extra roles: internal_public" in out
+    assert "date joined: 2026-08-01T00:00:00+00:00" in out
+    assert "last login: (none)" in out
     assert "default_role: internal_public" in out
     assert "groups=Executives -> [exec] (admin)" in out
 
@@ -1387,6 +1449,61 @@ def test_acl_tool_no_config_shows_current_state(monkeypatch, capsys) -> None:
 
     assert result == 0
     assert "bucket bucket-a" in capsys.readouterr().out
+
+
+def test_acl_tool_json_exports_valid_json_without_header(monkeypatch, capsys) -> None:
+    current = replace(_empty_current_state(), default_role_name="readers")
+    role = FakeRole(id="role-1", name="readers", policies=[], permissions=[])
+    current.managed_roles[role.name] = role
+    current.all_roles[role.name] = role
+    current.users.append(
+        SimpleNamespace(
+            name="alice",
+            email="alice@example.com",
+            role=role,
+            extra_roles=[],
+            is_admin=False,
+            is_active=True,
+            is_sso_only=False,
+            is_service=False,
+            date_joined=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            last_login=None,
+        )
+    )
+    _install_acl_tool_stack(monkeypatch)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    monkeypatch.setattr(
+        acl_tool.stack_lib, "current_stack_header", lambda _stack: "HUMAN HEADER"
+    )
+
+    result = acl_tool.main(["--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert payload["catalog"] == "catalog"
+    assert payload["default_role"] == "readers"
+    assert payload["users"] == [
+        {
+            "name": "alice",
+            "email": "alice@example.com",
+            "role": "readers",
+            "extra_roles": [],
+            "is_admin": False,
+            "is_active": True,
+            "is_sso_only": False,
+            "is_service": False,
+            "date_joined": "2026-08-01T00:00:00+00:00",
+            "last_login": None,
+        }
+    ]
+
+
+def test_acl_tool_json_rejects_config_file(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        acl_tool.main(["--json", "config.yml"])
+
+    assert exc_info.value.code == 2
+    assert "--json is only valid when config_file is omitted" in capsys.readouterr().err
 
 
 def test_acl_tool_missing_file_reports_error(capsys) -> None:
