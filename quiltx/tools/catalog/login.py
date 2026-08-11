@@ -297,6 +297,8 @@ def _resolve_password(args: argparse.Namespace) -> str | None:
         return args.password
 
     if args.password_stdin:
+        if sys.stdin.isatty():
+            print("Reading password from stdin...", file=sys.stderr)
         try:
             password = sys.stdin.readline()
         except (KeyboardInterrupt, OSError) as exc:
@@ -306,7 +308,12 @@ def _resolve_password(args: argparse.Namespace) -> str | None:
             raise LoginUsageError("No password was provided on stdin.")
         return password
 
-    return os.environ.get("QUILTX_PASSWORD") or None
+    if "QUILTX_PASSWORD" not in os.environ:
+        return None
+    password = os.environ["QUILTX_PASSWORD"]
+    if not password:
+        raise LoginUsageError("QUILTX_PASSWORD is set but empty.")
+    return password
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -327,6 +334,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     catalog_url = build_catalog_url(dns, insecure=args.insecure)
+
+    if args.api_key and (args.password is not None or args.password_stdin):
+        print(
+            "Error: --api-key cannot be combined with --password or "
+            "--password-stdin.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Path 1: explicit --api-key (paste). Validate against the catalog before
     # optionally persisting so a bad paste never lands in credential storage.

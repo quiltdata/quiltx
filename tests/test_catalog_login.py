@@ -505,3 +505,80 @@ def test_login_api_key_no_store_validates_without_persisting(monkeypatch, capsys
     assert validated == [("https://nightly.quilttest.com", "qk_existing")]
     assert captured.out == "qk_existing\n"
     assert "not stored" in captured.err
+
+
+def test_login_rejects_api_key_with_password_option(monkeypatch, capsys):
+    monkeypatch.setattr(
+        quilt_auth,
+        "validate_api_key",
+        lambda *_a, **_kw: pytest.fail("conflicting inputs reached validation"),
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--api-key",
+            "qk_existing",
+            "--password-stdin",
+        ]
+    )
+
+    assert rc == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_login_password_stdin_announces_interactive_read(monkeypatch, capsys):
+    from io import StringIO
+
+    stdin = StringIO("stdin-secret\n")
+    monkeypatch.setattr(stdin, "isatty", lambda: True)
+    monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setattr(
+        quilt_auth,
+        "bootstrap_api_key",
+        lambda catalog_url, **kwargs: {
+            "secret": "qk_stdin",
+            "name": kwargs["name"],
+            "expires_at": None,
+        },
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--username",
+            "admin",
+            "--password-stdin",
+            "--no-store",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == "qk_stdin\n"
+    assert "Reading password from stdin" in captured.err
+
+
+def test_login_rejects_empty_env_password(monkeypatch, capsys):
+    monkeypatch.setenv("QUILTX_PASSWORD", "")
+    monkeypatch.setattr(
+        quilt_auth,
+        "bootstrap_api_key",
+        lambda *_a, **_kw: pytest.fail("empty password reached bootstrap"),
+    )
+
+    rc = login_cmd.main(
+        [
+            "--catalog",
+            "nightly.quilttest.com",
+            "--username",
+            "admin",
+            "--no-prompt",
+            "--no-store",
+        ]
+    )
+
+    assert rc == 2
+    assert "QUILTX_PASSWORD is set but empty" in capsys.readouterr().err
