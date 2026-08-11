@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-08-11
+
+### Fixed
+
+- `quiltx catalog acl` sets the default role by role **id** instead of name: passing a name made quilt3 query `role(id: <name>)`, which UUID-keyed registries answer with an Internal Server Error, failing every apply that reconciled the default role.
+- Settings-level default-role reconciliation no longer fails on catalogs where the registry locks that setting (SSO config present and password signup disabled, e.g. nightly): when the SSO config itself names the same default role, the conflict is reported as governed-by-SSO-config and the apply succeeds; a conflicting SSO config still warns.
+
 ## [0.17.1] - 2026-08-11
 
 ### Added

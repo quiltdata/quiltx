@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from quilt3.admin import exceptions as quilt3_admin_exceptions
 from quilt3.admin.types import Permission
 from quiltx import stack as stack_lib
 
@@ -1288,6 +1289,26 @@ def _apply_user_updates(
     return warnings
 
 
+def _sso_config_declares_default(
+    diff: AclDiff, current: CurrentState, role_name: str
+) -> bool:
+    """True if the effective SSO config carries role_name as its default.
+
+    The registry locks the settings-level default role while an SSO config
+    exists and password signup is disabled (SsoConfigConflict); in that state
+    the SSO config's own ``default_role`` is what governs, so a conflict is
+    only a problem when that config names a different role.
+    """
+    text = diff.sso_config_text if diff.sso_needs_update else current.sso_config_text
+    if not text:
+        return False
+    try:
+        payload = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    return isinstance(payload, dict) and payload.get("default_role") == role_name
+
+
 def apply_acl(
     stack: stack_lib.Catalog,
     diff: AclDiff,
@@ -1500,7 +1521,41 @@ def apply_acl(
         else:
             _print_apply_step(f"set default role {default_role_name}", verbose=verbose)
             try:
-                stack.admin.roles.set_default(default_role_name)
+                # Resolve the id ourselves: set_default(name) falls back to a
+                # role(id: <name>) lookup, which registries answer with a 500
+                # (UUID primary-key column). Re-list so roles created earlier
+                # in this apply are visible.
+                resolved_role = next(
+                    (
+                        r
+                        for r in stack.admin.roles.list()
+                        if r.name == default_role_name
+                    ),
+                    None,
+                )
+                stack.admin.roles.set_default(
+                    default_role_name if resolved_role is None else resolved_role.id
+                )
+            except quilt3_admin_exceptions.RoleSsoConfigConflictError:
+                if _sso_config_declares_default(diff, current, default_role_name):
+                    print(
+                        f"  = default role {default_role_name} is governed by the "
+                        "SSO config; settings-level default left unchanged"
+                    )
+                else:
+                    detail = (
+                        "the registry locks the settings-level default role while "
+                        "an SSO config exists and password signup is disabled, and "
+                        f"the SSO config does not name '{default_role_name}' as its "
+                        "default"
+                    )
+                    warnings.append(
+                        f"Default role '{default_role_name}' could not be updated: {detail}"
+                    )
+                    print(
+                        f"  ! default role {default_role_name}: {detail}",
+                        file=sys.stderr,
+                    )
             except Exception as exc:
                 detail = format_exception(exc)
                 warnings.append(

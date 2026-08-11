@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import yaml
 
+from quilt3.admin import exceptions as quilt3_admin_exceptions
 from quilt3.admin.types import BucketPermissionLevel, Permission
 
 from quiltx import acl
@@ -1225,9 +1226,13 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
             roles=[],
         )
 
+    created_roles: list[FakeRole] = []
+
     def role_create(name: str, policies: list[str]) -> FakeRole:
         calls.append(("role_create", name, list(policies)))
-        return FakeRole(id=f"id-{name}", name=name, policies=[], permissions=[])
+        role = FakeRole(id=f"id-{name}", name=name, policies=[], permissions=[])
+        created_roles.append(role)
+        return role
 
     def sso_set(text: str) -> SimpleNamespace:
         calls.append(("sso_set", yaml.safe_load(text)["default_role"]))
@@ -1243,7 +1248,8 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         roles=SimpleNamespace(
             create_managed=role_create,
             update_managed=lambda *args, **kwargs: None,
-            set_default=lambda name: calls.append(("default_role", name)),
+            list=lambda: [*created_roles],
+            set_default=lambda ref: calls.append(("default_role", ref)),
             delete=lambda name: calls.append(("role_delete", name)),
         ),
         sso_config=SimpleNamespace(set=sso_set),
@@ -1293,7 +1299,7 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         ("bucket_add", "bucket-a", "bucket-a"),
         ("policy_create", "public"),
         ("role_create", "public", ["id-public"]),
-        ("default_role", "public"),
+        ("default_role", "id-public"),
         ("sso_set", "public"),
         ("role_delete", "legacy_role"),
         ("policy_delete", "id-legacy-policy"),
@@ -2403,3 +2409,118 @@ def test_acl_tool_dry_run_no_preflight_lists_skipped_steps(monkeypatch, capsys) 
     assert "GraphQL only" in out
     assert "GetBucketPolicy" in out
     assert "SNS topic" in out
+
+
+def _default_role_diff(name: str = "demo") -> acl.AclDiff:
+    return acl.AclDiff(default_role_name=name, default_role_needs_update=True)
+
+
+def _demo_role() -> FakeRole:
+    return FakeRole(
+        id="11111111-2222-3333-4444-555555555555",
+        name="demo",
+        policies=None,
+        permissions=[],
+    )
+
+
+def test_apply_acl_sets_default_role_by_id() -> None:
+    """set_default must receive the role id: the name falls back to a
+    role(id: <name>) lookup that UUID-keyed registries answer with a 500."""
+    set_default_calls: list[str] = []
+    stack = _fake_stack(
+        roles=SimpleNamespace(
+            list=lambda: [_demo_role()],
+            set_default=lambda ref: set_default_calls.append(ref),
+        )
+    )
+
+    warnings = acl.apply_acl(stack, _default_role_diff(), _empty_current_state())
+
+    assert warnings == []
+    assert set_default_calls == ["11111111-2222-3333-4444-555555555555"]
+
+
+def test_apply_acl_default_role_sso_conflict_is_ok_when_sso_config_governs(
+    capsys,
+) -> None:
+    """SsoConfigConflict is a no-op when the SSO config names the same default
+    (registry locks the settings-level default while SSO governs it)."""
+
+    def conflict(_ref: str) -> None:
+        raise quilt3_admin_exceptions.RoleSsoConfigConflictError(None)
+
+    stack = _fake_stack(
+        roles=SimpleNamespace(list=lambda: [_demo_role()], set_default=conflict)
+    )
+    current = replace(
+        _empty_current_state(),
+        sso_config_text="version: '1.0'\ndefault_role: demo\n",
+    )
+
+    warnings = acl.apply_acl(stack, _default_role_diff(), current)
+
+    captured = capsys.readouterr()
+    assert warnings == []
+    assert "governed by the SSO config" in captured.out
+    assert "! default role" not in captured.err
+
+
+def test_apply_acl_default_role_sso_conflict_warns_on_foreign_sso_config() -> None:
+    """A conflict from an SSO config that names a different default is real."""
+
+    def conflict(_ref: str) -> None:
+        raise quilt3_admin_exceptions.RoleSsoConfigConflictError(None)
+
+    stack = _fake_stack(
+        roles=SimpleNamespace(list=lambda: [_demo_role()], set_default=conflict)
+    )
+    current = replace(
+        _empty_current_state(),
+        sso_config_text="version: '1.0'\ndefault_role: other\n",
+    )
+
+    warnings = acl.apply_acl(stack, _default_role_diff(), current)
+
+    assert any("could not be updated" in warning for warning in warnings)
+    assert any("does not name 'demo'" in warning for warning in warnings)
+
+
+def test_apply_acl_default_role_conflict_prefers_pending_sso_text(capsys) -> None:
+    """When this apply is also writing the SSO config, judge the conflict by
+    the pending text, not the stale current one."""
+
+    def conflict(_ref: str) -> None:
+        raise quilt3_admin_exceptions.RoleSsoConfigConflictError(None)
+
+    stack = _fake_stack(
+        roles=SimpleNamespace(list=lambda: [_demo_role()], set_default=conflict),
+        sso_config=SimpleNamespace(set=lambda text: SimpleNamespace(text=text)),
+    )
+    diff = _default_role_diff()
+    diff.sso_config_text = "version: '1.0'\ndefault_role: demo\n"
+    diff.sso_needs_update = True
+    current = replace(
+        _empty_current_state(),
+        sso_config_text="version: '1.0'\ndefault_role: other\n",
+    )
+
+    warnings = acl.apply_acl(stack, diff, current)
+
+    assert not [w for w in warnings if "Default role" in w]
+    assert "governed by the SSO config" in capsys.readouterr().out
+
+
+def test_apply_acl_default_role_falls_back_to_name_when_unlisted() -> None:
+    """A role missing from the fresh list still gets attempted by name."""
+    set_default_calls: list[str] = []
+    stack = _fake_stack(
+        roles=SimpleNamespace(
+            list=lambda: [],
+            set_default=lambda ref: set_default_calls.append(ref),
+        )
+    )
+
+    acl.apply_acl(stack, _default_role_diff(), _empty_current_state())
+
+    assert set_default_calls == ["demo"]
