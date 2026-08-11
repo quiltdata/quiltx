@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import date
 
 from quiltx import acl as acl_lib
 from quiltx import stack as stack_lib
@@ -48,11 +49,20 @@ def build_parser() -> argparse.ArgumentParser:
             "bucket-owner setup."
         ),
     )
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--json",
         action="store_true",
         help=(
             "Emit the complete current ACL state as JSON. "
+            "Only valid when config_file is omitted."
+        ),
+    )
+    output_group.add_argument(
+        "--yaml",
+        action="store_true",
+        help=(
+            "Emit current state as replayable ACL YAML. "
             "Only valid when config_file is omitted."
         ),
     )
@@ -62,8 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.json and args.config_file is not None:
-        parser.error("--json is only valid when config_file is omitted")
+    if (args.json or args.yaml) and args.config_file is not None:
+        output_flag = "--json" if args.json else "--yaml"
+        parser.error(f"{output_flag} is only valid when config_file is omitted")
 
     try:
         return _run(args)
@@ -81,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
 @stack_lib.catalog_command
 def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
-        if not args.json:
+        if not (args.json or args.yaml):
             header = stack_lib.current_stack_header(stack)
             if header:
                 print(header)
@@ -95,6 +106,15 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                         ),
                         indent=2,
                     )
+                )
+            elif args.yaml:
+                print(
+                    acl_lib.current_state_as_acl_yaml(
+                        current,
+                        catalog=stack.catalog_name,
+                        captured_on=date.today().isoformat(),
+                    ),
+                    end="",
                 )
             else:
                 acl_lib.print_current_state(current)

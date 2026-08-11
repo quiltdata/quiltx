@@ -76,9 +76,10 @@ quiltx --list
 ## Catalog ACL
 
 `quiltx catalog acl` declaratively manages a Quilt stack's access control lists
-(ACLs) from a single YAML file with exactly two top-level blocks:
-`policies:` and `roles:`. Policy audiences synthesize cumulative managed roles,
-while static roles compose named policies and optional inline bucket grants.
+(ACLs) from one YAML file with top-level `policies:`, `roles:`, and optional
+`users:` blocks. Policy audiences synthesize cumulative managed roles; reusable
+policies can opt out with `config.synthesize: false`; and static roles compose
+named policies, optional inline bucket grants, and optional SSO selectors.
 Instead of clicking through the catalog admin UI, you define the desired state
 in version-controlled YAML and let the tool reconcile it against the server.
 
@@ -117,18 +118,22 @@ Unset is neutral, `true` grants admin, and an explicit `false` vetoes any prior
 ### Usage
 
 With no config file, the command reports the complete server ACL state, including
-users and their active and extra role assignments. Pass `--json` for a
-machine-readable export of the catalog, buckets, policies, roles, users, SSO
-configuration, and default role.
+users and their active and extra role assignments. Pass `--json` for a complete
+machine-readable reporting export, or `--yaml` for a replayable ACL config that
+can be saved and passed back to `catalog acl --dry-run`.
 
 ```bash
 # Show current server ACL state
 uvx quiltx catalog acl
 
-# Export the current server ACL state as JSON
+# Export reporting data as JSON
 uvx quiltx catalog acl --json
 
-# Preview changes (dry run)
+# Capture replayable ACL YAML
+uvx quiltx catalog acl --yaml > default-acl.yaml
+uvx quiltx catalog acl default-acl.yaml --dry-run
+
+# Preview changes from a hand-authored config
 uvx quiltx catalog acl config.yml --dry-run
 
 # Preview with full detail

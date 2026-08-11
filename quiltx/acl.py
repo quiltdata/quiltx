@@ -726,6 +726,255 @@ def current_state_as_dict(
     return payload
 
 
+def current_state_as_acl_yaml(
+    current: CurrentState, *, catalog: str, captured_on: str
+) -> str:
+    """Return current state as replayable ACL YAML with capture metadata.
+
+    Managed policies are emitted as reusable policies and managed roles as static
+    roles. This avoids inventing ladder semantics while preserving the server's
+    existing policy-to-role composition. Generated ``__inline`` policies are
+    folded back into their owning role.
+    """
+    notes: list[str] = []
+    role_entries: dict[str, dict[str, Any]] = {}
+    policy_entries: dict[str, dict[str, Any]] = {}
+
+    managed_roles = {
+        name: role
+        for name, role in sorted(current.managed_roles.items())
+        if name not in REGISTRY_MANAGED_ROLE_EXCLUSIONS
+    }
+    inline_policy_names = {f"{name}{INLINE_POLICY_SUFFIX}" for name in managed_roles}
+
+    referenced_policy_names: set[str] = set()
+    for name, role in managed_roles.items():
+        entry: dict[str, Any] = {}
+        policy_names = [
+            policy.title for policy in (getattr(role, "policies", None) or [])
+        ]
+        own_inline = f"{name}{INLINE_POLICY_SUFFIX}"
+        if own_inline in policy_names:
+            inline_policy = current.all_policies.get(own_inline)
+            if inline_policy is None:
+                notes.append(f"missing generated inline policy {own_inline!r}")
+            else:
+                read, read_write, permission_notes = _acl_bucket_fields(inline_policy)
+                notes.extend(permission_notes)
+                if read:
+                    entry["buckets.read"] = read
+                if read_write:
+                    entry["buckets.read_write"] = read_write
+            policy_names = [title for title in policy_names if title != own_inline]
+        unsupported_inline = sorted(
+            title for title in policy_names if title in inline_policy_names
+        )
+        if unsupported_inline:
+            notes.append(
+                f"role {name!r} also references generated inline policies: "
+                + ", ".join(unsupported_inline)
+            )
+            policy_names = [
+                title for title in policy_names if title not in unsupported_inline
+            ]
+        if policy_names:
+            entry[CONFIG_POLICIES_KEY] = policy_names
+            referenced_policy_names.update(policy_names)
+        role_entries[name] = entry
+
+    policy_names_to_emit = {
+        title
+        for title in current.managed_policies
+        if title not in REGISTRY_MANAGED_POLICY_EXCLUSIONS
+        and title not in inline_policy_names
+    }
+    policy_names_to_emit.update(referenced_policy_names)
+    for title in sorted(policy_names_to_emit):
+        policy = current.all_policies.get(title)
+        if policy is None:
+            notes.append(f"role references unavailable policy {title!r}")
+            continue
+        read, read_write, permission_notes = _acl_bucket_fields(policy)
+        notes.extend(permission_notes)
+        policy_entry: dict[str, Any] = {CONFIG_SYNTHESIZE_KEY: False}
+        if read:
+            policy_entry["buckets.read"] = read
+        if read_write:
+            policy_entry["buckets.read_write"] = read_write
+        policy_entries[title] = policy_entry
+
+    sso_notes, selectors, admin_roles, default_role = _acl_sso_fields(
+        current, set(role_entries)
+    )
+    notes.extend(sso_notes)
+    # If any part of SSO is not representable, leave the complete server SSO
+    # document unmanaged rather than emitting a partial, destructive rewrite.
+    if not sso_notes:
+        for role_name, role_selectors in selectors.items():
+            role_entries[role_name].update(role_selectors)
+        for role_name in admin_roles:
+            role_entries[role_name]["config.is_admin"] = True
+        if default_role is not None:
+            role_entries[default_role]["config.default_role"] = True
+
+    user_entries: dict[str, dict[str, Any]] = {}
+    for user in sorted(current.users, key=lambda item: item.name):
+        primary = getattr(getattr(user, "role", None), "name", None)
+        if not primary:
+            notes.append(f"user {user.name!r} has no primary role")
+            continue
+        user_entry: dict[str, Any] = {"role": primary}
+        extras = [
+            role.name
+            for role in (getattr(user, "extra_roles", None) or [])
+            if role is not None
+        ]
+        if extras:
+            user_entry["extra_roles"] = extras
+        user_entry["admin"] = bool(getattr(user, "is_admin", False))
+        user_entries[user.name] = user_entry
+
+    for name in sorted(current.unmanaged_roles):
+        notes.append(f"unmanaged role {name!r}")
+    for title in sorted(set(current.unmanaged_policies) - referenced_policy_names):
+        notes.append(f"unmanaged policy {title!r}")
+    for name in sorted(set(current.managed_roles) & REGISTRY_MANAGED_ROLE_EXCLUSIONS):
+        notes.append(f"registry-managed role {name!r}")
+    for title in sorted(
+        set(current.managed_policies) & REGISTRY_MANAGED_POLICY_EXCLUSIONS
+    ):
+        notes.append(f"registry-managed policy {title!r}")
+
+    payload = {
+        "policies": policy_entries,
+        "roles": role_entries,
+        "users": user_entries,
+    }
+    lines = [
+        f"# quiltx ACL capture for {catalog}",
+        f"# captured: {captured_on}",
+        yaml.safe_dump(payload, sort_keys=False).rstrip(),
+    ]
+    if notes:
+        lines.append("# not captured:")
+        lines.extend(f"# - {note}" for note in _dedupe_preserve_order(notes))
+    return "\n".join(lines) + "\n"
+
+
+def _acl_bucket_fields(policy: Any) -> tuple[list[str], list[str], list[str]]:
+    read: set[str] = set()
+    read_write: set[str] = set()
+    notes: list[str] = []
+    for permission in getattr(policy, "permissions", None) or []:
+        level = str(permission.level).split(".")[-1]
+        if level == "READ_WRITE":
+            read_write.add(permission.bucket)
+        elif level == "READ":
+            read.add(permission.bucket)
+        else:
+            notes.append(
+                f"policy {policy.title!r} permission {permission.bucket!r} "
+                f"has unsupported level {level!r}"
+            )
+    return sorted(read - read_write), sorted(read_write), notes
+
+
+def _acl_sso_fields(
+    current: CurrentState, captured_roles: set[str]
+) -> tuple[list[str], dict[str, dict[str, list[str]]], set[str], str | None]:
+    if current.sso_config_text is None:
+        return [], {}, set(), None
+    raw = yaml.safe_load(current.sso_config_text) or {}
+    if not isinstance(raw, dict):
+        return (
+            ["SSO configuration is not a mapping; existing SSO left untouched"],
+            {},
+            set(),
+            None,
+        )
+
+    notes: list[str] = []
+    if raw.get("version") != "1.0" or raw.get("union_roles") is not True:
+        notes.append("SSO version/union_roles settings are not representable")
+    unknown_keys = set(raw) - {"version", "union_roles", "default_role", "mappings"}
+    if unknown_keys:
+        notes.append("SSO has unsupported fields: " + ", ".join(sorted(unknown_keys)))
+
+    selectors: dict[str, dict[str, list[str]]] = {}
+    admin_votes: dict[str, set[bool | None]] = {}
+    for index, mapping in enumerate(raw.get("mappings") or []):
+        decoded = _decode_acl_sso_mapping(mapping)
+        if decoded is None:
+            notes.append(f"SSO mapping {index + 1} is not representable")
+            continue
+        role_name, claim, value, admin = decoded
+        if role_name not in captured_roles:
+            notes.append(
+                f"SSO mapping {index + 1} targets uncaptured role {role_name!r}"
+            )
+            continue
+        key = f"sso.{claim}"
+        selectors.setdefault(role_name, {}).setdefault(key, []).append(value)
+        admin_votes.setdefault(role_name, set()).add(admin)
+
+    admin_roles: set[str] = set()
+    for role_name, votes in admin_votes.items():
+        if votes == {True}:
+            admin_roles.add(role_name)
+        elif votes != {None}:
+            notes.append(
+                f"SSO mappings for role {role_name!r} have mixed or false admin votes"
+            )
+
+    default_role = raw.get("default_role")
+    if default_role is not None:
+        if not isinstance(default_role, str) or default_role not in captured_roles:
+            notes.append(f"SSO default role {default_role!r} is not captured")
+            default_role = None
+        elif default_role not in selectors:
+            notes.append(
+                f"SSO default role {default_role!r} has no representable selector"
+            )
+            default_role = None
+    return notes, selectors, admin_roles, default_role
+
+
+def _decode_acl_sso_mapping(
+    mapping: Any,
+) -> tuple[str, str, str, bool | None] | None:
+    if not isinstance(mapping, dict) or set(mapping) - {"schema", "roles", "admin"}:
+        return None
+    roles = mapping.get("roles")
+    if not isinstance(roles, list) or len(roles) != 1 or not isinstance(roles[0], str):
+        return None
+    admin = mapping.get("admin")
+    if admin is not None and not isinstance(admin, bool):
+        return None
+    schema = mapping.get("schema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or len(properties) != 1:
+        return None
+    claim, claim_schema = next(iter(properties.items()))
+    if not isinstance(claim, str) or required != [claim]:
+        return None
+    value: Any = None
+    if claim == "groups" and isinstance(claim_schema, dict):
+        value = (claim_schema.get("contains") or {}).get("const")
+        expected = _sso_claim_schema(claim, value) if isinstance(value, str) else None
+    elif isinstance(claim_schema, dict):
+        any_of = claim_schema.get("anyOf")
+        value = any_of[0].get("const") if isinstance(any_of, list) and any_of else None
+        expected = _sso_claim_schema(claim, value) if isinstance(value, str) else None
+    else:
+        expected = None
+    if expected is None or claim_schema != expected:
+        return None
+    return roles[0], claim, value, admin
+
+
 def _bucket_as_dict(bucket: Any) -> dict[str, Any]:
     fields = (
         "name",

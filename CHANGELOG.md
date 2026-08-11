@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.9] - 2026-08-10
+
+### Added
+
+- `quiltx catalog acl --yaml` exports current managed ACL state as replayable flat YAML, including reusable policies, static roles, representable SSO selectors, and user role assignments.
+
 ## [0.16.8] - 2026-08-10
 
 ### Added
