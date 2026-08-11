@@ -1506,6 +1506,132 @@ def test_acl_tool_json_rejects_config_file(capsys) -> None:
     assert "--json is only valid when config_file is omitted" in capsys.readouterr().err
 
 
+def test_current_state_yaml_round_trips_static_roles_shared_policies_and_users(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.yml"
+    source.write_text("""
+policies:
+  SharedPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [SharedPolicy]
+    buckets.read_write: [bucket-b]
+  Observers: {}
+users:
+  alice:
+    role: Analysts
+    extra_roles: [Observers]
+    admin: true
+""")
+    current = _current_state_for_config(acl.parse_acl_config(source))
+    current.users.append(
+        SimpleNamespace(
+            name="alice",
+            role=current.managed_roles["Analysts"],
+            extra_roles=[current.managed_roles["Observers"]],
+            is_admin=True,
+        )
+    )
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="example.quiltdata.com", captured_on="2026-08-10"
+    )
+    exported_path = tmp_path / "exported.yml"
+    exported_path.write_text(exported)
+    parsed = acl.parse_acl_config(exported_path)
+    diff = acl.compute_diff(parsed, current)
+    payload = yaml.safe_load(exported)
+
+    assert exported.startswith(
+        "# quiltx ACL capture for example.quiltdata.com\n# captured: 2026-08-10\n"
+    )
+    assert payload["policies"] == {
+        "SharedPolicy": {
+            "config.synthesize": False,
+            "buckets.read": ["bucket-a"],
+        }
+    }
+    assert payload["roles"]["Analysts"] == {
+        "buckets.read_write": ["bucket-b"],
+        "config.policies": ["SharedPolicy"],
+    }
+    assert payload["users"]["alice"] == {
+        "role": "Analysts",
+        "extra_roles": ["Observers"],
+        "admin": True,
+    }
+    assert not diff.has_changes()
+    assert diff.warnings == []
+    assert diff.notices == []
+
+
+def test_current_state_yaml_round_trips_representable_sso(tmp_path: Path) -> None:
+    source = tmp_path / "source.yml"
+    source.write_text("""
+policies:
+  SharedPolicy:
+    config.synthesize: false
+roles:
+  Owners:
+    sso.email: [owner@example.com]
+    config.policies: [SharedPolicy]
+    config.default_role: true
+    config.is_admin: true
+users: {}
+""")
+    current = _current_state_for_config(acl.parse_acl_config(source))
+    exported_path = tmp_path / "exported.yml"
+    exported_path.write_text(
+        acl.current_state_as_acl_yaml(
+            current, catalog="catalog", captured_on="2026-08-10"
+        )
+    )
+
+    parsed = acl.parse_acl_config(exported_path)
+    diff = acl.compute_diff(parsed, current)
+
+    assert parsed.roles["Owners"].sso == {"email": ["owner@example.com"]}
+    assert parsed.roles["Owners"].default_role is True
+    assert parsed.roles["Owners"].is_admin is True
+    assert not diff.has_changes()
+
+
+def test_acl_tool_yaml_exports_valid_config_without_header(monkeypatch, capsys) -> None:
+    current = _empty_current_state()
+    _install_acl_tool_stack(monkeypatch)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    monkeypatch.setattr(
+        acl_tool.stack_lib, "current_stack_header", lambda _stack: "HUMAN HEADER"
+    )
+
+    result = acl_tool.main(["--yaml"])
+    output = capsys.readouterr().out
+    payload = yaml.safe_load(output)
+
+    assert result == 0
+    assert "HUMAN HEADER" not in output
+    assert payload == {"policies": {}, "roles": {}, "users": {}}
+
+
+def test_acl_tool_yaml_rejects_config_file(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        acl_tool.main(["--yaml", "config.yml"])
+
+    assert exc_info.value.code == 2
+    assert "--yaml is only valid when config_file is omitted" in capsys.readouterr().err
+
+
+def test_acl_tool_json_and_yaml_are_mutually_exclusive(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        acl_tool.main(["--json", "--yaml"])
+
+    assert exc_info.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
 def test_acl_tool_missing_file_reports_error(capsys) -> None:
     result = acl_tool.main(["/tmp/does-not-exist.yml"])
 
