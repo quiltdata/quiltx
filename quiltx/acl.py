@@ -114,6 +114,8 @@ class AclDiff:
     sso_config_text: str | None = None
     sso_is_create: bool = False
     sso_needs_update: bool = False
+    default_role_name: str | None = None
+    default_role_needs_update: bool = False
     warnings: list[str] = field(default_factory=list)
     users_to_update: list[AclUserUpdate] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
@@ -130,6 +132,7 @@ class AclDiff:
                 self.roles_to_delete,
                 self.users_to_update,
                 self.sso_needs_update,
+                self.default_role_needs_update,
             )
         )
 
@@ -302,11 +305,6 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 f"'{reserved_inline_policy}'"
             )
         entry = _parse_acl_entry(value, f"roles.{name}", require_sso_selector=False)
-        if not entry.sso and entry.default_role:
-            raise ValueError(
-                f"roles.{name}.config.default_role cannot be true without an "
-                "sso.<claim> selector"
-            )
         if not entry.sso and entry.is_admin:
             raise ValueError(
                 f"roles.{name}.config.is_admin cannot be true without an "
@@ -501,6 +499,13 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         and name not in REGISTRY_MANAGED_ROLE_EXCLUSIONS
     )
 
+    if (
+        desired_state.default_role_name is not None
+        and desired_state.default_role_name != current.default_role_name
+    ):
+        diff.default_role_name = desired_state.default_role_name
+        diff.default_role_needs_update = True
+
     current_users = {user.name: user for user in current.users}
     available_user_roles = set(desired_state.role_updates) | set(
         current.unmanaged_roles
@@ -557,7 +562,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
 def build_sso_config(config: AclConfig) -> str | None:
     """Translate the flat ACL config into Quilt's schema-based SSO YAML."""
     desired_state = _build_desired_acl_state(config)
-    if not desired_state.sso_mappings and desired_state.default_role_name is None:
+    if not desired_state.sso_mappings:
         return None
 
     payload: dict[str, Any] = {"version": "1.0", "union_roles": True, "mappings": []}
@@ -618,6 +623,9 @@ def print_diff(
         print(f"~ role {role.name}")
     for name in diff.roles_to_delete:
         print(f"- role {name}")
+
+    if diff.default_role_needs_update and diff.default_role_name is not None:
+        print(f"~ default role {diff.default_role_name}")
 
     for user in diff.users_to_update:
         changes: list[str] = []
@@ -803,19 +811,39 @@ def current_state_as_acl_yaml(
             policy_entry["buckets.read_write"] = read_write
         policy_entries[title] = policy_entry
 
-    sso_notes, selectors, admin_roles, default_role = _acl_sso_fields(
+    sso_notes, selectors, admin_roles, sso_default_role = _acl_sso_fields(
         current, set(role_entries)
     )
     notes.extend(sso_notes)
-    # If any part of SSO is not representable, leave the complete server SSO
-    # document unmanaged rather than emitting a partial, destructive rewrite.
-    if not sso_notes:
+
+    settings_default_role = current.default_role_name
+    if settings_default_role is not None:
+        if settings_default_role in role_entries:
+            role_entries[settings_default_role]["config.default_role"] = True
+        else:
+            notes.append(
+                f"settings default role {settings_default_role!r} is not captured"
+            )
+
+    defaults_disagree = (
+        current.sso_config_text is not None
+        and not sso_notes
+        and sso_default_role != settings_default_role
+    )
+    if defaults_disagree:
+        notes.append(
+            f"SSO default role {sso_default_role!r} differs from settings default "
+            f"role {settings_default_role!r}; existing SSO left untouched"
+        )
+
+    # If any part of SSO is not representable, or its default differs from the
+    # operative settings default, leave the complete server SSO document
+    # unmanaged rather than emitting a partial, destructive rewrite.
+    if not sso_notes and not defaults_disagree:
         for role_name, role_selectors in selectors.items():
             role_entries[role_name].update(role_selectors)
         for role_name in admin_roles:
             role_entries[role_name]["config.is_admin"] = True
-        if default_role is not None:
-            role_entries[default_role]["config.default_role"] = True
 
     user_entries: dict[str, dict[str, Any]] = {}
     for user in sorted(current.users, key=lambda item: item.name):
@@ -1446,6 +1474,30 @@ def apply_acl(
             print(f"  ! role {role.name}: {detail}", file=sys.stderr)
             continue
         print(f"  ~ role {role.name}")
+
+    if diff.default_role_needs_update and diff.default_role_name is not None:
+        default_role_name = diff.default_role_name
+        if default_role_name in failed_roles:
+            detail = "desired role creation failed"
+            warnings.append(
+                f"Default role '{default_role_name}' could not be updated: {detail}"
+            )
+            print(f"  ! default role {default_role_name}: {detail}", file=sys.stderr)
+        else:
+            _print_apply_step(f"set default role {default_role_name}", verbose=verbose)
+            try:
+                stack.admin.roles.set_default(default_role_name)
+            except Exception as exc:
+                detail = format_exception(exc)
+                warnings.append(
+                    f"Default role '{default_role_name}' could not be updated: {detail}"
+                )
+                print(
+                    f"  ! default role {default_role_name}: {detail}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  ~ default role {default_role_name}")
 
     user_role_updates = [
         update for update in diff.users_to_update if update.role_changed

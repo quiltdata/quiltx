@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.10] - 2026-08-10
+
+### Fixed
+
+- `quiltx catalog acl` now captures and reconciles the settings-level default role, including selector-less roles used by password-auth stacks.
+
 ## [0.16.9] - 2026-08-10
 
 ### Added

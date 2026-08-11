@@ -1,3 +1,3 @@
 """Version information for quiltx."""
 
-__version__ = "0.16.9"
+__version__ = "0.16.10"
