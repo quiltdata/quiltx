@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from quiltx import acl as acl_lib
@@ -47,12 +48,22 @@ def build_parser() -> argparse.ArgumentParser:
             "bucket-owner setup."
         ),
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit the complete current ACL state as JSON. "
+            "Only valid when config_file is omitted."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.json and args.config_file is not None:
+        parser.error("--json is only valid when config_file is omitted")
 
     try:
         return _run(args)
@@ -70,12 +81,23 @@ def main(argv: list[str] | None = None) -> int:
 @stack_lib.catalog_command
 def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
-        header = stack_lib.current_stack_header(stack)
-        if header:
-            print(header)
+        if not args.json:
+            header = stack_lib.current_stack_header(stack)
+            if header:
+                print(header)
         if args.config_file is None:
             current = acl_lib.fetch_current_state(stack)
-            acl_lib.print_current_state(current)
+            if args.json:
+                print(
+                    json.dumps(
+                        acl_lib.current_state_as_dict(
+                            current, catalog=stack.catalog_name
+                        ),
+                        indent=2,
+                    )
+                )
+            else:
+                acl_lib.print_current_state(current)
             return 0
 
         desired = acl_lib.parse_acl_config(args.config_file)

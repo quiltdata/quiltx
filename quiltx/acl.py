@@ -66,6 +66,7 @@ class CurrentState:
     all_roles: dict[str, Any]
     sso_config_text: str | None
     default_role_name: str | None
+    users: list[Any] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,7 @@ def fetch_current_state(stack: stack_lib.Catalog) -> CurrentState:
 
     sso_config = stack.admin.sso_config.get()
     default_role = stack.admin.roles.get_default()
+    users = list(stack.admin.users.list())
     return CurrentState(
         buckets=bucket_items,
         managed_policies=managed_policies,
@@ -328,6 +330,7 @@ def fetch_current_state(stack: stack_lib.Catalog) -> CurrentState:
         all_roles={**unmanaged_roles, **managed_roles},
         sso_config_text=None if sso_config is None else sso_config.text,
         default_role_name=None if default_role is None else default_role.name,
+        users=users,
     )
 
 
@@ -504,11 +507,159 @@ def print_current_state(current: CurrentState) -> None:
         print(f"  role {name}{default_tag} (unmanaged)")
         print(f"    policies: {policy_names}")
 
+    for user in sorted(current.users, key=lambda item: item.name):
+        primary_role = user.role.name if user.role else "(none)"
+        extra_roles = ", ".join(role.name for role in (user.extra_roles or [])) or (
+            "(none)"
+        )
+        print(f"  user {user.name}")
+        print(f"    email: {user.email or '(none)'}")
+        print(f"    active role: {primary_role}")
+        print(f"    extra roles: {extra_roles}")
+        print(
+            "    flags: "
+            f"admin={user.is_admin}, active={user.is_active}, "
+            f"sso_only={user.is_sso_only}, service={user.is_service}"
+        )
+        date_joined = _json_value(user.date_joined)
+        last_login = _json_value(user.last_login)
+        print(
+            f"    date joined: {date_joined if date_joined is not None else '(none)'}"
+        )
+        print(f"    last login: {last_login if last_login is not None else '(none)'}")
+
     if current.sso_config_text:
         print("  sso config")
         _print_sso_summary(current.sso_config_text)
     else:
         print("  sso config: (none)")
+
+
+def current_state_as_dict(
+    current: CurrentState, *, catalog: str | None = None
+) -> dict[str, Any]:
+    """Return the complete current ACL state as JSON-compatible data."""
+    payload: dict[str, Any] = {
+        "buckets": [
+            _bucket_as_dict(bucket) for _name, bucket in sorted(current.buckets.items())
+        ],
+        "policies": [
+            _policy_as_dict(policy, managed=title in current.managed_policies)
+            for title, policy in sorted(current.all_policies.items())
+        ],
+        "roles": [
+            _role_as_dict(
+                role,
+                managed=name in current.managed_roles,
+                is_default=name == current.default_role_name,
+            )
+            for name, role in sorted(current.all_roles.items())
+        ],
+        "users": [
+            _user_as_dict(user) for user in sorted(current.users, key=lambda u: u.name)
+        ],
+        "sso_config": current.sso_config_text,
+        "default_role": current.default_role_name,
+    }
+    if catalog is not None:
+        payload = {"catalog": catalog, **payload}
+    return payload
+
+
+def _bucket_as_dict(bucket: Any) -> dict[str, Any]:
+    fields = (
+        "name",
+        "title",
+        "icon_url",
+        "description",
+        "overview_url",
+        "tags",
+        "relevance_score",
+        "last_indexed",
+        "sns_notification_arn",
+        "scanner_parallel_shards_depth",
+        "skip_meta_data_indexing",
+        "file_extensions_to_index",
+        "index_content_bytes",
+        "prefixes",
+    )
+    return {
+        field_name: _json_value(getattr(bucket, field_name))
+        for field_name in fields
+        if hasattr(bucket, field_name)
+    }
+
+
+def _policy_as_dict(policy: Any, *, managed: bool) -> dict[str, Any]:
+    return {
+        "id": _json_value(getattr(policy, "id", None)),
+        "title": policy.title,
+        "arn": _json_value(getattr(policy, "arn", None)),
+        "managed": managed,
+        "permissions": [
+            {
+                "bucket": permission.bucket,
+                "level": _json_value(permission.level),
+            }
+            for permission in (getattr(policy, "permissions", None) or [])
+        ],
+        "roles": [role.name for role in (getattr(policy, "roles", None) or [])],
+    }
+
+
+def _role_as_dict(role: Any, *, managed: bool, is_default: bool) -> dict[str, Any]:
+    policies = getattr(role, "policies", None)
+    permissions = getattr(role, "permissions", None)
+    return {
+        "id": _json_value(getattr(role, "id", None)),
+        "name": role.name,
+        "arn": _json_value(getattr(role, "arn", None)),
+        "managed": managed,
+        "default": is_default,
+        "policies": None if policies is None else [policy.title for policy in policies],
+        "permissions": (
+            None
+            if permissions is None
+            else [
+                {
+                    "bucket": permission.bucket,
+                    "level": _json_value(permission.level),
+                }
+                for permission in permissions
+            ]
+        ),
+    }
+
+
+def _user_as_dict(user: Any) -> dict[str, Any]:
+    return {
+        "name": user.name,
+        "email": user.email,
+        "role": None if user.role is None else user.role.name,
+        "extra_roles": [role.name for role in (user.extra_roles or [])],
+        "is_admin": user.is_admin,
+        "is_active": user.is_active,
+        "is_sso_only": user.is_sso_only,
+        "is_service": user.is_service,
+        "date_joined": _json_value(user.date_joined),
+        "last_login": _json_value(user.last_login),
+    }
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_value(item) for item in value]
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, (str, int, float, bool)):
+        return enum_value
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    return str(value)
 
 
 def _register_bucket_with_retry(

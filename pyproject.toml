@@ -1,6 +1,6 @@
 [project]
 name = "quiltx"
-version = "0.16.3"
+version = "0.16.4"
 description = "Unified toolkit for Quilt workflows."
 readme = "README.md"
 requires-python = ">=3.9"
