@@ -243,7 +243,17 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 f"Role '{name}' conflicts with reserved generated inline policy "
                 f"'{reserved_inline_policy}'"
             )
-        entry = _parse_acl_entry(value, f"roles.{name}")
+        entry = _parse_acl_entry(value, f"roles.{name}", require_sso_selector=False)
+        if not entry.sso and entry.default_role:
+            raise ValueError(
+                f"roles.{name}.config.default_role cannot be true without an "
+                "sso.<claim> selector"
+            )
+        if not entry.sso and entry.is_admin:
+            raise ValueError(
+                f"roles.{name}.config.is_admin cannot be true without an "
+                "sso.<claim> selector"
+            )
         policy_refs = _coerce_string_list(
             value.get(CONFIG_POLICIES_KEY, []), f"roles.{name}.{CONFIG_POLICIES_KEY}"
         )
@@ -1731,8 +1741,13 @@ def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) 
     )
 
 
-def _parse_acl_entry(value: dict[str, Any], field_name: str) -> _ParsedAclEntry:
-    sso = _coerce_sso_selectors(value, field_name)
+def _parse_acl_entry(
+    value: dict[str, Any],
+    field_name: str,
+    *,
+    require_sso_selector: bool = True,
+) -> _ParsedAclEntry:
+    sso = _coerce_sso_selectors(value, field_name, required=require_sso_selector)
     read = _coerce_string_list(
         value.get("buckets.read", []), f"{field_name}.buckets.read"
     )
@@ -1919,7 +1934,7 @@ def _print_sso_summary(sso_text: str) -> None:
 
 
 def _coerce_sso_selectors(
-    value: dict[str, Any], section_name: str
+    value: dict[str, Any], section_name: str, *, required: bool = True
 ) -> dict[str, list[str]]:
     sso: dict[str, list[str]] = {}
     for key, raw_values in value.items():
@@ -1930,7 +1945,7 @@ def _coerce_sso_selectors(
             raise ValueError(f"'{section_name}.{key}' must include a claim name")
         values = _coerce_non_empty_string_list(raw_values, f"{section_name}.{key}")
         sso[claim] = _dedupe_preserve_order(values)
-    if not sso:
+    if required and not sso:
         raise ValueError(
             f"'{section_name}' must include at least one sso.<claim> selector"
         )
