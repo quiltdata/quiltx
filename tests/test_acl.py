@@ -88,6 +88,7 @@ policies:
   public:
     sso.groups: [Everyone]
     buckets.read: [bucket-a]
+    config.default_role: true
 roles: {}
 """)
 
@@ -169,6 +170,7 @@ def test_parse_acl_config_accepts_arbitrary_sso_claims(tmp_path: Path) -> None:
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
   sales:
     sso.department: [Sales]
 roles:
@@ -191,6 +193,7 @@ def test_parse_acl_config_accepts_user_policy_after_group_policy(
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
   exec:
     sso.users: [ernest@quilt.bio]
 roles: {}
@@ -268,7 +271,9 @@ roles:
         acl.parse_acl_config(config_path)
 
 
-def test_parse_acl_config_rejects_multiple_default_entries(tmp_path: Path) -> None:
+def test_parse_acl_config_rejects_missing_or_multiple_sso_defaults(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
 policies:
@@ -287,6 +292,28 @@ roles:
         ValueError, match="Only one ACL entry may set config.default_role"
     ):
         acl.parse_acl_config(config_path)
+
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+roles: {}
+""")
+
+    with pytest.raises(
+        ValueError, match="sso.<claim> selectors must set config.default_role"
+    ):
+        acl.parse_acl_config(config_path)
+
+    with pytest.raises(
+        ValueError, match="sso.<claim> selectors must set config.default_role"
+    ):
+        acl.build_sso_config(
+            acl.AclConfig(
+                policies=[acl.AclPolicy(name="public", sso={"groups": ["Everyone"]})],
+                roles={},
+            )
+        )
 
 
 def test_parse_acl_config_rejects_broken_policy_ladder(tmp_path: Path) -> None:
@@ -450,6 +477,7 @@ def test_build_sso_config_emits_arbitrary_sso_claim_schema(tmp_path: Path) -> No
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
   sales:
     sso.department: [Sales]
 roles:
@@ -675,6 +703,7 @@ def test_switching_synthesized_policy_to_reusable_deletes_old_role() -> None:
                 name="SharedPolicy",
                 sso={"groups": ["Everyone"]},
                 read=["shared"],
+                default_role=True,
             )
         ],
         roles={},
@@ -701,6 +730,7 @@ def test_static_role_without_sso_manages_role_without_sso_update(
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
 roles:
   password-users:
     config.policies: [public]
@@ -721,26 +751,37 @@ roles:
     assert all(mapping["roles"] != ["password-users"] for mapping in sso["mappings"])
 
 
-def test_static_role_can_be_default_role(tmp_path: Path) -> None:
+def test_static_role_can_be_default_role(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
-policies:
-  public:
-    sso.groups: [Everyone]
+policies: {}
 roles:
-  exec:
-    sso.groups: [Executives]
-    config.policies: [public]
+  password-users:
     config.default_role: true
 """)
 
     config = acl.parse_acl_config(config_path)
-    sso_config = acl.build_sso_config(config)
-    assert sso_config is not None
-    payload = yaml.safe_load(sso_config)
+    diff = acl.compute_diff(config, _empty_current_state())
 
-    assert config.roles["exec"].default_role is True
-    assert payload["default_role"] == "exec"
+    assert config.roles["password-users"].default_role is True
+    assert acl.build_sso_config(config) is None
+    assert diff.default_role_name == "password-users"
+    assert diff.default_role_needs_update is True
+    acl.print_diff(diff)
+    assert "~ default role password-users" in capsys.readouterr().out
+
+    config_with_sso = acl.AclConfig(
+        policies=[],
+        roles={
+            **config.roles,
+            "employees": acl.AclStaticRole(
+                name="employees", sso={"groups": ["Employees"]}
+            ),
+        },
+    )
+    sso_config = acl.build_sso_config(config_with_sso)
+    assert sso_config is not None
+    assert yaml.safe_load(sso_config)["default_role"] == "password-users"
 
 
 def test_policy_config_is_admin_marks_synthesized_role_admin(tmp_path: Path) -> None:
@@ -749,6 +790,7 @@ def test_policy_config_is_admin_marks_synthesized_role_admin(tmp_path: Path) -> 
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
     config.is_admin: true
 roles: {}
 """)
@@ -771,6 +813,7 @@ def test_policy_config_is_admin_false_vetoes_generated_role_admin_and_warns(
 policies:
   public:
     sso.groups: [Everyone]
+    config.default_role: true
     config.is_admin: true
   internal:
     sso.groups: [Employees]
@@ -858,7 +901,10 @@ def test_reordering_policies_changes_synthesized_role_names() -> None:
     first = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="public", sso={"groups": ["Everyone"]}, read=["bucket-a"]
+                name="public",
+                sso={"groups": ["Everyone"]},
+                read=["bucket-a"],
+                default_role=True,
             ),
             acl.AclPolicy(
                 name="internal", sso={"groups": ["Everyone"]}, read=["bucket-b"]
@@ -869,7 +915,10 @@ def test_reordering_policies_changes_synthesized_role_names() -> None:
     second = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="internal", sso={"groups": ["Everyone"]}, read=["bucket-b"]
+                name="internal",
+                sso={"groups": ["Everyone"]},
+                read=["bucket-b"],
+                default_role=True,
             ),
             acl.AclPolicy(
                 name="public", sso={"groups": ["Everyone"]}, read=["bucket-a"]
@@ -1048,7 +1097,10 @@ def test_changing_policy_groups_updates_sso_config() -> None:
     original = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="public", sso={"groups": ["Everyone"]}, read=["bucket-a"]
+                name="public",
+                sso={"groups": ["Everyone"]},
+                read=["bucket-a"],
+                default_role=True,
             )
         ],
         roles={},
@@ -1056,7 +1108,10 @@ def test_changing_policy_groups_updates_sso_config() -> None:
     updated = acl.AclConfig(
         policies=[
             acl.AclPolicy(
-                name="public", sso={"groups": ["Employees"]}, read=["bucket-a"]
+                name="public",
+                sso={"groups": ["Employees"]},
+                read=["bucket-a"],
+                default_role=True,
             )
         ],
         roles={},
@@ -1188,6 +1243,7 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         roles=SimpleNamespace(
             create_managed=role_create,
             update_managed=lambda *args, **kwargs: None,
+            set_default=lambda name: calls.append(("default_role", name)),
             delete=lambda name: calls.append(("role_delete", name)),
         ),
         sso_config=SimpleNamespace(set=sso_set),
@@ -1201,6 +1257,8 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
             )
         ],
         roles_to_create=[acl.RoleUpdate(name="public", policy_titles=["public"])],
+        default_role_name="public",
+        default_role_needs_update=True,
         roles_to_delete=["legacy_role"],
         policies_to_delete=["legacy_policy"],
         sso_config_text=acl.build_sso_config(
@@ -1235,6 +1293,7 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
         ("bucket_add", "bucket-a", "bucket-a"),
         ("policy_create", "public"),
         ("role_create", "public", ["id-public"]),
+        ("default_role", "public"),
         ("sso_set", "public"),
         ("role_delete", "legacy_role"),
         ("policy_delete", "id-legacy-policy"),
@@ -1814,6 +1873,7 @@ roles:
   Analysts:
     config.policies: [SharedPolicy]
     buckets.read_write: [bucket-b]
+    config.default_role: true
   Observers: {}
 users:
   alice:
@@ -1852,6 +1912,7 @@ users:
     assert payload["roles"]["Analysts"] == {
         "buckets.read_write": ["bucket-b"],
         "config.policies": ["SharedPolicy"],
+        "config.default_role": True,
     }
     assert payload["users"]["alice"] == {
         "role": "Analysts",
