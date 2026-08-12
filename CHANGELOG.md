@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-08-12
+
+### Added
+
+- `quiltx catalog acl --yaml --omit-default-users` emits a concise declarative ACL export by excluding non-admin users assigned only to the catalog default role.
+
 ## [0.17.2] - 2026-08-11
 
 ### Fixed
