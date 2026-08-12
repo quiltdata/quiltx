@@ -66,12 +66,22 @@ def build_parser() -> argparse.ArgumentParser:
             "Only valid when config_file is omitted."
         ),
     )
+    parser.add_argument(
+        "--omit-default-users",
+        action="store_true",
+        help=(
+            "Emit a concise declarative YAML export by omitting users assigned "
+            "only to the default role. Requires --yaml and no config_file."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.omit_default_users and not args.yaml:
+        parser.error("--omit-default-users requires --yaml")
     if (args.json or args.yaml) and args.config_file is not None:
         output_flag = "--json" if args.json else "--yaml"
         parser.error(f"{output_flag} is only valid when config_file is omitted")
@@ -113,6 +123,7 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                         current,
                         catalog=stack.catalog_name,
                         captured_on=date.today().isoformat(),
+                        omit_default_users=args.omit_default_users,
                     ),
                     end="",
                 )

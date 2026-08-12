@@ -750,7 +750,11 @@ def current_state_as_dict(
 
 
 def current_state_as_acl_yaml(
-    current: CurrentState, *, catalog: str, captured_on: str
+    current: CurrentState,
+    *,
+    catalog: str,
+    captured_on: str,
+    omit_default_users: bool = False,
 ) -> str:
     """Return current state as replayable ACL YAML with capture metadata.
 
@@ -866,15 +870,23 @@ def current_state_as_acl_yaml(
         if not primary:
             notes.append(f"user {user.name!r} has no primary role")
             continue
-        user_entry: dict[str, Any] = {"role": primary}
         extras = [
             role.name
             for role in (getattr(user, "extra_roles", None) or [])
             if role is not None
         ]
+        is_admin = bool(getattr(user, "is_admin", False))
+        if (
+            omit_default_users
+            and primary == current.default_role_name
+            and not extras
+            and not is_admin
+        ):
+            continue
+        user_entry: dict[str, Any] = {"role": primary}
         if extras:
             user_entry["extra_roles"] = extras
-        user_entry["admin"] = bool(getattr(user, "is_admin", False))
+        user_entry["admin"] = is_admin
         user_entries[user.name] = user_entry
 
     for name in sorted(current.unmanaged_roles):
