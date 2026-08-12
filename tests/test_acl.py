@@ -1930,6 +1930,79 @@ users:
     assert diff.notices == []
 
 
+def test_current_state_yaml_can_omit_only_default_role_users(tmp_path: Path) -> None:
+    source = tmp_path / "source.yml"
+    source.write_text("""
+policies: {}
+roles:
+  Default:
+    config.default_role: true
+  Other: {}
+users: {}
+""")
+    current = _current_state_for_config(acl.parse_acl_config(source))
+    default_role = current.managed_roles["Default"]
+    other_role = current.managed_roles["Other"]
+    current.users.extend(
+        [
+            SimpleNamespace(
+                name="default-only",
+                role=default_role,
+                extra_roles=[],
+                is_admin=False,
+            ),
+            SimpleNamespace(
+                name="default-admin",
+                role=default_role,
+                extra_roles=[],
+                is_admin=True,
+            ),
+            SimpleNamespace(
+                name="default-extra",
+                role=default_role,
+                extra_roles=[other_role],
+                is_admin=False,
+            ),
+            SimpleNamespace(
+                name="other-only",
+                role=other_role,
+                extra_roles=[],
+                is_admin=False,
+            ),
+        ]
+    )
+
+    full = yaml.safe_load(
+        acl.current_state_as_acl_yaml(
+            current, catalog="catalog", captured_on="2026-08-12"
+        )
+    )
+    concise = yaml.safe_load(
+        acl.current_state_as_acl_yaml(
+            current,
+            catalog="catalog",
+            captured_on="2026-08-12",
+            omit_default_users=True,
+        )
+    )
+
+    assert set(full["users"]) == {
+        "default-only",
+        "default-admin",
+        "default-extra",
+        "other-only",
+    }
+    assert concise["users"] == {
+        "default-admin": {"role": "Default", "admin": True},
+        "default-extra": {
+            "role": "Default",
+            "extra_roles": ["Other"],
+            "admin": False,
+        },
+        "other-only": {"role": "Other", "admin": False},
+    }
+
+
 def test_current_state_yaml_round_trips_representable_sso(tmp_path: Path) -> None:
     source = tmp_path / "source.yml"
     source.write_text("""
@@ -1981,6 +2054,22 @@ def test_acl_tool_yaml_exports_valid_config_without_header(monkeypatch, capsys) 
 def test_acl_tool_yaml_rejects_config_file(capsys) -> None:
     with pytest.raises(SystemExit) as exc_info:
         acl_tool.main(["--yaml", "config.yml"])
+
+    assert exc_info.value.code == 2
+    assert "--yaml is only valid when config_file is omitted" in capsys.readouterr().err
+
+
+def test_acl_tool_omit_default_users_requires_yaml(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        acl_tool.main(["--omit-default-users"])
+
+    assert exc_info.value.code == 2
+    assert "--omit-default-users requires --yaml" in capsys.readouterr().err
+
+
+def test_acl_tool_omit_default_users_rejects_config_file(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        acl_tool.main(["--yaml", "--omit-default-users", "config.yml"])
 
     assert exc_info.value.code == 2
     assert "--yaml is only valid when config_file is omitted" in capsys.readouterr().err
