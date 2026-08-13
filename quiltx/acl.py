@@ -1143,30 +1143,29 @@ def _register_bucket_with_retry(
         raise RuntimeError(f"no accessible AWS profile for bucket {bucket}")
 
     sns_client = session.client("sns", region_name=region)
+    sqs_client = session.client("sqs", region_name=region)
+    lambda_client = session.client("lambda", region_name=region)
     data_account_id = str(session.client("sts").get_caller_identity()["Account"])
 
-    existing_policy = bucket_lib.get_bucket_policy(bucket, s3_client=s3_client)
-    statement = bucket_lib.build_quilt_policy_statement(bucket, control_account_id)
-    merged = bucket_lib.merge_bucket_policy(existing_policy, statement)
-    bucket_lib.apply_bucket_policy(bucket, merged, s3_client=s3_client)
-
-    sns_topic_arn = bucket_lib.get_bucket_notification_sns(bucket, s3_client=s3_client)
-    if sns_topic_arn is None:
-        sns_topic_arn = bucket_lib.ensure_sns_topic(
-            bucket, region, sns_client=sns_client
-        )
-    bucket_lib.configure_sns_topic_policy(
+    plan = bucket_lib.build_bucket_preparation_plan(
         bucket,
-        sns_topic_arn,
+        region,
         data_account_id,
-        f"arn:aws:iam::{control_account_id}:root",
+        control_account_id=control_account_id,
+        s3_client=s3_client,
         sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
     )
-    bucket_lib.configure_bucket_notifications(
-        bucket, sns_topic_arn, s3_client=s3_client
+    bucket_lib.apply_bucket_preparation(
+        plan,
+        s3_client=s3_client,
+        sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
     )
     stack.admin.buckets.add(
-        name=bucket, title=bucket, sns_notification_arn=sns_topic_arn
+        name=bucket, title=bucket, sns_notification_arn=plan.sns_topic_arn
     )
 
 
@@ -1353,7 +1352,10 @@ def apply_acl(
 
                 bucket_lib.add_bucket_without_preflight(stack, bucket, title=bucket)
             elif control_account_id is None:
-                stack.admin.buckets.add(bucket, bucket)
+                raise ValueError(
+                    "control account metadata is required for AWS preparation; "
+                    "refresh the catalog stack cache or use --no-preflight explicitly"
+                )
             else:
                 _register_bucket_with_retry(
                     stack,

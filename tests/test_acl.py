@@ -1293,7 +1293,13 @@ def test_apply_acl_orders_operations_and_updates_sso_before_role_deletes(
     current.managed_policies[legacy_policy.title] = legacy_policy
     current.all_policies[legacy_policy.title] = legacy_policy
 
-    acl.apply_acl(stack, diff, current)
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight",
+        lambda stack, bucket, *, title=None: stack.admin.buckets.add(
+            name=bucket, title=title or bucket
+        ),
+    )
+    acl.apply_acl(stack, diff, current, no_preflight=True)
 
     assert calls == [
         ("bucket_add", "bucket-a", "bucket-a"),
@@ -1577,6 +1583,132 @@ def test_apply_acl_detaches_deleted_policies_from_surviving_roles() -> None:
     assert calls == [
         ("role_update", "id-survivor", "survivor", ["id-keep"]),
         ("policy_delete", "id-legacy"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"region": "us-east-1"}, {"account_id": ""}],
+    ids=["missing-account-id", "empty-account-id"],
+)
+def test_apply_acl_requires_control_account_metadata_for_preflight(
+    monkeypatch, payload
+) -> None:
+    direct_adds: list[str] = []
+    stack = _fake_stack(
+        payload=payload,
+        buckets=SimpleNamespace(
+            add=lambda **kwargs: direct_adds.append(kwargs["name"])
+        ),
+    )
+    monkeypatch.setattr(
+        acl,
+        "_register_bucket_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("registration must not run without control-account metadata")
+        ),
+    )
+
+    warnings = acl.apply_acl(
+        stack,
+        acl.AclDiff(buckets_to_add=["bucket-a"]),
+        _empty_current_state(),
+    )
+
+    assert direct_adds == []
+    assert len(warnings) == 1
+    assert "control account metadata is required" in warnings[0]
+    assert "--no-preflight" in warnings[0]
+
+
+def test_register_bucket_with_retry_uses_shared_preparation(monkeypatch) -> None:
+    from quiltx import bucket as bucket_lib
+
+    s3_client = object()
+    sns_client = object()
+    sqs_client = object()
+    lambda_client = object()
+    plan = SimpleNamespace(
+        sns_topic_arn="arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    )
+    calls: list[tuple[Any, ...]] = []
+
+    class Session:
+        def client(self, service: str, region_name: str | None = None):
+            if service == "sns":
+                assert region_name == "us-west-2"
+                return sns_client
+            if service == "sqs":
+                assert region_name == "us-west-2"
+                return sqs_client
+            if service == "lambda":
+                assert region_name == "us-west-2"
+                return lambda_client
+            if service == "sts":
+                return SimpleNamespace(
+                    get_caller_identity=lambda: {"Account": "111122223333"}
+                )
+            raise AssertionError(f"unexpected service {service}")
+
+    def build_plan(*args, **kwargs):
+        calls.append(
+            (
+                "plan",
+                args,
+                kwargs["control_account_id"],
+                kwargs["s3_client"],
+                kwargs["sns_client"],
+                kwargs["sqs_client"],
+                kwargs["lambda_client"],
+            )
+        )
+        return plan
+
+    monkeypatch.setattr(
+        bucket_lib,
+        "resolve_bucket_session",
+        lambda *args, **kwargs: (Session(), s3_client, "us-west-2", "prod"),
+    )
+    monkeypatch.setattr(bucket_lib, "build_bucket_preparation_plan", build_plan)
+    monkeypatch.setattr(
+        bucket_lib,
+        "apply_bucket_preparation",
+        lambda candidate, **kwargs: calls.append(
+            (
+                "apply",
+                candidate,
+                kwargs["s3_client"],
+                kwargs["sns_client"],
+                kwargs["sqs_client"],
+                kwargs["lambda_client"],
+            )
+        ),
+    )
+    stack = _fake_stack(
+        buckets=SimpleNamespace(add=lambda **kwargs: calls.append(("add", kwargs)))
+    )
+
+    acl._register_bucket_with_retry(stack, "bucket-a", "123456789012", assume_yes=True)
+
+    assert calls == [
+        (
+            "plan",
+            ("bucket-a", "us-west-2", "111122223333"),
+            "123456789012",
+            s3_client,
+            sns_client,
+            sqs_client,
+            lambda_client,
+        ),
+        ("apply", plan, s3_client, sns_client, sqs_client, lambda_client),
+        (
+            "add",
+            {
+                "name": "bucket-a",
+                "title": "bucket-a",
+                "sns_notification_arn": plan.sns_topic_arn,
+            },
+        ),
     ]
 
 

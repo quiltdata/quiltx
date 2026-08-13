@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `quiltx bucket prepare` configures cross-account S3 access, SNS policy, and safe object notifications using bucket-owner AWS credentials only, with exact dry-run documents and a minimal JSON handoff for a separate catalog operator.
 
+### Changed
+
+- `quiltx bucket add` and ACL bucket reconciliation now run through the same preparation planner/applicator as `bucket prepare`, gaining its conflict detection, stale-destination validation (SNS, SQS, and Lambda), and per-write drift rechecks; `--force` re-registration only removes the catalog row after AWS preparation succeeds.
+
 ## [0.17.3] - 2026-08-12
 
 ### Added

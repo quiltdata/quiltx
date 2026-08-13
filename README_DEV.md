@@ -18,12 +18,13 @@ print(stack["StackName"])
 
 ## Bucket registration paths
 
-Bucket registration has three explicit paths. The default bucket-owner path uses
-local AWS credentials to probe S3, merge the Quilt bucket-policy statement,
-configure SNS, configure bucket notifications, and then call GraphQL
-`bucketAdd` with the SNS topic ARN.
+Bucket registration has three explicit paths. The default bucket-owner path and
+ACL reconciliation both call the same AWS preparation planner/applicator to
+probe S3, merge the Quilt bucket-policy statement, configure SNS, and configure
+bucket notifications; they then call GraphQL `bucketAdd` with the planned SNS
+topic ARN.
 
-`quiltx bucket prepare` is AWS-only and must remain outside `catalog_command`.
+`quiltx bucket prepare` calls that same planner/applicator but is AWS-only and must remain outside `catalog_command`.
 It reads and converges the final bucket policy, SNS policy, and notification
 document without loading catalog configuration, authenticating, or calling
 Quilt admin APIs. The bucket owner can emit a minimal `--json --yes` handoff;

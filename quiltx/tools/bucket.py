@@ -419,6 +419,17 @@ def _lightweight_stack_payload(
     )
 
 
+def _print_plan_documents(
+    console: Console, plan: bucket_lib.BucketPreparationPlan
+) -> None:
+    print("\nFinal bucket policy:")
+    _print_json(console, plan.bucket_policy)
+    print("\nFinal SNS topic policy:")
+    _print_json(console, plan.sns_policy)
+    print("\nFinal bucket notification configuration:")
+    _print_json(console, plan.notification_configuration)
+
+
 def _print_bucket_preparation_plan(plan: bucket_lib.BucketPreparationPlan) -> None:
     console = Console(width=120)
     print("Bucket prepare dry-run")
@@ -427,12 +438,7 @@ def _print_bucket_preparation_plan(plan: bucket_lib.BucketPreparationPlan) -> No
     print(f"Owning account: {plan.owning_account}")
     print(f"Effective principals: {', '.join(plan.principals)}")
     print(f"SNS topic: {plan.sns_topic_arn}")
-    print("\nFinal bucket policy:")
-    _print_json(console, plan.bucket_policy)
-    print("\nFinal SNS topic policy:")
-    _print_json(console, plan.sns_policy)
-    print("\nFinal bucket notification configuration:")
-    _print_json(console, plan.notification_configuration)
+    _print_plan_documents(console, plan)
 
 
 def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
@@ -482,6 +488,8 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     if session is None:
         return 1
     sns_client = session.client("sns", region_name=region)
+    sqs_client = session.client("sqs", region_name=region)
+    lambda_client = session.client("lambda", region_name=region)
     owning_account = _get_session_account_id(session)
     plan = bucket_lib.build_bucket_preparation_plan(
         args.bucket_name,
@@ -491,6 +499,8 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         principals=principals or None,
         s3_client=s3_client,
         sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
     )
 
     if args.dry_run:
@@ -501,7 +511,11 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         return 1
 
     bucket_lib.apply_bucket_preparation(
-        plan, s3_client=s3_client, sns_client=sns_client
+        plan,
+        s3_client=s3_client,
+        sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
     )
     if args.json:
         print(json.dumps(plan.handoff(), indent=2))
@@ -566,6 +580,8 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             return 1
         args.profile = resolved_profile
         sns_client = session.client("sns", region_name=bucket_region)
+        sqs_client = session.client("sqs", region_name=bucket_region)
+        lambda_client = session.client("lambda", region_name=bucket_region)
 
         existing_bucket = stack.admin.buckets.get(args.bucket_name)
         prior_title = (
@@ -573,13 +589,13 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             if existing_bucket is not None
             else None
         )
-        if existing_bucket is not None and args.force:
+        force_reregister = existing_bucket is not None and args.force
+        if force_reregister:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
-                "removing and re-adding (--force) so Quilt re-subscribes SQS."
+                "will remove and re-add after AWS preparation (--force) so Quilt "
+                "re-subscribes SQS."
             )
-            stack.admin.buckets.remove(args.bucket_name)
-            existing_bucket = None
         elif existing_bucket is not None:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
@@ -588,21 +604,18 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                 "registration so Quilt re-subscribes SQS."
             )
 
-        bucket_policy = bucket_lib.get_bucket_policy(
-            args.bucket_name, s3_client=s3_client
-        )
-        quilt_statement = bucket_lib.build_quilt_policy_statement(
-            args.bucket_name,
-            control_account_id,
-            principals=principals or None,
-        )
-        merged_policy = bucket_lib.merge_bucket_policy(bucket_policy, quilt_statement)
-
-        sns_topic_arn = bucket_lib.get_bucket_notification_sns(
-            args.bucket_name, s3_client=s3_client
-        )
-
         data_account_id = _get_session_account_id(session)
+        plan = bucket_lib.build_bucket_preparation_plan(
+            args.bucket_name,
+            bucket_region,
+            data_account_id,
+            control_account_id=control_account_id,
+            principals=principals or None,
+            s3_client=s3_client,
+            sns_client=sns_client,
+            sqs_client=sqs_client,
+            lambda_client=lambda_client,
+        )
 
         if args.dry_run:
             _print_dry_run_plan(
@@ -613,12 +626,8 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                 effective_principals,
                 principal_source,
                 control_region,
-                args.bucket_name,
-                bucket_region,
-                data_account_id,
                 args.profile,
-                merged_policy,
-                sns_topic_arn,
+                plan,
             )
             return 0
 
@@ -630,42 +639,25 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             effective_principals,
             principal_source,
             control_region,
-            args.bucket_name,
-            bucket_region,
-            data_account_id,
             args.profile,
-            sns_topic_arn,
+            plan,
         ):
             print("Aborted.")
             return 1
 
-        if sns_topic_arn is None:
-            sns_topic_arn = bucket_lib.ensure_sns_topic(
-                args.bucket_name,
-                bucket_region,
-                sns_client=sns_client,
-            )
-
-        bucket_lib.configure_sns_topic_policy(
-            args.bucket_name,
-            sns_topic_arn,
-            data_account_id,
-            effective_principals,
+        bucket_lib.apply_bucket_preparation(
+            plan,
+            s3_client=s3_client,
             sns_client=sns_client,
+            sqs_client=sqs_client,
+            lambda_client=lambda_client,
         )
-
-        bucket_lib.apply_bucket_policy(
-            args.bucket_name,
-            merged_policy,
-            s3_client=s3_client,
-        )
-        bucket_lib.configure_bucket_notifications(
-            args.bucket_name,
-            sns_topic_arn,
-            s3_client=s3_client,
-        )
+        sns_topic_arn = plan.sns_topic_arn
 
         bucket_title = args.title or prior_title or args.bucket_name
+        if force_reregister:
+            stack.admin.buckets.remove(args.bucket_name)
+            existing_bucket = None
         if existing_bucket is None:
             stack.admin.buckets.add(
                 name=args.bucket_name,
@@ -990,11 +982,8 @@ def _confirm_bucket_add(
     principals: list[str],
     principal_source: str,
     control_region: str,
-    bucket_name: str,
-    bucket_region: str,
-    data_account_id: str,
     profile: str | None,
-    sns_topic_arn: str | None,
+    plan: bucket_lib.BucketPreparationPlan,
 ) -> bool:
     console = Console(width=120)
     _print_context_table(
@@ -1007,20 +996,16 @@ def _confirm_bucket_add(
         principals,
         principal_source,
         control_region,
-        bucket_name,
-        bucket_region,
-        data_account_id,
+        plan.bucket,
+        plan.region,
+        plan.owning_account,
         profile,
-        sns_topic_arn,
+        plan.sns_topic_arn if plan.topic_exists else None,
     )
-    if sns_topic_arn is None:
-        planned_topic_arn = (
-            f"arn:aws:sns:{bucket_region}:{data_account_id}:"
-            f"{bucket_lib._sns_topic_name(bucket_name)}"
-        )
+    if not plan.topic_exists:
         console.print(
             f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
-            f"a new topic will be created: {planned_topic_arn}"
+            f"a new topic will be created: {plan.sns_topic_arn}"
         )
     response = input("Continue? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
@@ -1034,12 +1019,8 @@ def _print_dry_run_plan(
     principals: list[str],
     principal_source: str,
     control_region: str,
-    bucket_name: str,
-    bucket_region: str,
-    data_account_id: str,
     profile: str | None,
-    merged_policy: Mapping[str, Any],
-    sns_topic_arn: str | None,
+    plan: bucket_lib.BucketPreparationPlan,
 ) -> None:
     console = Console(width=120)
     _print_context_table(
@@ -1052,43 +1033,18 @@ def _print_dry_run_plan(
         principals,
         principal_source,
         control_region,
-        bucket_name,
-        bucket_region,
-        data_account_id,
+        plan.bucket,
+        plan.region,
+        plan.owning_account,
         profile,
-        sns_topic_arn,
+        plan.sns_topic_arn if plan.topic_exists else None,
     )
-    print()
-    print("Planned bucket policy:")
-    _print_json(console, merged_policy)
-
-    planned_topic_arn = sns_topic_arn or (
-        f"arn:aws:sns:{bucket_region}:{data_account_id}:"
-        f"{bucket_lib._sns_topic_name(bucket_name)}"
-    )
-    if sns_topic_arn is None:
+    if not plan.topic_exists:
         console.print(
             f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
-            f"a new topic will be created: {planned_topic_arn}"
+            f"a new topic will be created: {plan.sns_topic_arn}"
         )
-    print("\nPlanned SNS topic policy statement:")
-    _print_json(
-        console,
-        {
-            "Version": "2012-10-17",
-            "Statement": [
-                bucket_lib._build_sns_topic_publish_policy_statement(
-                    bucket_name,
-                    planned_topic_arn,
-                    data_account_id,
-                ),
-                bucket_lib._build_sns_topic_subscribe_policy_statement(
-                    planned_topic_arn,
-                    principals,
-                ),
-            ],
-        },
-    )
+    _print_plan_documents(console, plan)
 
 
 def _print_no_preflight_dry_run(

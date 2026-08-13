@@ -6,7 +6,7 @@ import contextlib
 import hashlib
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -328,63 +328,37 @@ def test_configure_sns_topic_policy_creates_or_merges() -> None:
 def test_configure_notifications_merges() -> None:
     client = _client("s3")
     stubber = Stubber(client)
+    existing = {
+        "LambdaFunctionConfigurations": [
+            {
+                "Id": "lambda",
+                "LambdaFunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:f",
+                "Events": ["s3:ReducedRedundancyLostObject"],
+            }
+        ],
+        "QueueConfigurations": [
+            {
+                "Id": "queue",
+                "QueueArn": "arn:aws:sqs:us-east-1:123456789012:q",
+                "Events": ["s3:ObjectRestore:Completed"],
+            }
+        ],
+    }
+    topic_arn = "arn:aws:sns:us-east-1:123456789012:topic"
+    expected = bucket_lib.build_bucket_notification_configuration(existing, topic_arn)
     stubber.add_response(
         "get_bucket_notification_configuration",
-        {
-            "LambdaFunctionConfigurations": [
-                {
-                    "Id": "lambda",
-                    "LambdaFunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:f",
-                    "Events": ["s3:ObjectCreated:*"],
-                }
-            ],
-            "QueueConfigurations": [
-                {
-                    "Id": "queue",
-                    "QueueArn": "arn:aws:sqs:us-east-1:123456789012:q",
-                    "Events": ["s3:ObjectRemoved:*"],
-                }
-            ],
-        },
+        existing,
         {"Bucket": "bucket"},
     )
     stubber.add_response(
         "put_bucket_notification_configuration",
         {},
-        {
-            "Bucket": "bucket",
-            "NotificationConfiguration": {
-                "TopicConfigurations": [
-                    {
-                        "Id": "QuiltBucketNotifications",
-                        "TopicArn": "arn:aws:sns:us-east-1:123456789012:topic",
-                        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
-                    }
-                ],
-                "QueueConfigurations": [
-                    {
-                        "Id": "queue",
-                        "QueueArn": "arn:aws:sqs:us-east-1:123456789012:q",
-                        "Events": ["s3:ObjectRemoved:*"],
-                    }
-                ],
-                "LambdaFunctionConfigurations": [
-                    {
-                        "Id": "lambda",
-                        "LambdaFunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:f",
-                        "Events": ["s3:ObjectCreated:*"],
-                    }
-                ],
-            },
-        },
+        {"Bucket": "bucket", "NotificationConfiguration": expected},
     )
     stubber.activate()
 
-    bucket_lib.configure_bucket_notifications(
-        "bucket",
-        "arn:aws:sns:us-east-1:123456789012:topic",
-        s3_client=client,
-    )
+    bucket_lib.configure_bucket_notifications("bucket", topic_arn, s3_client=client)
 
     stubber.deactivate()
 
@@ -719,10 +693,21 @@ def test_bucket_preparation_is_idempotent_across_new_and_existing_topic() -> Non
         {"EventBridgeConfiguration": {}},
         {"Bucket": bucket},
     )
+    # Recheck immediately before each write.
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(existing_bucket_policy)},
+        {"Bucket": bucket},
+    )
     s3_stubber.add_response(
         "put_bucket_policy",
         {},
         {"Bucket": bucket, "Policy": json.dumps(final_bucket_policy)},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {"EventBridgeConfiguration": {}},
+        {"Bucket": bucket},
     )
     s3_stubber.add_response(
         "put_bucket_notification_configuration",
@@ -771,6 +756,20 @@ def test_bucket_preparation_is_idempotent_across_new_and_existing_topic() -> Non
         "create_topic",
         {"TopicArn": topic_arn},
         {"Name": "quilt-bucket-notifications"},
+    )
+    # Recheck the just-created topic still carries only the default owner policy.
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {
+            "Attributes": {
+                "Policy": json.dumps(
+                    bucket_lib._build_default_sns_owner_policy(
+                        topic_arn, owning_account
+                    )
+                )
+            }
+        },
+        {"TopicArn": topic_arn},
     )
     sns_stubber.add_response(
         "set_topic_attributes",
@@ -906,10 +905,14 @@ class FakeBucket:
 
 
 class FakeSession:
-    def __init__(self, s3_client, sns_client, sts_client) -> None:
+    def __init__(
+        self, s3_client, sns_client, sts_client, sqs_client=None, lambda_client=None
+    ) -> None:
         self._s3_client = s3_client
         self._sns_client = sns_client
         self._sts_client = sts_client
+        self._sqs_client = sqs_client
+        self._lambda_client = lambda_client
         self.profile_name = None
 
     def client(self, service_name: str, region_name: str | None = None):
@@ -918,6 +921,12 @@ class FakeSession:
         if service_name == "sns":
             assert region_name == "us-west-2"
             return self._sns_client
+        if service_name == "sqs":
+            assert region_name == "us-west-2"
+            return self._sqs_client if self._sqs_client is not None else object()
+        if service_name == "lambda":
+            assert region_name == "us-west-2"
+            return self._lambda_client if self._lambda_client is not None else object()
         if service_name == "sts":
             return self._sts_client
         raise AssertionError(f"unexpected service: {service_name}")
@@ -1095,7 +1104,7 @@ def test_prepare_json_default_profile_fallback_keeps_json_stdout(
         def client(self, service: str, region_name: str | None = None):
             if service == "s3":
                 return FakeS3(self.profile_name)
-            if service == "sns":
+            if service in {"sns", "sqs", "lambda"}:
                 assert region_name == "us-west-2"
                 return object()
             raise AssertionError(f"unexpected service {service}")
@@ -1203,6 +1212,15 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
 
     sns_client = _client("sns", region_name="us-west-2")
     sns_stubber = Stubber(sns_client)
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        expected_params={
+            "TopicArn": (
+                "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+            )
+        },
+    )
     sns_stubber.activate()
 
     sts_client = _client("sts", region_name="us-west-2")
@@ -1256,11 +1274,12 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
     assert "us-west-2" in captured.out
     assert "AWS profile <default>" in captured.out
     assert "create SNS topic" in captured.out
-    assert "Planned bucket policy:" in captured.out
+    assert "Final bucket policy:" in captured.out
     assert (
         "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications" in captured.out
     )
-    assert "Planned SNS topic policy statement:" in captured.out
+    assert "Final SNS topic policy:" in captured.out
+    assert "Final bucket notification configuration:" in captured.out
 
     s3_stubber.assert_no_pending_responses()
     sns_stubber.assert_no_pending_responses()
@@ -1268,6 +1287,66 @@ def test_add_dry_run(monkeypatch, capsys) -> None:
     s3_stubber.deactivate()
     sns_stubber.deactivate()
     sts_stubber.deactivate()
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_result"),
+    [(["--dry-run"], 0), ([], 1)],
+    ids=["dry-run", "declined"],
+)
+def test_add_force_does_not_remove_before_execution(
+    monkeypatch, extra_args, expected_result
+) -> None:
+    calls: list[tuple[str, str]] = []
+    buckets = SimpleNamespace(
+        get=lambda name: FakeBucket(name, "Existing Title"),
+        remove=lambda name: calls.append(("remove", name)),
+        add=lambda **kwargs: calls.append(("add", kwargs["name"])),
+    )
+    stack = make_fake_catalog(
+        "demo",
+        payload={"account_id": "123456789012", "region": "us-east-1"},
+        buckets=buckets,
+    )
+    session = SimpleNamespace(client=lambda service, region_name=None: object())
+    plan = _fake_bucket_preparation_plan()
+
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda _catalog=None, **kwargs: stack,
+    )
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: {"account_id": "123456789012", "region": "us-east-1"},
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "resolve_bucket_session",
+        lambda *args, **kwargs: (session, object(), plan.region, None),
+    )
+    monkeypatch.setattr(
+        bucket_tool, "_get_session_account_id", lambda _session: plan.owning_account
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "build_bucket_preparation_plan",
+        lambda *args, **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run or declined confirmation must not apply")
+        ),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    result = bucket_tool.main(["add", "bucket", "--force", "--no-test", *extra_args])
+
+    assert result == expected_result
+    assert calls == []
 
 
 def test_add_already_registered_reapplies_plumbing(monkeypatch, capsys) -> None:
@@ -1515,77 +1594,50 @@ def test_bucket_add_union_error_messages(typename, message, expected) -> None:
 
 
 def _stub_s3_for_full_add():
-    """S3 stubs covering get_location, policy read/write, notification read/write."""
+    """S3 stubs for planning, revalidation, and applying a registered bucket."""
     s3_client = _client("s3", region_name="us-west-2")
     s3_stubber = Stubber(s3_client)
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    bucket_policy = {"Version": "2012-10-17", "Statement": []}
+    notifications = {
+        "TopicConfigurations": [
+            {
+                "Id": "QuiltBucketNotifications",
+                "TopicArn": topic_arn,
+                "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+            }
+        ]
+    }
+    final_policy = bucket_lib.merge_bucket_policy(
+        bucket_policy,
+        bucket_lib.build_quilt_policy_statement("bucket", "123456789012"),
+    )
     s3_stubber.add_response(
         "get_bucket_location",
         {"LocationConstraint": "us-west-2"},
         {"Bucket": "bucket"},
     )
+    for _ in range(2):
+        s3_stubber.add_response(
+            "get_bucket_policy",
+            {"Policy": json.dumps(bucket_policy)},
+            {"Bucket": "bucket"},
+        )
+        s3_stubber.add_response(
+            "get_bucket_notification_configuration",
+            notifications,
+            {"Bucket": "bucket"},
+        )
+    # Recheck immediately before the bucket-policy write.
     s3_stubber.add_response(
         "get_bucket_policy",
-        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
-        {"Bucket": "bucket"},
-    )
-    s3_stubber.add_response(
-        "get_bucket_notification_configuration",
-        {
-            "TopicConfigurations": [
-                {
-                    "Id": "existing",
-                    "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
-                    "Events": ["s3:ObjectCreated:*"],
-                }
-            ]
-        },
+        {"Policy": json.dumps(bucket_policy)},
         {"Bucket": "bucket"},
     )
     s3_stubber.add_response(
         "put_bucket_policy",
         {},
-        {
-            "Bucket": "bucket",
-            "Policy": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        bucket_lib.build_quilt_policy_statement(
-                            "bucket", "123456789012"
-                        )
-                    ],
-                }
-            ),
-        },
-    )
-    s3_stubber.add_response(
-        "get_bucket_notification_configuration",
-        {
-            "TopicConfigurations": [
-                {
-                    "Id": "existing",
-                    "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
-                    "Events": ["s3:ObjectCreated:*"],
-                }
-            ]
-        },
-        {"Bucket": "bucket"},
-    )
-    s3_stubber.add_response(
-        "put_bucket_notification_configuration",
-        {},
-        {
-            "Bucket": "bucket",
-            "NotificationConfiguration": {
-                "TopicConfigurations": [
-                    {
-                        "Id": "QuiltBucketNotifications",
-                        "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
-                        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
-                    }
-                ]
-            },
-        },
+        {"Bucket": "bucket", "Policy": json.dumps(final_policy)},
     )
     s3_stubber.activate()
     return s3_client, s3_stubber
@@ -1594,46 +1646,27 @@ def _stub_s3_for_full_add():
 def _stub_sns_for_existing_topic():
     sns_client = _client("sns", region_name="us-west-2")
     sns_stubber = Stubber(sns_client)
-    topic_arn = "arn:aws:sns:us-west-2:111122223333:existing"
-    sns_stubber.add_response(
-        "get_topic_attributes",
-        {"Attributes": {}},
-        {"TopicArn": topic_arn},
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    final_policy = bucket_lib.build_sns_topic_policy(
+        None,
+        "bucket",
+        topic_arn,
+        "111122223333",
+        ["arn:aws:iam::123456789012:root"],
     )
+    for _ in range(3):
+        sns_stubber.add_response(
+            "get_topic_attributes",
+            {"Attributes": {}},
+            {"TopicArn": topic_arn},
+        )
     sns_stubber.add_response(
         "set_topic_attributes",
         {},
         {
             "TopicArn": topic_arn,
             "AttributeName": "Policy",
-            "AttributeValue": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        {
-                            "Sid": "QuiltBucketNotifications",
-                            "Effect": "Allow",
-                            "Principal": {"Service": "s3.amazonaws.com"},
-                            "Action": "sns:Publish",
-                            "Resource": topic_arn,
-                            "Condition": {
-                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
-                                "StringEquals": {"aws:SourceAccount": "111122223333"},
-                            },
-                        },
-                        {
-                            "Sid": "QuiltCrossAccountSNSAccess",
-                            "Effect": "Allow",
-                            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
-                            "Action": [
-                                "sns:GetTopicAttributes",
-                                "sns:Subscribe",
-                            ],
-                            "Resource": topic_arn,
-                        },
-                    ],
-                }
-            ),
+            "AttributeValue": json.dumps(final_policy),
         },
     )
     sns_stubber.activate()
@@ -1726,7 +1759,7 @@ def test_add_no_stack_cache_auto_discovers(monkeypatch, capsys) -> None:
     assert "Discovering stack" in captured.out
 
 
-def test_add_reuses_existing_sns(monkeypatch) -> None:
+def test_add_rejects_unrelated_existing_sns(monkeypatch, capsys) -> None:
     s3_client = _client("s3", region_name="us-west-2")
     s3_stubber = Stubber(s3_client)
     s3_stubber.add_response(
@@ -1752,98 +1785,10 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
         },
         {"Bucket": "bucket"},
     )
-    s3_stubber.add_response(
-        "put_bucket_policy",
-        {},
-        {
-            "Bucket": "bucket",
-            "Policy": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        bucket_lib.build_quilt_policy_statement(
-                            "bucket", "123456789012"
-                        )
-                    ],
-                }
-            ),
-        },
-    )
-    s3_stubber.add_response(
-        "get_bucket_notification_configuration",
-        {
-            "TopicConfigurations": [
-                {
-                    "Id": "existing",
-                    "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
-                    "Events": ["s3:ObjectCreated:*"],
-                }
-            ]
-        },
-        {"Bucket": "bucket"},
-    )
-    s3_stubber.add_response(
-        "put_bucket_notification_configuration",
-        {},
-        {
-            "Bucket": "bucket",
-            "NotificationConfiguration": {
-                "TopicConfigurations": [
-                    {
-                        "Id": "QuiltBucketNotifications",
-                        "TopicArn": "arn:aws:sns:us-west-2:111122223333:existing",
-                        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
-                    }
-                ]
-            },
-        },
-    )
     s3_stubber.activate()
 
     sns_client = _client("sns", region_name="us-west-2")
     sns_stubber = Stubber(sns_client)
-    topic_arn = "arn:aws:sns:us-west-2:111122223333:existing"
-    sns_stubber.add_response(
-        "get_topic_attributes",
-        {"Attributes": {}},
-        {"TopicArn": topic_arn},
-    )
-    sns_stubber.add_response(
-        "set_topic_attributes",
-        {},
-        {
-            "TopicArn": topic_arn,
-            "AttributeName": "Policy",
-            "AttributeValue": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        {
-                            "Sid": "QuiltBucketNotifications",
-                            "Effect": "Allow",
-                            "Principal": {"Service": "s3.amazonaws.com"},
-                            "Action": "sns:Publish",
-                            "Resource": topic_arn,
-                            "Condition": {
-                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
-                                "StringEquals": {"aws:SourceAccount": "111122223333"},
-                            },
-                        },
-                        {
-                            "Sid": "QuiltCrossAccountSNSAccess",
-                            "Effect": "Allow",
-                            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
-                            "Action": [
-                                "sns:GetTopicAttributes",
-                                "sns:Subscribe",
-                            ],
-                            "Resource": topic_arn,
-                        },
-                    ],
-                }
-            ),
-        },
-    )
     sns_stubber.activate()
 
     sts_client = _client("sts")
@@ -1881,14 +1826,9 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
         },
     )
 
-    assert bucket_tool.main(["add", "bucket", "--title", "Demo Bucket", "--yes"]) == 0
-    assert add_calls == [
-        {
-            "name": "bucket",
-            "title": "Demo Bucket",
-            "sns_notification_arn": "arn:aws:sns:us-west-2:111122223333:existing",
-        }
-    ]
+    assert bucket_tool.main(["add", "bucket", "--title", "Demo Bucket", "--yes"]) == 1
+    assert "overlaps Quilt's unfiltered" in capsys.readouterr().err
+    assert add_calls == []
 
     s3_stubber.assert_no_pending_responses()
     sns_stubber.assert_no_pending_responses()
@@ -1899,6 +1839,23 @@ def test_add_reuses_existing_sns(monkeypatch) -> None:
 
 
 def test_add_creates_sns(monkeypatch) -> None:
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    bucket_policy = {"Version": "2012-10-17", "Statement": []}
+    final_bucket_policy = bucket_lib.merge_bucket_policy(
+        bucket_policy,
+        bucket_lib.build_quilt_policy_statement("bucket", "123456789012"),
+    )
+    final_notifications = bucket_lib.build_bucket_notification_configuration(
+        {}, topic_arn
+    )
+    final_sns_policy = bucket_lib.build_sns_topic_policy(
+        None,
+        "bucket",
+        topic_arn,
+        "111122223333",
+        ["arn:aws:iam::123456789012:root"],
+    )
+
     s3_client = _client("s3", region_name="us-west-2")
     s3_stubber = Stubber(s3_client)
     s3_stubber.add_response(
@@ -1906,67 +1863,61 @@ def test_add_creates_sns(monkeypatch) -> None:
         {"LocationConstraint": "us-west-2"},
         {"Bucket": "bucket"},
     )
+    for _ in range(2):
+        s3_stubber.add_response(
+            "get_bucket_policy",
+            {"Policy": json.dumps(bucket_policy)},
+            {"Bucket": "bucket"},
+        )
+        s3_stubber.add_response(
+            "get_bucket_notification_configuration", {}, {"Bucket": "bucket"}
+        )
+    # Recheck immediately before each write.
     s3_stubber.add_response(
         "get_bucket_policy",
-        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
-        {"Bucket": "bucket"},
-    )
-    s3_stubber.add_response(
-        "get_bucket_notification_configuration",
-        {},
+        {"Policy": json.dumps(bucket_policy)},
         {"Bucket": "bucket"},
     )
     s3_stubber.add_response(
         "put_bucket_policy",
         {},
-        {
-            "Bucket": "bucket",
-            "Policy": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        bucket_lib.build_quilt_policy_statement(
-                            "bucket", "123456789012"
-                        )
-                    ],
-                }
-            ),
-        },
+        {"Bucket": "bucket", "Policy": json.dumps(final_bucket_policy)},
     )
     s3_stubber.add_response(
-        "get_bucket_notification_configuration",
-        {},
-        {"Bucket": "bucket"},
+        "get_bucket_notification_configuration", {}, {"Bucket": "bucket"}
     )
     s3_stubber.add_response(
         "put_bucket_notification_configuration",
         {},
-        {
-            "Bucket": "bucket",
-            "NotificationConfiguration": {
-                "TopicConfigurations": [
-                    {
-                        "Id": "QuiltBucketNotifications",
-                        "TopicArn": "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications",
-                        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
-                    }
-                ]
-            },
-        },
+        {"Bucket": "bucket", "NotificationConfiguration": final_notifications},
     )
     s3_stubber.activate()
 
     sns_client = _client("sns", region_name="us-west-2")
     sns_stubber = Stubber(sns_client)
-    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    for _ in range(2):
+        sns_stubber.add_client_error(
+            "get_topic_attributes",
+            service_error_code="NotFound",
+            expected_params={"TopicArn": topic_arn},
+        )
     sns_stubber.add_response(
         "create_topic",
         {"TopicArn": topic_arn},
         {"Name": "quilt-bucket-notifications"},
     )
+    # Recheck the just-created topic still carries only the default owner policy.
     sns_stubber.add_response(
         "get_topic_attributes",
-        {"Attributes": {}},
+        {
+            "Attributes": {
+                "Policy": json.dumps(
+                    bucket_lib._build_default_sns_owner_policy(
+                        topic_arn, "111122223333"
+                    )
+                )
+            }
+        },
         {"TopicArn": topic_arn},
     )
     sns_stubber.add_response(
@@ -1975,34 +1926,7 @@ def test_add_creates_sns(monkeypatch) -> None:
         {
             "TopicArn": topic_arn,
             "AttributeName": "Policy",
-            "AttributeValue": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        {
-                            "Sid": "QuiltBucketNotifications",
-                            "Effect": "Allow",
-                            "Principal": {"Service": "s3.amazonaws.com"},
-                            "Action": "sns:Publish",
-                            "Resource": topic_arn,
-                            "Condition": {
-                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
-                                "StringEquals": {"aws:SourceAccount": "111122223333"},
-                            },
-                        },
-                        {
-                            "Sid": "QuiltCrossAccountSNSAccess",
-                            "Effect": "Allow",
-                            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
-                            "Action": [
-                                "sns:GetTopicAttributes",
-                                "sns:Subscribe",
-                            ],
-                            "Resource": topic_arn,
-                        },
-                    ],
-                }
-            ),
+            "AttributeValue": json.dumps(final_sns_policy),
         },
     )
     sns_stubber.activate()
@@ -2112,8 +2036,9 @@ def test_build_parser_uses_bucket_prog() -> None:
         parser.parse_args(["add", "--help"])
 
 
-def test_confirm_bucket_add_renders_context_table(monkeypatch, capsys) -> None:
+def test_confirm_bucket_add_renders_existing_topic_context(monkeypatch, capsys) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    plan = replace(_fake_bucket_preparation_plan(), topic_exists=True)
 
     assert bucket_tool._confirm_bucket_add(
         "demo",
@@ -2123,11 +2048,8 @@ def test_confirm_bucket_add_renders_context_table(monkeypatch, capsys) -> None:
         ["arn:aws:iam::123456789012:role/quilt-registry"],
         "--principal",
         "us-east-1",
-        "bucket",
-        "us-west-2",
-        "111122223333",
         "open",
-        "arn:aws:sns:us-west-2:111122223333:existing",
+        plan,
     )
 
     captured = capsys.readouterr()
@@ -2135,8 +2057,31 @@ def test_confirm_bucket_add_renders_context_table(monkeypatch, capsys) -> None:
     assert "arn:aws:iam::123456789012:role/quilt-registry" in captured.out
     assert "--principal" in captured.out
     assert "s3://bucket" in captured.out
-    assert "reuse existing SNS topic" in captured.out
+    assert "reuse quiltx SNS topic" in captured.out
+    assert "quilt-bucket-notifications" in captured.out
     assert "AWS profile open" in captured.out
+
+
+def test_confirm_bucket_add_renders_planned_topic_creation(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    plan = _fake_bucket_preparation_plan()
+
+    assert not bucket_tool._confirm_bucket_add(
+        "demo",
+        "https://demo.example.com",
+        None,
+        "123456789012",
+        list(plan.principals),
+        "account root (default)",
+        "us-east-1",
+        None,
+        plan,
+    )
+
+    output = capsys.readouterr().out
+    assert "create SNS topic" in output
+    assert plan.sns_topic_arn in output
+    assert "reuse existing SNS topic" not in output
 
 
 def test_sns_topic_source_labels_known_topic_names() -> None:
@@ -2202,20 +2147,75 @@ def _stack_for_add_bucket(
     return stack
 
 
-def test_add_bucket_already_registered(monkeypatch) -> None:
+def _install_add_bucket_preparation_fakes(
+    monkeypatch, plan: bucket_lib.BucketPreparationPlan
+) -> list[bucket_lib.BucketPreparationPlan]:
+    s3_client = object()
+    sns_client = object()
+    sts_client = SimpleNamespace(
+        get_caller_identity=lambda: {"Account": plan.owning_account}
+    )
+    session = FakeSession(s3_client, sns_client, sts_client)
+    applied: list[bucket_lib.BucketPreparationPlan] = []
+
+    monkeypatch.setattr(boto3, "Session", lambda profile_name=None: session)
+    monkeypatch.setattr(
+        bucket_lib, "get_bucket_region", lambda bucket, *, s3_client: plan.region
+    )
+    monkeypatch.setattr(
+        bucket_lib,
+        "build_bucket_preparation_plan",
+        lambda *args, **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        bucket_lib,
+        "apply_bucket_preparation",
+        lambda candidate, **kwargs: applied.append(candidate),
+    )
+    return applied
+
+
+def test_add_bucket_already_registered_still_prepares(monkeypatch) -> None:
+    plan = _fake_bucket_preparation_plan()
+    applied = _install_add_bucket_preparation_fakes(monkeypatch, plan)
     stack = _stack_for_add_bucket(monkeypatch)
-    _install_fake_quilt3(monkeypatch, get_result=FakeBucket("bucket", "My Bucket"))
+    add_calls: list[dict[str, str]] = []
+    _install_fake_quilt3(
+        monkeypatch,
+        get_result=FakeBucket("bucket", "My Bucket"),
+        add_calls=add_calls,
+    )
 
     result = add_bucket(stack, "bucket")
+
     assert result == AddBucketResult(
         bucket="bucket",
         title="My Bucket",
-        sns_topic_arn="",
+        sns_topic_arn=plan.sns_topic_arn,
         already_registered=True,
     )
+    assert applied == [plan]
+    assert add_calls == []
 
 
 def test_add_bucket_creates_new(monkeypatch) -> None:
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    bucket_policy = {"Version": "2012-10-17", "Statement": []}
+    final_bucket_policy = bucket_lib.merge_bucket_policy(
+        bucket_policy,
+        bucket_lib.build_quilt_policy_statement("bucket", "123456789012"),
+    )
+    final_notifications = bucket_lib.build_bucket_notification_configuration(
+        {}, topic_arn
+    )
+    final_sns_policy = bucket_lib.build_sns_topic_policy(
+        None,
+        "bucket",
+        topic_arn,
+        "111122223333",
+        ["arn:aws:iam::123456789012:root"],
+    )
+
     s3_client = _client("s3", region_name="us-west-2")
     s3_stubber = Stubber(s3_client)
     s3_stubber.add_response(
@@ -2223,67 +2223,61 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
         {"LocationConstraint": "us-west-2"},
         {"Bucket": "bucket"},
     )
+    for _ in range(2):
+        s3_stubber.add_response(
+            "get_bucket_policy",
+            {"Policy": json.dumps(bucket_policy)},
+            {"Bucket": "bucket"},
+        )
+        s3_stubber.add_response(
+            "get_bucket_notification_configuration", {}, {"Bucket": "bucket"}
+        )
+    # Recheck immediately before each write.
     s3_stubber.add_response(
         "get_bucket_policy",
-        {"Policy": json.dumps({"Version": "2012-10-17", "Statement": []})},
+        {"Policy": json.dumps(bucket_policy)},
         {"Bucket": "bucket"},
     )
     s3_stubber.add_response(
         "put_bucket_policy",
         {},
-        {
-            "Bucket": "bucket",
-            "Policy": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        bucket_lib.build_quilt_policy_statement(
-                            "bucket", "123456789012"
-                        )
-                    ],
-                }
-            ),
-        },
+        {"Bucket": "bucket", "Policy": json.dumps(final_bucket_policy)},
     )
     s3_stubber.add_response(
-        "get_bucket_notification_configuration",
-        {},
-        {"Bucket": "bucket"},
-    )
-    s3_stubber.add_response(
-        "get_bucket_notification_configuration",
-        {},
-        {"Bucket": "bucket"},
+        "get_bucket_notification_configuration", {}, {"Bucket": "bucket"}
     )
     s3_stubber.add_response(
         "put_bucket_notification_configuration",
         {},
-        {
-            "Bucket": "bucket",
-            "NotificationConfiguration": {
-                "TopicConfigurations": [
-                    {
-                        "Id": "QuiltBucketNotifications",
-                        "TopicArn": "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications",
-                        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
-                    }
-                ]
-            },
-        },
+        {"Bucket": "bucket", "NotificationConfiguration": final_notifications},
     )
     s3_stubber.activate()
 
     sns_client = _client("sns", region_name="us-west-2")
     sns_stubber = Stubber(sns_client)
-    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    for _ in range(2):
+        sns_stubber.add_client_error(
+            "get_topic_attributes",
+            service_error_code="NotFound",
+            expected_params={"TopicArn": topic_arn},
+        )
     sns_stubber.add_response(
         "create_topic",
         {"TopicArn": topic_arn},
         {"Name": "quilt-bucket-notifications"},
     )
+    # Recheck the just-created topic still carries only the default owner policy.
     sns_stubber.add_response(
         "get_topic_attributes",
-        {"Attributes": {}},
+        {
+            "Attributes": {
+                "Policy": json.dumps(
+                    bucket_lib._build_default_sns_owner_policy(
+                        topic_arn, "111122223333"
+                    )
+                )
+            }
+        },
         {"TopicArn": topic_arn},
     )
     sns_stubber.add_response(
@@ -2292,34 +2286,7 @@ def test_add_bucket_creates_new(monkeypatch) -> None:
         {
             "TopicArn": topic_arn,
             "AttributeName": "Policy",
-            "AttributeValue": json.dumps(
-                {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        {
-                            "Sid": "QuiltBucketNotifications",
-                            "Effect": "Allow",
-                            "Principal": {"Service": "s3.amazonaws.com"},
-                            "Action": "sns:Publish",
-                            "Resource": topic_arn,
-                            "Condition": {
-                                "ArnEquals": {"aws:SourceArn": "arn:aws:s3:::bucket"},
-                                "StringEquals": {"aws:SourceAccount": "111122223333"},
-                            },
-                        },
-                        {
-                            "Sid": "QuiltCrossAccountSNSAccess",
-                            "Effect": "Allow",
-                            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
-                            "Action": [
-                                "sns:GetTopicAttributes",
-                                "sns:Subscribe",
-                            ],
-                            "Resource": topic_arn,
-                        },
-                    ],
-                }
-            ),
+            "AttributeValue": json.dumps(final_sns_policy),
         },
     )
     sns_stubber.activate()
@@ -2382,12 +2349,24 @@ def test_add_bucket_no_stack_payload(monkeypatch) -> None:
 
 
 def test_add_bucket_defaults_title_to_bucket_name(monkeypatch) -> None:
+    plan = replace(_fake_bucket_preparation_plan(), bucket="my-data")
+    applied = _install_add_bucket_preparation_fakes(monkeypatch, plan)
     stack = _stack_for_add_bucket(monkeypatch)
-    _install_fake_quilt3(monkeypatch, get_result=FakeBucket("my-data", "my-data"))
+    add_calls: list[dict[str, str]] = []
+    _install_fake_quilt3(monkeypatch, add_calls=add_calls)
 
     result = add_bucket(stack, "my-data")
+
     assert result.title == "my-data"
-    assert result.already_registered is True
+    assert result.already_registered is False
+    assert applied == [plan]
+    assert add_calls == [
+        {
+            "name": "my-data",
+            "title": "my-data",
+            "sns_notification_arn": plan.sns_topic_arn,
+        }
+    ]
 
 
 # -- Tests for --principal --
