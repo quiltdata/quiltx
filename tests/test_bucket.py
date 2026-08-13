@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import contextlib
+import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
@@ -216,6 +217,52 @@ def test_ensure_sns_topic_fails_hard() -> None:
         stubber.deactivate()
 
 
+def test_sns_topic_name_normalizes_dotted_bucket_with_collision_hash() -> None:
+    dotted_bucket = "example.data.bucket"
+    first = bucket_lib._sns_topic_name(dotted_bucket)
+    digest = hashlib.sha256(dotted_bucket.encode()).hexdigest()[:12]
+    adversarial = bucket_lib._sns_topic_name(f"example-data-bucket-{digest}")
+
+    assert "." not in first
+    assert first.startswith("quilt-x_example-data-bucket-")
+    assert first.endswith("-notifications")
+    assert len(first) <= 256
+    assert first != adversarial
+
+
+def test_build_sns_topic_policy_preserves_owner_access() -> None:
+    topic_arn = "arn:aws:sns:us-east-1:111122223333:topic"
+
+    policy = bucket_lib.build_sns_topic_policy(
+        None,
+        "bucket",
+        topic_arn,
+        "111122223333",
+        ["arn:aws:iam::123456789012:root"],
+    )
+
+    owner_statement = policy["Statement"][0]
+    assert owner_statement["Sid"] == "__default_statement_ID"
+    assert owner_statement["Action"] == [
+        "SNS:GetTopicAttributes",
+        "SNS:SetTopicAttributes",
+        "SNS:AddPermission",
+        "SNS:RemovePermission",
+        "SNS:DeleteTopic",
+        "SNS:Subscribe",
+        "SNS:ListSubscriptionsByTopic",
+        "SNS:Publish",
+    ]
+    assert owner_statement["Condition"] == {
+        "StringEquals": {"AWS:SourceOwner": "111122223333"}
+    }
+    assert [statement["Sid"] for statement in policy["Statement"]] == [
+        "__default_statement_ID",
+        "QuiltBucketNotifications",
+        "QuiltCrossAccountSNSAccess",
+    ]
+
+
 def test_configure_sns_topic_policy_creates_or_merges() -> None:
     client = _client("sns")
     stubber = Stubber(client)
@@ -342,6 +389,371 @@ def test_configure_notifications_merges() -> None:
     stubber.deactivate()
 
 
+def test_build_prepare_notifications_preserves_compatible_destinations() -> None:
+    existing = {
+        "TopicConfigurations": [
+            {
+                "Id": "archive-topic",
+                "TopicArn": "arn:aws:sns:us-east-1:111122223333:archive",
+                "Events": ["s3:ObjectRestore:Completed"],
+            }
+        ],
+        "QueueConfigurations": [
+            {
+                "Id": "archive-queue",
+                "QueueArn": "arn:aws:sqs:us-east-1:111122223333:archive",
+                "Events": ["s3:ObjectRestore:Delete"],
+            }
+        ],
+        "LambdaFunctionConfigurations": [
+            {
+                "Id": "archive-lambda",
+                "LambdaFunctionArn": (
+                    "arn:aws:lambda:us-east-1:111122223333:function:archive"
+                ),
+                "Events": ["s3:ReducedRedundancyLostObject"],
+            }
+        ],
+        "EventBridgeConfiguration": {},
+    }
+    topic_arn = "arn:aws:sns:us-east-1:111122223333:quilt-bucket-notifications"
+
+    result = bucket_lib.build_bucket_notification_configuration(existing, topic_arn)
+
+    assert result["TopicConfigurations"][:-1] == existing["TopicConfigurations"]
+    assert result["TopicConfigurations"][-1] == {
+        "Id": "QuiltBucketNotifications",
+        "TopicArn": topic_arn,
+        "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+    }
+    assert result["QueueConfigurations"] == existing["QueueConfigurations"]
+    assert (
+        result["LambdaFunctionConfigurations"]
+        == existing["LambdaFunctionConfigurations"]
+    )
+    assert result["EventBridgeConfiguration"] == {}
+
+
+@pytest.mark.parametrize(
+    ("key", "arn_key", "arn"),
+    [
+        (
+            "TopicConfigurations",
+            "TopicArn",
+            "arn:aws:sns:us-east-1:111122223333:other",
+        ),
+        (
+            "QueueConfigurations",
+            "QueueArn",
+            "arn:aws:sqs:us-east-1:111122223333:queue",
+        ),
+        (
+            "LambdaFunctionConfigurations",
+            "LambdaFunctionArn",
+            "arn:aws:lambda:us-east-1:111122223333:function:handler",
+        ),
+    ],
+)
+def test_build_prepare_notifications_rejects_object_event_overlap(
+    key: str, arn_key: str, arn: str
+) -> None:
+    existing = {
+        key: [
+            {
+                "Id": "existing",
+                arn_key: arn,
+                "Events": ["s3:ObjectCreated:Put"],
+                "Filter": {
+                    "Key": {"FilterRules": [{"Name": "prefix", "Value": "uploads/"}]}
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(bucket_lib.NotificationConflictError) as exc_info:
+        bucket_lib.build_bucket_notification_configuration(
+            existing,
+            "arn:aws:sns:us-east-1:111122223333:quilt-bucket-notifications",
+        )
+
+    message = str(exc_info.value)
+    assert "overlaps" in message
+    assert "remove or narrow" in message
+    assert "uploads/" in message
+
+
+def test_prepare_plan_rejects_unrelated_object_topic_instead_of_adopting() -> None:
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        expected_params={"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {
+            "TopicConfigurations": [
+                {
+                    "Id": "audit",
+                    "TopicArn": "arn:aws:sns:us-west-2:111122223333:audit",
+                    "Events": ["s3:ObjectCreated:Put"],
+                }
+            ]
+        },
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name="us-west-2")
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.NotificationConflictError, match="audit"):
+        bucket_lib.build_bucket_preparation_plan(
+            "bucket",
+            "us-west-2",
+            "111122223333",
+            control_account_id="123456789012",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_prepare_plan_rejects_stale_quilt_topic_before_writes() -> None:
+    stale_topic = "arn:aws:sns:us-west-2:111122223333:deleted-topic"
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        expected_params={"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {
+            "TopicConfigurations": [
+                {
+                    "Id": "QuiltBucketNotifications",
+                    "TopicArn": stale_topic,
+                    "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+                }
+            ]
+        },
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name="us-west-2")
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        expected_params={"TopicArn": stale_topic},
+    )
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.NotificationConflictError, match="missing SNS topic"):
+        bucket_lib.build_bucket_preparation_plan(
+            "bucket",
+            "us-west-2",
+            "111122223333",
+            control_account_id="123456789012",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_prepare_plan_rejects_stale_preserved_topic_before_writes() -> None:
+    archive_topic = "arn:aws:sns:us-west-2:111122223333:archive"
+    planned_topic = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        expected_params={"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {
+            "TopicConfigurations": [
+                {
+                    "Id": "archive",
+                    "TopicArn": archive_topic,
+                    "Events": ["s3:ObjectRestore:Completed"],
+                }
+            ]
+        },
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name="us-west-2")
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        expected_params={"TopicArn": planned_topic},
+    )
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        expected_params={"TopicArn": archive_topic},
+    )
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.NotificationConflictError, match="archive"):
+        bucket_lib.build_bucket_preparation_plan(
+            "bucket",
+            "us-west-2",
+            "111122223333",
+            control_account_id="123456789012",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_bucket_preparation_is_idempotent_across_new_and_existing_topic() -> None:
+    bucket = "bucket"
+    region = "us-west-2"
+    owning_account = "111122223333"
+    control_account = "123456789012"
+    principal = f"arn:aws:iam::{control_account}:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-bucket-notifications"
+    existing_bucket_policy = {
+        "Version": "2012-10-17",
+        "Statement": [{"Sid": "Existing", "Effect": "Allow"}],
+    }
+    final_bucket_policy = bucket_lib.merge_bucket_policy(
+        existing_bucket_policy,
+        bucket_lib.build_quilt_policy_statement(
+            bucket, control_account, principals=[principal]
+        ),
+    )
+    final_sns_policy = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [principal]
+    )
+    final_notifications = bucket_lib.build_bucket_notification_configuration(
+        {"EventBridgeConfiguration": {}}, topic_arn
+    )
+
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(existing_bucket_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {"EventBridgeConfiguration": {}},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {"Bucket": bucket, "Policy": json.dumps(final_bucket_policy)},
+    )
+    s3_stubber.add_response(
+        "put_bucket_notification_configuration",
+        {},
+        {"Bucket": bucket, "NotificationConfiguration": final_notifications},
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(final_bucket_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        final_notifications,
+        {"Bucket": bucket},
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        service_message="topic does not exist",
+        expected_params={"TopicArn": topic_arn},
+    )
+    sns_stubber.add_response(
+        "create_topic",
+        {"TopicArn": topic_arn},
+        {"Name": "quilt-bucket-notifications"},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(final_sns_policy),
+        },
+    )
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {"Policy": json.dumps(final_sns_policy)}},
+        {"TopicArn": topic_arn},
+    )
+    sns_stubber.activate()
+
+    first = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id=control_account,
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    assert first.topic_exists is False
+    bucket_lib.apply_bucket_preparation(
+        first, s3_client=s3_client, sns_client=sns_client
+    )
+
+    second = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id=control_account,
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    assert second.topic_exists is True
+    assert second.bucket_policy_changed is False
+    assert second.sns_policy_changed is False
+    assert second.notification_configuration_changed is False
+    assert second.bucket_policy == first.bucket_policy
+    assert second.sns_policy == first.sns_policy
+    assert second.notification_configuration == first.notification_configuration
+    bucket_lib.apply_bucket_preparation(
+        second, s3_client=s3_client, sns_client=sns_client
+    )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
 @dataclass
 class FakeBucket:
     name: str
@@ -366,6 +778,217 @@ class FakeSession:
         if service_name == "sts":
             return self._sts_client
         raise AssertionError(f"unexpected service: {service_name}")
+
+
+def _fake_bucket_preparation_plan() -> bucket_lib.BucketPreparationPlan:
+    return bucket_lib.BucketPreparationPlan(
+        bucket="bucket",
+        region="us-west-2",
+        owning_account="111122223333",
+        principals=("arn:aws:iam::123456789012:root",),
+        sns_topic_arn=("arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"),
+        bucket_policy={"Version": "2012-10-17", "Statement": [{"Sid": "bucket"}]},
+        sns_policy={"Version": "2012-10-17", "Statement": [{"Sid": "sns"}]},
+        notification_configuration={"TopicConfigurations": [{"Id": "notification"}]},
+        topic_exists=False,
+        bucket_policy_changed=True,
+        sns_policy_changed=True,
+        notification_configuration_changed=True,
+    )
+
+
+def _install_prepare_fakes(monkeypatch, plan: bucket_lib.BucketPreparationPlan) -> None:
+    session = SimpleNamespace(client=lambda service_name, region_name=None: object())
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "resolve_bucket_session",
+        lambda *args, **kwargs: (session, object(), "us-west-2", None),
+    )
+    monkeypatch.setattr(
+        bucket_tool, "_get_session_account_id", lambda _session: "111122223333"
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "build_bucket_preparation_plan",
+        lambda *args, **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("prepare must not resolve or authenticate a catalog")
+        ),
+    )
+
+
+def test_prepare_dry_run_prints_exact_documents_without_writes(
+    monkeypatch, capsys
+) -> None:
+    plan = _fake_bucket_preparation_plan()
+    _install_prepare_fakes(monkeypatch, plan)
+    documents: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        bucket_tool,
+        "_print_json",
+        lambda _console, document: documents.append(dict(document)),
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run must not write AWS state")
+        ),
+    )
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--control-account-id", "123456789012", "--dry-run"]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "Final bucket policy:" in output
+    assert "Final SNS topic policy:" in output
+    assert "Final bucket notification configuration:" in output
+    assert documents == [
+        plan.bucket_policy,
+        plan.sns_policy,
+        plan.notification_configuration,
+    ]
+
+
+def test_prepare_json_is_minimal_and_uses_no_catalog(monkeypatch, capsys) -> None:
+    plan = _fake_bucket_preparation_plan()
+    _install_prepare_fakes(monkeypatch, plan)
+    applied: list[bucket_lib.BucketPreparationPlan] = []
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda candidate, **kwargs: applied.append(candidate),
+    )
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--control-account-id", "123456789012", "--json", "--yes"]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "bucket": "bucket",
+        "region": "us-west-2",
+        "owning_account": "111122223333",
+        "principals": ["arn:aws:iam::123456789012:root"],
+        "sns_topic_arn": (
+            "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+        ),
+    }
+    assert applied == [plan]
+
+
+def test_prepare_json_profile_failure_keeps_stdout_clean(monkeypatch, capsys) -> None:
+    seen: dict[str, Any] = {}
+
+    def fail_resolve(*args, **kwargs):
+        seen.update(kwargs)
+        print("profile cannot access bucket", file=kwargs["output"])
+        return None, None, "", "requested"
+
+    monkeypatch.setattr(bucket_tool.bucket_lib, "resolve_bucket_session", fail_resolve)
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("prepare must not resolve a catalog")
+        ),
+    )
+
+    result = bucket_tool.main(
+        [
+            "prepare",
+            "bucket",
+            "--profile",
+            "requested",
+            "--control-account-id",
+            "123456789012",
+            "--json",
+            "--yes",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert "profile cannot access bucket" in captured.err
+    assert seen["no_prompt"] is True
+    assert seen["output"] is sys.stderr
+
+
+def test_prepare_json_default_profile_fallback_keeps_json_stdout(
+    monkeypatch, capsys
+) -> None:
+    from botocore.exceptions import ClientError
+
+    plan = _fake_bucket_preparation_plan()
+
+    class FakeS3:
+        def __init__(self, profile: str) -> None:
+            self.profile = profile
+
+        def get_bucket_location(self, Bucket: str) -> dict[str, Any]:
+            if self.profile == "prod":
+                return {"LocationConstraint": "us-west-2"}
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+                "GetBucketLocation",
+            )
+
+    class FallbackSession:
+        available_profiles = ["prod"]
+
+        def __init__(self, profile_name: str | None = None) -> None:
+            self.profile_name = profile_name or ""
+
+        def client(self, service: str, region_name: str | None = None):
+            if service == "s3":
+                return FakeS3(self.profile_name)
+            if service == "sns":
+                assert region_name == "us-west-2"
+                return object()
+            raise AssertionError(f"unexpected service {service}")
+
+    monkeypatch.setattr(bucket_tool.boto3, "Session", FallbackSession)
+    monkeypatch.setattr(
+        bucket_tool, "_get_session_account_id", lambda _session: "111122223333"
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "build_bucket_preparation_plan",
+        lambda *args, **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib, "apply_bucket_preparation", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("prepare must not resolve a catalog")
+        ),
+    )
+
+    result = bucket_tool.main(
+        [
+            "prepare",
+            "bucket",
+            "--control-account-id",
+            "123456789012",
+            "--json",
+            "--yes",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert json.loads(captured.out) == plan.handoff()
+    assert "Retrying with profile prod." in captured.err
 
 
 class FakeQuiltBucket:
@@ -1807,6 +2430,9 @@ def test_resolve_bucket_session_switches_on_access_denied(monkeypatch, capsys) -
     assert region == "us-east-1"
     assert isinstance(session, FakeSession)
     assert session.profile_name == "prod"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Retrying with profile prod." in captured.err
 
 
 def test_resolve_bucket_session_aborts_when_user_declines(monkeypatch, capsys) -> None:

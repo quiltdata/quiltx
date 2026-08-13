@@ -107,6 +107,51 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    prepare_parser = subparsers.add_parser(
+        "prepare",
+        prog="quiltx bucket prepare",
+        help="Configure bucket access and notifications using AWS credentials only.",
+    )
+    prepare_parser.add_argument("bucket_name", help="S3 bucket name to prepare.")
+    prepare_parser.add_argument(
+        "--profile",
+        help="AWS profile for the data account that owns the bucket.",
+    )
+    prepare_parser.add_argument(
+        "--control-account-id",
+        help=(
+            "Quilt control AWS account ID. Required unless --principal is supplied; "
+            "defaults access to that account root."
+        ),
+    )
+    prepare_parser.add_argument(
+        "--principal",
+        metavar="ARN",
+        action="append",
+        nargs="?",
+        const="",
+        help=(
+            "Explicit Quilt IAM role ARN granted bucket and SNS access. "
+            "Repeatable or comma-separated."
+        ),
+    )
+    output_group = prepare_parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the exact final AWS policy and notification documents.",
+    )
+    output_group.add_argument(
+        "--json",
+        action="store_true",
+        help="Print only the minimal non-secret operator handoff as JSON.",
+    )
+    prepare_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Apply AWS changes without prompting for confirmation.",
+    )
+
     list_parser = subparsers.add_parser(
         "list",
         prog="quiltx bucket list",
@@ -183,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "add":
             return _cmd_add(args)
+        if args.action == "prepare":
+            return _cmd_prepare(args)
         if args.action == "remove":
             return _cmd_remove(args)
         if args.action == "list":
@@ -370,6 +417,102 @@ def _lightweight_stack_payload(
         catalog_config=catalog_config,
         region=region,
     )
+
+
+def _print_bucket_preparation_plan(plan: bucket_lib.BucketPreparationPlan) -> None:
+    console = Console(width=120)
+    print("Bucket prepare dry-run")
+    print(f"Bucket: s3://{plan.bucket}")
+    print(f"Region: {plan.region}")
+    print(f"Owning account: {plan.owning_account}")
+    print(f"Effective principals: {', '.join(plan.principals)}")
+    print(f"SNS topic: {plan.sns_topic_arn}")
+    print("\nFinal bucket policy:")
+    _print_json(console, plan.bucket_policy)
+    print("\nFinal SNS topic policy:")
+    _print_json(console, plan.sns_policy)
+    print("\nFinal bucket notification configuration:")
+    _print_json(console, plan.notification_configuration)
+
+
+def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
+    print(f"Prepare s3://{plan.bucket} in {plan.region} for Quilt access.")
+    print(f"SNS topic: {plan.sns_topic_arn}")
+    response = input("Apply these AWS changes? [y/N]: ").strip().lower()
+    return response in {"y", "yes"}
+
+
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    principals, show_guidance = _resolve_principals_arg(args.principal)
+    if show_guidance:
+        _print_principal_guidance()
+        return 0
+    for principal in principals:
+        if not principal.startswith("arn:aws:iam::") or ":role/" not in principal:
+            print(
+                f"Error: --principal must be an IAM role ARN, got {principal!r}",
+                file=sys.stderr,
+            )
+            return 1
+    if not args.control_account_id and not principals:
+        print(
+            "Error: provide --control-account-id or at least one --principal",
+            file=sys.stderr,
+        )
+        return 1
+    if args.control_account_id and (
+        len(args.control_account_id) != 12 or not args.control_account_id.isdigit()
+    ):
+        print(
+            "Error: --control-account-id must be a 12-digit AWS account ID",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json and not args.yes:
+        print("Error: --json requires --yes for non-interactive apply", file=sys.stderr)
+        return 1
+
+    session, s3_client, region, _resolved_profile = bucket_lib.resolve_bucket_session(
+        args.bucket_name,
+        args.profile,
+        assume_yes=args.yes,
+        no_prompt=bool(args.json and args.profile),
+        output=sys.stderr,
+    )
+    if session is None:
+        return 1
+    sns_client = session.client("sns", region_name=region)
+    owning_account = _get_session_account_id(session)
+    plan = bucket_lib.build_bucket_preparation_plan(
+        args.bucket_name,
+        region,
+        owning_account,
+        control_account_id=args.control_account_id,
+        principals=principals or None,
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    if args.dry_run:
+        _print_bucket_preparation_plan(plan)
+        return 0
+    if not args.yes and not _confirm_bucket_preparation(plan):
+        print("Aborted.")
+        return 1
+
+    bucket_lib.apply_bucket_preparation(
+        plan, s3_client=s3_client, sns_client=sns_client
+    )
+    if args.json:
+        print(json.dumps(plan.handoff(), indent=2))
+    else:
+        print(f"Prepared s3://{plan.bucket} for Quilt access.")
+        print(f"SNS notifications: {plan.sns_topic_arn}")
+        print(
+            "Catalog operator next step: "
+            f"quiltx bucket add {plan.bucket} --no-preflight --catalog <catalog>"
+        )
+    return 0
 
 
 @stack_lib.catalog_command

@@ -67,6 +67,31 @@ and stack APIs.
 AWS profile to probe the bucket, update the bucket policy, configure SNS, and
 wire S3 notifications before registering the bucket with the catalog.
 
+When the bucket owner and catalog operator are different people, split setup
+into two credential-isolated steps. The bucket owner needs AWS credentials only
+(no catalog configuration or API key):
+
+```bash
+uvx quiltx bucket prepare my-bucket \
+  --control-account-id 123456789012 \
+  --json --yes > bucket-handoff.json
+```
+
+Use repeatable `--principal arn:aws:iam::123456789012:role/...` options to grant
+specific Quilt roles instead of the control-account root. `--dry-run` prints the
+exact final S3 policy, SNS policy, and notification configuration without any
+writes. Preparation preserves unrelated policies and compatible notifications,
+and stops with actionable details when an object-event notification overlaps.
+The JSON handoff contains only the bucket, region, owning account, effective
+principals, and SNS topic ARN; it contains no credentials.
+
+The catalog operator then needs catalog-admin credentials only, not access to
+the bucket owner's AWS account:
+
+```bash
+uvx quiltx bucket add my-bucket --catalog example.quiltdata.com --no-preflight
+```
+
 Use `--no-preflight` when the catalog stack can already access the bucket but
 your local AWS identity cannot or should not modify it, such as public AWS Open
 Data buckets or buckets already plumbed by Quilt infrastructure:
