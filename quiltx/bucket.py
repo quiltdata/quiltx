@@ -125,6 +125,10 @@ class NotificationConflictError(ValueError):
     """Raised when Quilt notifications would overlap an existing destination."""
 
 
+class PreparationDriftError(RuntimeError):
+    """Raised when AWS state changes between preparation planning and apply."""
+
+
 @dataclass(frozen=True)
 class BucketPreparationPlan:
     """Exact AWS documents and secure handoff produced by bucket preparation."""
@@ -137,6 +141,9 @@ class BucketPreparationPlan:
     bucket_policy: dict[str, Any]
     sns_policy: dict[str, Any]
     notification_configuration: dict[str, Any]
+    original_bucket_policy: dict[str, Any] | None
+    original_sns_policy: dict[str, Any] | None
+    original_notification_configuration: dict[str, Any]
     topic_exists: bool
     bucket_policy_changed: bool
     sns_policy_changed: bool
@@ -557,9 +564,17 @@ def build_bucket_preparation_plan(
         bucket, s3_client=s3_client
     )
     existing_topic_arn = _existing_notification_topic(existing_notifications)
-    sns_topic_arn = existing_topic_arn or (
+    canonical_topic_arn = (
         f"arn:aws:sns:{region}:{owning_account}:{_sns_topic_name(bucket)}"
     )
+    if existing_topic_arn is not None and existing_topic_arn != canonical_topic_arn:
+        raise NotificationConflictError(
+            f"bucket notification {SNS_TOPIC_CONFIG_ID!r} points to unverified topic "
+            f"{existing_topic_arn}; expected the bucket-specific Quilt topic "
+            f"{canonical_topic_arn}. Remove or rename the notification before "
+            "preparing"
+        )
+    sns_topic_arn = canonical_topic_arn
     notification_configuration = build_bucket_notification_configuration(
         existing_notifications, sns_topic_arn
     )
@@ -590,6 +605,9 @@ def build_bucket_preparation_plan(
         bucket_policy=bucket_policy,
         sns_policy=sns_policy,
         notification_configuration=notification_configuration,
+        original_bucket_policy=existing_bucket_policy,
+        original_sns_policy=existing_sns_policy,
+        original_notification_configuration=existing_notifications,
         topic_exists=topic_exists,
         bucket_policy_changed=bucket_policy != existing_bucket_policy,
         sns_policy_changed=sns_policy != existing_sns_policy,
@@ -599,10 +617,44 @@ def build_bucket_preparation_plan(
     )
 
 
+def _assert_bucket_preparation_is_current(
+    plan: BucketPreparationPlan, *, s3_client: Any, sns_client: Any
+) -> None:
+    """Optimistically verify every planned document before the first write."""
+    current_bucket_policy = get_bucket_policy(plan.bucket, s3_client=s3_client)
+    current_notifications = get_bucket_notification_configuration(
+        plan.bucket, s3_client=s3_client
+    )
+    current_topic_exists, current_sns_policy = _sns_policy_if_topic_exists(
+        plan.sns_topic_arn, sns_client
+    )
+
+    changed: list[str] = []
+    if current_bucket_policy != plan.original_bucket_policy:
+        changed.append("bucket policy")
+    if current_notifications != plan.original_notification_configuration:
+        changed.append("bucket notification configuration")
+    if current_topic_exists != plan.topic_exists:
+        changed.append("SNS topic existence")
+    elif current_sns_policy != plan.original_sns_policy:
+        changed.append("SNS topic policy")
+    if changed:
+        raise PreparationDriftError(
+            "AWS state changed after planning ("
+            + ", ".join(changed)
+            + "); rerun bucket prepare to build a fresh plan"
+        )
+
+    _validate_retained_sns_topics(current_notifications, plan.sns_topic_arn, sns_client)
+
+
 def apply_bucket_preparation(
     plan: BucketPreparationPlan, *, s3_client: Any, sns_client: Any
 ) -> None:
-    """Apply a previously built plan, skipping documents already converged."""
+    """Apply a plan only if all AWS documents still match its baseline."""
+    _assert_bucket_preparation_is_current(
+        plan, s3_client=s3_client, sns_client=sns_client
+    )
     if not plan.topic_exists:
         topic_arn = ensure_sns_topic(plan.bucket, plan.region, sns_client=sns_client)
         if topic_arn != plan.sns_topic_arn:

@@ -525,8 +525,51 @@ def test_prepare_plan_rejects_unrelated_object_topic_instead_of_adopting() -> No
     sns_stubber.deactivate()
 
 
+def test_prepare_plan_rejects_unverified_quilt_notification_topic() -> None:
+    unverified_topic = "arn:aws:sns:us-west-2:111122223333:unrelated"
+    s3_client = _client("s3", region_name="us-west-2")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        expected_params={"Bucket": "bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {
+            "TopicConfigurations": [
+                {
+                    "Id": "QuiltBucketNotifications",
+                    "TopicArn": unverified_topic,
+                    "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+                }
+            ]
+        },
+        {"Bucket": "bucket"},
+    )
+    s3_stubber.activate()
+    sns_client = _client("sns", region_name="us-west-2")
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.NotificationConflictError, match="unverified topic"):
+        bucket_lib.build_bucket_preparation_plan(
+            "bucket",
+            "us-west-2",
+            "111122223333",
+            control_account_id="123456789012",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
 def test_prepare_plan_rejects_stale_quilt_topic_before_writes() -> None:
-    stale_topic = "arn:aws:sns:us-west-2:111122223333:deleted-topic"
+    stale_topic = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
     s3_client = _client("s3", region_name="us-west-2")
     s3_stubber = Stubber(s3_client)
     s3_stubber.add_client_error(
@@ -665,6 +708,17 @@ def test_bucket_preparation_is_idempotent_across_new_and_existing_topic() -> Non
         {"EventBridgeConfiguration": {}},
         {"Bucket": bucket},
     )
+    # Revalidation immediately before the first apply.
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(existing_bucket_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        {"EventBridgeConfiguration": {}},
+        {"Bucket": bucket},
+    )
     s3_stubber.add_response(
         "put_bucket_policy",
         {},
@@ -685,10 +739,28 @@ def test_bucket_preparation_is_idempotent_across_new_and_existing_topic() -> Non
         final_notifications,
         {"Bucket": bucket},
     )
+    # Revalidation before the converged no-op apply.
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(final_bucket_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        final_notifications,
+        {"Bucket": bucket},
+    )
     s3_stubber.activate()
 
     sns_client = _client("sns", region_name=region)
     sns_stubber = Stubber(sns_client)
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        service_message="topic does not exist",
+        expected_params={"TopicArn": topic_arn},
+    )
+    # Revalidation confirms the planned topic is still absent.
     sns_stubber.add_client_error(
         "get_topic_attributes",
         service_error_code="NotFound",
@@ -709,6 +781,12 @@ def test_bucket_preparation_is_idempotent_across_new_and_existing_topic() -> Non
             "AttributeValue": json.dumps(final_sns_policy),
         },
     )
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {"Policy": json.dumps(final_sns_policy)}},
+        {"TopicArn": topic_arn},
+    )
+    # Revalidation before the converged no-op apply.
     sns_stubber.add_response(
         "get_topic_attributes",
         {"Attributes": {"Policy": json.dumps(final_sns_policy)}},
@@ -754,6 +832,71 @@ def test_bucket_preparation_is_idempotent_across_new_and_existing_topic() -> Non
     sns_stubber.deactivate()
 
 
+def test_bucket_preparation_rejects_drift_before_any_write() -> None:
+    bucket = "bucket"
+    region = "us-west-2"
+    topic_arn = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+    baseline_policy = {
+        "Version": "2012-10-17",
+        "Statement": [{"Sid": "Existing", "Effect": "Allow"}],
+    }
+    changed_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Sid": "Existing", "Effect": "Allow"},
+            {"Sid": "ConcurrentWriter", "Effect": "Deny"},
+        ],
+    }
+
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(baseline_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration", {}, {"Bucket": bucket}
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(changed_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration", {}, {"Bucket": bucket}
+    )
+    s3_stubber.activate()
+
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    for _ in range(2):
+        sns_stubber.add_client_error(
+            "get_topic_attributes",
+            service_error_code="NotFound",
+            expected_params={"TopicArn": topic_arn},
+        )
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        "111122223333",
+        control_account_id="123456789012",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    with pytest.raises(bucket_lib.PreparationDriftError, match="bucket policy"):
+        bucket_lib.apply_bucket_preparation(
+            plan, s3_client=s3_client, sns_client=sns_client
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
 @dataclass
 class FakeBucket:
     name: str
@@ -790,6 +933,9 @@ def _fake_bucket_preparation_plan() -> bucket_lib.BucketPreparationPlan:
         bucket_policy={"Version": "2012-10-17", "Statement": [{"Sid": "bucket"}]},
         sns_policy={"Version": "2012-10-17", "Statement": [{"Sid": "sns"}]},
         notification_configuration={"TopicConfigurations": [{"Id": "notification"}]},
+        original_bucket_policy=None,
+        original_sns_policy=None,
+        original_notification_configuration={},
         topic_exists=False,
         bucket_policy_changed=True,
         sns_policy_changed=True,
