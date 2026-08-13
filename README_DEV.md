@@ -18,10 +18,25 @@ print(stack["StackName"])
 
 ## Bucket registration paths
 
-Bucket registration has two explicit paths. The default bucket-owner path uses
-local AWS credentials to probe S3, merge the Quilt bucket-policy statement,
-configure SNS, configure bucket notifications, and then call GraphQL
-`bucketAdd` with the SNS topic ARN.
+Bucket registration has three explicit paths. The default bucket-owner path and
+ACL reconciliation both call the same AWS preparation planner/applicator to
+probe S3, merge the Quilt bucket-policy statement, configure SNS, and configure
+bucket notifications; they then call GraphQL `bucketAdd` with the planned SNS
+topic ARN.
+
+`quiltx bucket prepare` calls that same planner/applicator but is AWS-only and must remain outside `catalog_command`.
+It reads and converges the final bucket policy, SNS policy, and notification
+document without loading catalog configuration or calling Quilt admin APIs.
+An optional `--catalog DNS` derives the control account ID when
+`--control-account-id`/`--principal` are omitted: cached stack metadata wins;
+otherwise it logs in as a regular catalog user (no admin role) and asks STS
+which account minted the catalog credentials. That is the only catalog touch
+prepare is allowed. The bucket owner can emit a minimal `--json --yes` handoff;
+the catalog operator completes registration separately with
+`quiltx bucket add BUCKET --catalog DNS --no-preflight`. `--dry-run` performs
+AWS reads but no writes and prints the exact three final documents. Notification
+overlap must fail before any write so unrelated Topic, Queue, Lambda, and
+EventBridge configuration is never replaced.
 
 The `--no-preflight` path is GraphQL-only. It skips local S3/SNS calls and
 submits `bucketAdd` without an SNS ARN so the catalog stack probes the bucket

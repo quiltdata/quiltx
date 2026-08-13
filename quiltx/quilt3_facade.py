@@ -168,3 +168,17 @@ def make_bucket(bucket_uri: str) -> object:
     import quilt3
 
     return quilt3.Bucket(bucket_uri)
+
+
+def catalog_sts_account_id() -> str:
+    """Return the AWS account ID behind the active catalog's minted credentials.
+
+    Uses quilt3's registry-issued temporary credentials — available to any
+    logged-in catalog user, no admin role required — and asks STS which
+    account they belong to: the catalog stack's control account.
+    """
+    import quilt3.session
+
+    botocore_session = quilt3.session.create_botocore_session()
+    sts_client = botocore_session.create_client("sts")
+    return str(sts_client.get_caller_identity()["Account"])

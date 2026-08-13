@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -79,7 +80,7 @@ def resolve_bucket_session(
         return None, None, "", profile
 
     if assume_yes:
-        print(f"Retrying with profile {match}.")
+        print(f"Retrying with profile {match}.", file=err)
     else:
         response = ask(f"Try profile {match} instead? [y/N]: ").strip().lower()
         if response not in {"y", "yes"}:
@@ -118,6 +119,45 @@ QUILT_POLICY_ACTIONS = [
 ]
 
 BUCKET_NOTIFICATION_EVENTS = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+
+
+class NotificationConflictError(ValueError):
+    """Raised when Quilt notifications would overlap an existing destination."""
+
+
+class PreparationDriftError(RuntimeError):
+    """Raised when AWS state changes between preparation planning and apply."""
+
+
+@dataclass(frozen=True)
+class BucketPreparationPlan:
+    """Exact AWS documents and secure handoff produced by bucket preparation."""
+
+    bucket: str
+    region: str
+    owning_account: str
+    principals: tuple[str, ...]
+    sns_topic_arn: str
+    bucket_policy: dict[str, Any]
+    sns_policy: dict[str, Any]
+    notification_configuration: dict[str, Any]
+    original_bucket_policy: dict[str, Any] | None
+    original_sns_policy: dict[str, Any] | None
+    original_notification_configuration: dict[str, Any]
+    topic_exists: bool
+    bucket_policy_changed: bool
+    sns_policy_changed: bool
+    notification_configuration_changed: bool
+
+    def handoff(self) -> dict[str, Any]:
+        """Return the minimal non-secret handoff for the catalog operator."""
+        return {
+            "bucket": self.bucket,
+            "region": self.region,
+            "owning_account": self.owning_account,
+            "principals": list(self.principals),
+            "sns_topic_arn": self.sns_topic_arn,
+        }
 
 
 def get_bucket_policy(bucket: str, s3_client: Any = None) -> dict[str, Any] | None:
@@ -226,14 +266,10 @@ def ensure_sns_topic(bucket: str, region: str, sns_client: Any = None) -> str:
     return str(response["TopicArn"])
 
 
-def configure_sns_topic_policy(
-    bucket: str,
-    sns_topic_arn: str,
-    data_account_id: str,
-    control_principal_arn: str | Sequence[str],
-    sns_client: Any = None,
-) -> None:
-    """Ensure the SNS topic policy allows S3 publish and Quilt subscribe access."""
+def get_sns_topic_policy(
+    sns_topic_arn: str, sns_client: Any = None
+) -> dict[str, Any] | None:
+    """Return the parsed SNS topic policy, or None when the topic has none."""
     if sns_client is None:
         import boto3
 
@@ -242,25 +278,70 @@ def configure_sns_topic_policy(
     attributes = sns_client.get_topic_attributes(TopicArn=sns_topic_arn).get(
         "Attributes", {}
     )
-    existing_policy = _parse_json_document(attributes.get("Policy"))
+    return _parse_json_document(attributes.get("Policy"))
+
+
+def _build_default_sns_owner_policy(
+    sns_topic_arn: str, data_account_id: str
+) -> dict[str, Any]:
+    """Return SNS's canonical owner-access policy for a topic."""
+    return {
+        "Version": "2008-10-17",
+        "Id": "__default_policy_ID",
+        "Statement": [
+            {
+                "Sid": "__default_statement_ID",
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Action": [
+                    "SNS:GetTopicAttributes",
+                    "SNS:SetTopicAttributes",
+                    "SNS:AddPermission",
+                    "SNS:RemovePermission",
+                    "SNS:DeleteTopic",
+                    "SNS:Subscribe",
+                    "SNS:ListSubscriptionsByTopic",
+                    "SNS:Publish",
+                ],
+                "Resource": sns_topic_arn,
+                "Condition": {"StringEquals": {"AWS:SourceOwner": data_account_id}},
+            }
+        ],
+    }
+
+
+def build_sns_topic_policy(
+    existing: Mapping[str, Any] | None,
+    bucket: str,
+    sns_topic_arn: str,
+    data_account_id: str,
+    control_principal_arn: str | Sequence[str],
+) -> dict[str, Any]:
+    """Merge owner and Quilt statements into an SNS policy document."""
     publish_statement = _build_sns_topic_publish_policy_statement(
         bucket, sns_topic_arn, data_account_id
     )
     subscribe_statement = _build_sns_topic_subscribe_policy_statement(
         sns_topic_arn, control_principal_arn
     )
+    policy = dict(
+        existing
+        if existing is not None
+        else _build_default_sns_owner_policy(sns_topic_arn, data_account_id)
+    )
+    statements = _merge_policy_statements(policy.get("Statement"), publish_statement)
+    policy["Statement"] = _merge_policy_statements(statements, subscribe_statement)
+    return policy
 
-    if existing_policy is None:
-        policy = {
-            "Version": "2012-10-17",
-            "Statement": [publish_statement, subscribe_statement],
-        }
-    else:
-        policy = dict(existing_policy)
-        statements = _merge_policy_statements(
-            existing_policy.get("Statement"), publish_statement
-        )
-        policy["Statement"] = _merge_policy_statements(statements, subscribe_statement)
+
+def apply_sns_topic_policy(
+    sns_topic_arn: str, policy: Mapping[str, Any], sns_client: Any = None
+) -> None:
+    """Write an SNS topic policy document."""
+    if sns_client is None:
+        import boto3
+
+        sns_client = boto3.client("sns")
 
     sns_client.set_topic_attributes(
         TopicArn=sns_topic_arn,
@@ -269,16 +350,33 @@ def configure_sns_topic_policy(
     )
 
 
-def configure_bucket_notifications(
-    bucket: str, sns_topic_arn: str, s3_client: Any = None
+def configure_sns_topic_policy(
+    bucket: str,
+    sns_topic_arn: str,
+    data_account_id: str,
+    control_principal_arn: str | Sequence[str],
+    sns_client: Any = None,
 ) -> None:
-    """Merge a Quilt SNS notification destination into the bucket notification config."""
-    if s3_client is None:
-        import boto3
+    """Ensure the SNS topic policy allows S3 publish and Quilt subscribe access."""
+    existing_policy = get_sns_topic_policy(sns_topic_arn, sns_client=sns_client)
+    # Preserve the legacy add-path output for backward compatibility. The
+    # preparation planner uses ``None`` to model SNS's owner policy explicitly.
+    policy_base = (
+        existing_policy
+        if existing_policy is not None
+        else {"Version": "2012-10-17", "Statement": []}
+    )
+    policy = build_sns_topic_policy(
+        policy_base,
+        bucket,
+        sns_topic_arn,
+        data_account_id,
+        control_principal_arn,
+    )
+    apply_sns_topic_policy(sns_topic_arn, policy, sns_client=sns_client)
 
-        s3_client = boto3.client("s3")
 
-    response = s3_client.get_bucket_notification_configuration(Bucket=bucket)
+def _copy_notification_configuration(response: Mapping[str, Any]) -> dict[str, Any]:
     notification_config: dict[str, Any] = {}
     for key in (
         "TopicConfigurations",
@@ -292,20 +390,453 @@ def configure_bucket_notifications(
         notification_config["EventBridgeConfiguration"] = dict(
             response["EventBridgeConfiguration"]
         )
+    return notification_config
 
-    topic_config = {
-        "Id": SNS_TOPIC_CONFIG_ID,
-        "TopicArn": sns_topic_arn,
-        "Events": list(BUCKET_NOTIFICATION_EVENTS),
-    }
-    notification_config["TopicConfigurations"] = _merge_topic_configurations(
-        notification_config.get("TopicConfigurations", []), topic_config
+
+def get_bucket_notification_configuration(
+    bucket: str, s3_client: Any = None
+) -> dict[str, Any]:
+    """Return the writable portion of a bucket notification configuration."""
+    if s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
+    response = s3_client.get_bucket_notification_configuration(Bucket=bucket)
+    return _copy_notification_configuration(response)
+
+
+def _object_event_families(events: Sequence[str]) -> set[str]:
+    families: set[str] = set()
+    for event in events:
+        if event.startswith("s3:ObjectCreated:"):
+            families.add("ObjectCreated")
+        elif event.startswith("s3:ObjectRemoved:"):
+            families.add("ObjectRemoved")
+    return families
+
+
+def _notification_description(kind: str, config: Mapping[str, Any]) -> str:
+    destination = (
+        config.get("TopicArn")
+        or config.get("QueueArn")
+        or config.get("LambdaFunctionArn")
+        or "<unknown destination>"
+    )
+    details = f"{kind} {config.get('Id', '<no id>')!r} ({destination})"
+    if config.get("Filter"):
+        details += f" with filter {config['Filter']!r}"
+    return details
+
+
+def _existing_notification_topic(
+    notification_config: Mapping[str, Any],
+) -> str | None:
+    for config in notification_config.get("TopicConfigurations", []):
+        if config.get("Id") == SNS_TOPIC_CONFIG_ID and config.get("TopicArn"):
+            return str(config["TopicArn"])
+    return None
+
+
+def build_bucket_notification_configuration(
+    existing: Mapping[str, Any], sns_topic_arn: str
+) -> dict[str, Any]:
+    """Build a safe final S3 notification document for Quilt.
+
+    Quilt needs unfiltered create/remove notifications. Any other destination
+    receiving those event families overlaps that unfiltered configuration, which
+    S3 rejects. Such conflicts are reported instead of replacing user config.
+    """
+    notification_config = _copy_notification_configuration(existing)
+    desired_families = {"ObjectCreated", "ObjectRemoved"}
+    selected_topic = False
+
+    configuration_kinds = (
+        ("TopicConfigurations", "SNS topic"),
+        ("QueueConfigurations", "SQS queue"),
+        ("LambdaFunctionConfigurations", "Lambda function"),
+    )
+    for key, kind in configuration_kinds:
+        updated: list[dict[str, Any]] = []
+        for original in notification_config.get(key, []):
+            config = dict(original)
+            families = _object_event_families(config.get("Events", []))
+            same_topic = (
+                key == "TopicConfigurations" and config.get("Id") == SNS_TOPIC_CONFIG_ID
+            )
+            if same_topic:
+                if config.get("TopicArn") not in {None, sns_topic_arn}:
+                    raise NotificationConflictError(
+                        f"notification id {SNS_TOPIC_CONFIG_ID!r} already points to "
+                        f"{config.get('TopicArn')}; remove or rename it before preparing"
+                    )
+                if config.get("Filter"):
+                    raise NotificationConflictError(
+                        f"{_notification_description(kind, config)} cannot be reused: "
+                        "Quilt requires unfiltered object-create/delete events; remove "
+                        "or narrow the conflicting notification first"
+                    )
+                config["TopicArn"] = sns_topic_arn
+                config["Events"] = [
+                    event
+                    for event in config.get("Events", [])
+                    if not _object_event_families([event])
+                ] + list(BUCKET_NOTIFICATION_EVENTS)
+                selected_topic = True
+            elif families & desired_families:
+                raise NotificationConflictError(
+                    f"{_notification_description(kind, config)} overlaps Quilt's "
+                    "unfiltered object-create/delete events; remove or narrow the "
+                    "conflicting notification before preparing"
+                )
+            updated.append(config)
+        if updated:
+            notification_config[key] = updated
+
+    if not selected_topic:
+        notification_config.setdefault("TopicConfigurations", []).append(
+            {
+                "Id": SNS_TOPIC_CONFIG_ID,
+                "TopicArn": sns_topic_arn,
+                "Events": list(BUCKET_NOTIFICATION_EVENTS),
+            }
+        )
+    return notification_config
+
+
+def _sns_policy_if_topic_exists(
+    sns_topic_arn: str, sns_client: Any
+) -> tuple[bool, dict[str, Any] | None]:
+    try:
+        return True, get_sns_topic_policy(sns_topic_arn, sns_client=sns_client)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code in {"NotFound", "NotFoundException"}:
+            return False, None
+        raise
+
+
+def _sns_policy_has_bucket_marker(
+    policy: Mapping[str, Any] | None,
+    bucket: str,
+    sns_topic_arn: str,
+    owning_account: str,
+) -> bool:
+    """Return whether a topic policy proves Quilt ownership for this bucket."""
+    if policy is None:
+        return False
+    expected = _build_sns_topic_publish_policy_statement(
+        bucket, sns_topic_arn, owning_account
+    )
+    statements = policy.get("Statement", [])
+    if isinstance(statements, Mapping):
+        statements = [statements]
+    return any(statement == expected for statement in statements)
+
+
+def _validate_retained_notification_destinations(
+    notification_config: Mapping[str, Any],
+    selected_topic_arn: str,
+    *,
+    sns_client: Any,
+    sqs_client: Any | None,
+    lambda_client: Any | None,
+) -> None:
+    """Fail safely when a preserved SNS, SQS, or Lambda destination is stale."""
+    for config in notification_config.get("TopicConfigurations", []):
+        topic_arn = config.get("TopicArn")
+        if not topic_arn or topic_arn == selected_topic_arn:
+            continue
+        exists, _policy = _sns_policy_if_topic_exists(str(topic_arn), sns_client)
+        if not exists:
+            raise NotificationConflictError(
+                f"preserved SNS notification {config.get('Id', '<no id>')!r} "
+                f"references missing topic {topic_arn}; remove the stale "
+                "notification or recreate that topic before preparing"
+            )
+
+    for config in notification_config.get("QueueConfigurations", []):
+        queue_arn = config.get("QueueArn")
+        if not queue_arn:
+            continue
+        if sqs_client is None:
+            raise ValueError("sqs_client is required to validate retained SQS queues")
+        arn_parts = str(queue_arn).split(":", 5)
+        if len(arn_parts) != 6 or arn_parts[2] != "sqs":
+            raise NotificationConflictError(
+                f"preserved SQS notification {config.get('Id', '<no id>')!r} "
+                f"has invalid queue ARN {queue_arn}"
+            )
+        try:
+            sqs_client.get_queue_url(
+                QueueName=arn_parts[5], QueueOwnerAWSAccountId=arn_parts[4]
+            )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code not in {
+                "AWS.SimpleQueueService.NonExistentQueue",
+                "QueueDoesNotExist",
+            }:
+                raise
+            raise NotificationConflictError(
+                f"preserved SQS notification {config.get('Id', '<no id>')!r} "
+                f"references missing queue {queue_arn}; remove the stale "
+                "notification or recreate that queue before preparing"
+            ) from exc
+
+    for config in notification_config.get("LambdaFunctionConfigurations", []):
+        function_arn = config.get("LambdaFunctionArn")
+        if not function_arn:
+            continue
+        if lambda_client is None:
+            raise ValueError(
+                "lambda_client is required to validate retained Lambda functions"
+            )
+        try:
+            lambda_client.get_function_configuration(FunctionName=function_arn)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code != "ResourceNotFoundException":
+                raise
+            raise NotificationConflictError(
+                f"preserved Lambda notification {config.get('Id', '<no id>')!r} "
+                f"references missing function {function_arn}; remove the stale "
+                "notification or recreate that function before preparing"
+            ) from exc
+
+
+def build_bucket_preparation_plan(
+    bucket: str,
+    region: str,
+    owning_account: str,
+    *,
+    control_account_id: str | None = None,
+    principals: Sequence[str] | None = None,
+    s3_client: Any,
+    sns_client: Any,
+    sqs_client: Any | None = None,
+    lambda_client: Any | None = None,
+) -> BucketPreparationPlan:
+    """Read AWS state and return the exact idempotent preparation plan."""
+    principal_list = tuple(principals or ())
+    if not principal_list:
+        if not control_account_id:
+            raise ValueError("provide --control-account-id or at least one --principal")
+        principal_list = (f"arn:aws:iam::{control_account_id}:root",)
+
+    existing_bucket_policy = get_bucket_policy(bucket, s3_client=s3_client)
+    bucket_statement = build_quilt_policy_statement(
+        bucket,
+        control_account_id or "",
+        principals=principal_list,
+    )
+    bucket_policy = merge_bucket_policy(existing_bucket_policy, bucket_statement)
+
+    existing_notifications = get_bucket_notification_configuration(
+        bucket, s3_client=s3_client
+    )
+    existing_topic_arn = _existing_notification_topic(existing_notifications)
+    canonical_topic_arn = (
+        f"arn:aws:sns:{region}:{owning_account}:{_sns_topic_name(bucket)}"
+    )
+    if existing_topic_arn is not None and existing_topic_arn != canonical_topic_arn:
+        raise NotificationConflictError(
+            f"bucket notification {SNS_TOPIC_CONFIG_ID!r} points to unverified topic "
+            f"{existing_topic_arn}; expected the bucket-specific Quilt topic "
+            f"{canonical_topic_arn}. Remove or rename the notification before "
+            "preparing"
+        )
+    sns_topic_arn = canonical_topic_arn
+    notification_configuration = build_bucket_notification_configuration(
+        existing_notifications, sns_topic_arn
+    )
+    topic_exists, existing_sns_policy = _sns_policy_if_topic_exists(
+        sns_topic_arn, sns_client
+    )
+    if existing_topic_arn is not None and not topic_exists:
+        raise NotificationConflictError(
+            f"bucket notification {SNS_TOPIC_CONFIG_ID!r} references missing SNS "
+            f"topic {existing_topic_arn}; remove the stale notification or recreate "
+            "that topic before preparing"
+        )
+    if (
+        topic_exists
+        and existing_topic_arn is None
+        and not _sns_policy_has_bucket_marker(
+            existing_sns_policy, bucket, sns_topic_arn, owning_account
+        )
+    ):
+        raise NotificationConflictError(
+            f"existing topic {sns_topic_arn} lacks a bucket-specific Quilt ownership "
+            "marker; rename or remove the colliding topic before preparing"
+        )
+    _validate_retained_notification_destinations(
+        notification_configuration,
+        sns_topic_arn,
+        sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
+    )
+    sns_policy = build_sns_topic_policy(
+        existing_sns_policy,
+        bucket,
+        sns_topic_arn,
+        owning_account,
+        principal_list,
     )
 
-    s3_client.put_bucket_notification_configuration(
-        Bucket=bucket,
-        NotificationConfiguration=notification_config,
+    return BucketPreparationPlan(
+        bucket=bucket,
+        region=region,
+        owning_account=owning_account,
+        principals=principal_list,
+        sns_topic_arn=sns_topic_arn,
+        bucket_policy=bucket_policy,
+        sns_policy=sns_policy,
+        notification_configuration=notification_configuration,
+        original_bucket_policy=existing_bucket_policy,
+        original_sns_policy=existing_sns_policy,
+        original_notification_configuration=existing_notifications,
+        topic_exists=topic_exists,
+        bucket_policy_changed=bucket_policy != existing_bucket_policy,
+        sns_policy_changed=sns_policy != existing_sns_policy,
+        notification_configuration_changed=(
+            notification_configuration != existing_notifications
+        ),
     )
+
+
+def _raise_preparation_drift(*changed: str) -> None:
+    raise PreparationDriftError(
+        "AWS state changed after planning ("
+        + ", ".join(changed)
+        + "); rerun bucket prepare to build a fresh plan"
+    )
+
+
+def _assert_bucket_preparation_is_current(
+    plan: BucketPreparationPlan,
+    *,
+    s3_client: Any,
+    sns_client: Any,
+    sqs_client: Any | None,
+    lambda_client: Any | None,
+) -> None:
+    """Verify every baseline and retained destination before the first write."""
+    current_bucket_policy = get_bucket_policy(plan.bucket, s3_client=s3_client)
+    current_notifications = get_bucket_notification_configuration(
+        plan.bucket, s3_client=s3_client
+    )
+    current_topic_exists, current_sns_policy = _sns_policy_if_topic_exists(
+        plan.sns_topic_arn, sns_client
+    )
+
+    changed: list[str] = []
+    if current_bucket_policy != plan.original_bucket_policy:
+        changed.append("bucket policy")
+    if current_notifications != plan.original_notification_configuration:
+        changed.append("bucket notification configuration")
+    if current_topic_exists != plan.topic_exists:
+        changed.append("SNS topic existence")
+    elif current_sns_policy != plan.original_sns_policy:
+        changed.append("SNS topic policy")
+    if changed:
+        _raise_preparation_drift(*changed)
+
+    _validate_retained_notification_destinations(
+        current_notifications,
+        plan.sns_topic_arn,
+        sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
+    )
+
+
+def apply_bucket_preparation(
+    plan: BucketPreparationPlan,
+    *,
+    s3_client: Any,
+    sns_client: Any,
+    sqs_client: Any | None = None,
+    lambda_client: Any | None = None,
+) -> None:
+    """Apply a plan with baseline checks before the first and every later write."""
+    _assert_bucket_preparation_is_current(
+        plan,
+        s3_client=s3_client,
+        sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
+    )
+
+    if plan.sns_policy_changed:
+        expected_sns_policy: dict[str, Any] | None
+        if not plan.topic_exists:
+            topic_arn = ensure_sns_topic(
+                plan.bucket, plan.region, sns_client=sns_client
+            )
+            if topic_arn != plan.sns_topic_arn:
+                raise ValueError(
+                    f"created SNS topic ARN {topic_arn!r} differs from planned "
+                    f"ARN {plan.sns_topic_arn!r}"
+                )
+            expected_sns_policy = _build_default_sns_owner_policy(
+                plan.sns_topic_arn, plan.owning_account
+            )
+        else:
+            expected_sns_policy = plan.original_sns_policy
+
+        current_topic_exists, current_sns_policy = _sns_policy_if_topic_exists(
+            plan.sns_topic_arn, sns_client
+        )
+        if not current_topic_exists or current_sns_policy != expected_sns_policy:
+            _raise_preparation_drift("SNS topic policy")
+        apply_sns_topic_policy(
+            plan.sns_topic_arn, plan.sns_policy, sns_client=sns_client
+        )
+
+    if plan.bucket_policy_changed:
+        current_bucket_policy = get_bucket_policy(plan.bucket, s3_client=s3_client)
+        if current_bucket_policy != plan.original_bucket_policy:
+            _raise_preparation_drift("bucket policy")
+        apply_bucket_policy(plan.bucket, plan.bucket_policy, s3_client=s3_client)
+
+    if plan.notification_configuration_changed:
+        current_notifications = get_bucket_notification_configuration(
+            plan.bucket, s3_client=s3_client
+        )
+        if current_notifications != plan.original_notification_configuration:
+            _raise_preparation_drift("bucket notification configuration")
+        _validate_retained_notification_destinations(
+            current_notifications,
+            plan.sns_topic_arn,
+            sns_client=sns_client,
+            sqs_client=sqs_client,
+            lambda_client=lambda_client,
+        )
+        s3_client.put_bucket_notification_configuration(
+            Bucket=plan.bucket,
+            NotificationConfiguration=plan.notification_configuration,
+        )
+
+
+def configure_bucket_notifications(
+    bucket: str, sns_topic_arn: str, s3_client: Any = None
+) -> None:
+    """Converge S3 notifications through the shared safe planner."""
+    if s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
+
+    existing = get_bucket_notification_configuration(bucket, s3_client=s3_client)
+    notification_config = build_bucket_notification_configuration(
+        existing, sns_topic_arn
+    )
+    if notification_config != existing:
+        s3_client.put_bucket_notification_configuration(
+            Bucket=bucket,
+            NotificationConfiguration=notification_config,
+        )
 
 
 @dataclass
@@ -409,21 +940,9 @@ def add_bucket(
     control_account_id = str(control_account_id)
 
     principal_list = list(principals) if principals else []
-    sns_principal: str | list[str] = (
-        principal_list if principal_list else f"arn:aws:iam::{control_account_id}:root"
-    )
-
     bucket_title = title or bucket
 
-    # Check if already registered
     existing = stack.admin.buckets.get(bucket)
-    if existing is not None:
-        return AddBucketResult(
-            bucket=bucket,
-            title=getattr(existing, "title", bucket_title),
-            sns_topic_arn=getattr(existing, "sns_notification_arn", "") or "",
-            already_registered=True,
-        )
 
     session = boto3.Session(profile_name=profile)
     s3_client = session.client("s3")
@@ -431,41 +950,33 @@ def add_bucket(
     sns_client = session.client("sns", region_name=bucket_region)
     data_account_id = str(session.client("sts").get_caller_identity()["Account"])
 
-    existing_policy = get_bucket_policy(bucket, s3_client=s3_client)
-    statement = build_quilt_policy_statement(
-        bucket, control_account_id, principals=principal_list or None
-    )
-    merged = merge_bucket_policy(existing_policy, statement)
-    apply_bucket_policy(bucket, merged, s3_client=s3_client)
-
-    # SNS topic
-    sns_topic_arn = get_bucket_notification_sns(bucket, s3_client=s3_client)
-    if sns_topic_arn is None:
-        sns_topic_arn = ensure_sns_topic(bucket, bucket_region, sns_client=sns_client)
-
-    configure_sns_topic_policy(
+    plan = build_bucket_preparation_plan(
         bucket,
-        sns_topic_arn,
+        bucket_region,
         data_account_id,
-        sns_principal,
+        control_account_id=control_account_id,
+        principals=principal_list or None,
+        s3_client=s3_client,
         sns_client=sns_client,
     )
+    apply_bucket_preparation(plan, s3_client=s3_client, sns_client=sns_client)
 
-    # Bucket notifications
-    configure_bucket_notifications(bucket, sns_topic_arn, s3_client=s3_client)
-
-    # Register in Quilt catalog
-    stack.admin.buckets.add(
-        name=bucket,
-        title=bucket_title,
-        sns_notification_arn=sns_topic_arn,
-    )
+    # Register only when the catalog row is absent; preparation always converges.
+    if existing is None:
+        stack.admin.buckets.add(
+            name=bucket,
+            title=bucket_title,
+            sns_notification_arn=plan.sns_topic_arn,
+        )
+        result_title = bucket_title
+    else:
+        result_title = getattr(existing, "title", bucket_title)
 
     return AddBucketResult(
         bucket=bucket,
-        title=bucket_title,
-        sns_topic_arn=sns_topic_arn,
-        already_registered=False,
+        title=result_title,
+        sns_topic_arn=plan.sns_topic_arn,
+        already_registered=existing is not None,
     )
 
 
@@ -544,11 +1055,24 @@ def _has_object_notification_event(events: list[str]) -> bool:
 
 
 def _sns_topic_name(bucket: str) -> str:
-    topic_name = f"quilt-{bucket}-notifications"
-    if len(topic_name) <= 256:
-        return topic_name
+    prefix = "quilt-"
     suffix = "-notifications"
-    return f"quilt-{bucket[: 256 - len('quilt-') - len(suffix)]}{suffix}"
+    normalized_bucket = "".join(
+        char if char.isascii() and (char.isalnum() or char in "_-") else "-"
+        for char in bucket
+    )
+    topic_name = f"{prefix}{normalized_bucket}{suffix}"
+    if topic_name == f"{prefix}{bucket}{suffix}" and len(topic_name) <= 256:
+        return topic_name
+
+    # S3 bucket names cannot contain underscores, so transformed names occupy a
+    # namespace that no unchanged bucket can produce. The digest also separates
+    # different bucket names that normalize to the same SNS-safe spelling.
+    transformed_prefix = "quilt-x_"
+    digest = hashlib.sha256(bucket.encode()).hexdigest()[:12]
+    unique_suffix = f"-{digest}{suffix}"
+    max_bucket_length = 256 - len(transformed_prefix) - len(unique_suffix)
+    return f"{transformed_prefix}{normalized_bucket[:max_bucket_length]}{unique_suffix}"
 
 
 def _build_sns_topic_publish_policy_statement(
@@ -593,18 +1117,3 @@ def _parse_json_document(raw_value: Any) -> dict[str, Any] | None:
     if isinstance(raw_value, Mapping):
         return dict(raw_value)
     return json.loads(str(raw_value))
-
-
-def _merge_topic_configurations(
-    existing_configs: list[dict[str, Any]], topic_config: dict[str, Any]
-) -> list[dict[str, Any]]:
-    merged = [dict(config) for config in existing_configs]
-    for idx, config in enumerate(merged):
-        if (
-            config.get("Id") == topic_config["Id"]
-            or config.get("TopicArn") == topic_config["TopicArn"]
-        ):
-            merged[idx] = dict(topic_config)
-            return merged
-    merged.append(dict(topic_config))
-    return merged

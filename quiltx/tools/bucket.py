@@ -107,6 +107,60 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    prepare_parser = subparsers.add_parser(
+        "prepare",
+        prog="quiltx bucket prepare",
+        help="Configure bucket access and notifications using AWS credentials only.",
+    )
+    prepare_parser.add_argument("bucket_name", help="S3 bucket name to prepare.")
+    prepare_parser.add_argument(
+        "--profile",
+        help="AWS profile for the data account that owns the bucket.",
+    )
+    prepare_parser.add_argument(
+        "--control-account-id",
+        help=(
+            "Quilt control AWS account ID. Required unless --principal or "
+            "--catalog is supplied; defaults access to that account root."
+        ),
+    )
+    prepare_parser.add_argument(
+        "--catalog",
+        help=(
+            "Catalog DNS name used to derive the control account ID when "
+            "--control-account-id and --principal are omitted: reads cached "
+            "stack metadata, else logs in as a regular catalog user (no admin "
+            "required) and asks STS which account minted the credentials."
+        ),
+    )
+    prepare_parser.add_argument(
+        "--principal",
+        metavar="ARN",
+        action="append",
+        nargs="?",
+        const="",
+        help=(
+            "Explicit Quilt IAM role ARN granted bucket and SNS access. "
+            "Repeatable or comma-separated."
+        ),
+    )
+    output_group = prepare_parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the exact final AWS policy and notification documents.",
+    )
+    output_group.add_argument(
+        "--json",
+        action="store_true",
+        help="Print only the minimal non-secret operator handoff as JSON.",
+    )
+    prepare_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Apply AWS changes without prompting for confirmation.",
+    )
+
     list_parser = subparsers.add_parser(
         "list",
         prog="quiltx bucket list",
@@ -183,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "add":
             return _cmd_add(args)
+        if args.action == "prepare":
+            return _cmd_prepare(args)
         if args.action == "remove":
             return _cmd_remove(args)
         if args.action == "list":
@@ -372,6 +428,157 @@ def _lightweight_stack_payload(
     )
 
 
+def _print_plan_documents(
+    console: Console, plan: bucket_lib.BucketPreparationPlan
+) -> None:
+    print("\nFinal bucket policy:")
+    _print_json(console, plan.bucket_policy)
+    print("\nFinal SNS topic policy:")
+    _print_json(console, plan.sns_policy)
+    print("\nFinal bucket notification configuration:")
+    _print_json(console, plan.notification_configuration)
+
+
+def _print_bucket_preparation_plan(plan: bucket_lib.BucketPreparationPlan) -> None:
+    console = Console(width=120)
+    print("Bucket prepare dry-run")
+    print(f"Bucket: s3://{plan.bucket}")
+    print(f"Region: {plan.region}")
+    print(f"Owning account: {plan.owning_account}")
+    print(f"Effective principals: {', '.join(plan.principals)}")
+    print(f"SNS topic: {plan.sns_topic_arn}")
+    _print_plan_documents(console, plan)
+
+
+def _control_account_id_from_catalog(catalog_arg: str) -> str:
+    """Derive the Quilt control account ID for a catalog without admin access.
+
+    Cached stack metadata wins (no authentication at all); otherwise log in as
+    a regular catalog user and ask STS which account minted the catalog
+    credentials. Keeps ``bucket prepare`` outside ``catalog_command``: no
+    catalog configuration is loaded and no Quilt admin API is called.
+    """
+    from quiltx import quilt3_facade
+
+    catalog = stack_lib.resolve_catalog_context(catalog_arg)
+    payload = stack_lib.load_stack_payload(catalog.catalog_name)
+    account_id = str((payload or {}).get("account_id") or "")
+    if account_id:
+        print(
+            f"Control account {account_id} from cached stack metadata for "
+            f"{catalog.catalog_name}.",
+            file=sys.stderr,
+        )
+        return account_id
+    catalog.ensure_auth()
+    account_id = quilt3_facade.catalog_sts_account_id()
+    print(
+        f"Control account {account_id} from {catalog.catalog_name} catalog "
+        "credentials.",
+        file=sys.stderr,
+    )
+    return account_id
+
+
+def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
+    print(f"Prepare s3://{plan.bucket} in {plan.region} for Quilt access.")
+    print(f"SNS topic: {plan.sns_topic_arn}")
+    response = input("Apply these AWS changes? [y/N]: ").strip().lower()
+    return response in {"y", "yes"}
+
+
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    principals, show_guidance = _resolve_principals_arg(args.principal)
+    if show_guidance:
+        _print_principal_guidance()
+        return 0
+    for principal in principals:
+        if not principal.startswith("arn:aws:iam::") or ":role/" not in principal:
+            print(
+                f"Error: --principal must be an IAM role ARN, got {principal!r}",
+                file=sys.stderr,
+            )
+            return 1
+    if args.control_account_id and (
+        len(args.control_account_id) != 12 or not args.control_account_id.isdigit()
+    ):
+        print(
+            "Error: --control-account-id must be a 12-digit AWS account ID",
+            file=sys.stderr,
+        )
+        return 1
+    control_account_id = args.control_account_id
+    if not control_account_id and not principals and args.catalog:
+        try:
+            control_account_id = _control_account_id_from_catalog(args.catalog)
+        except Exception as exc:
+            print(
+                f"Error: cannot derive control account from catalog "
+                f"{args.catalog}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    if not control_account_id and not principals:
+        print(
+            "Error: provide --control-account-id, --principal, or --catalog",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json and not args.yes:
+        print("Error: --json requires --yes for non-interactive apply", file=sys.stderr)
+        return 1
+
+    session, s3_client, region, _resolved_profile = bucket_lib.resolve_bucket_session(
+        args.bucket_name,
+        args.profile,
+        assume_yes=args.yes,
+        no_prompt=bool(args.json and args.profile),
+        output=sys.stderr,
+    )
+    if session is None:
+        return 1
+    sns_client = session.client("sns", region_name=region)
+    sqs_client = session.client("sqs", region_name=region)
+    lambda_client = session.client("lambda", region_name=region)
+    owning_account = _get_session_account_id(session)
+    plan = bucket_lib.build_bucket_preparation_plan(
+        args.bucket_name,
+        region,
+        owning_account,
+        control_account_id=control_account_id,
+        principals=principals or None,
+        s3_client=s3_client,
+        sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
+    )
+
+    if args.dry_run:
+        _print_bucket_preparation_plan(plan)
+        return 0
+    if not args.yes and not _confirm_bucket_preparation(plan):
+        print("Aborted.")
+        return 1
+
+    bucket_lib.apply_bucket_preparation(
+        plan,
+        s3_client=s3_client,
+        sns_client=sns_client,
+        sqs_client=sqs_client,
+        lambda_client=lambda_client,
+    )
+    if args.json:
+        print(json.dumps(plan.handoff(), indent=2))
+    else:
+        print(f"Prepared s3://{plan.bucket} for Quilt access.")
+        print(f"SNS notifications: {plan.sns_topic_arn}")
+        print(
+            "Catalog operator next step: "
+            f"quiltx bucket add {plan.bucket} --no-preflight --catalog <catalog>"
+        )
+    return 0
+
+
 @stack_lib.catalog_command
 def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
@@ -423,6 +630,8 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             return 1
         args.profile = resolved_profile
         sns_client = session.client("sns", region_name=bucket_region)
+        sqs_client = session.client("sqs", region_name=bucket_region)
+        lambda_client = session.client("lambda", region_name=bucket_region)
 
         existing_bucket = stack.admin.buckets.get(args.bucket_name)
         prior_title = (
@@ -430,13 +639,13 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             if existing_bucket is not None
             else None
         )
-        if existing_bucket is not None and args.force:
+        force_reregister = existing_bucket is not None and args.force
+        if force_reregister:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
-                "removing and re-adding (--force) so Quilt re-subscribes SQS."
+                "will remove and re-add after AWS preparation (--force) so Quilt "
+                "re-subscribes SQS."
             )
-            stack.admin.buckets.remove(args.bucket_name)
-            existing_bucket = None
         elif existing_bucket is not None:
             print(
                 f"Bucket {args.bucket_name}: already registered in Quilt; "
@@ -445,21 +654,18 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                 "registration so Quilt re-subscribes SQS."
             )
 
-        bucket_policy = bucket_lib.get_bucket_policy(
-            args.bucket_name, s3_client=s3_client
-        )
-        quilt_statement = bucket_lib.build_quilt_policy_statement(
-            args.bucket_name,
-            control_account_id,
-            principals=principals or None,
-        )
-        merged_policy = bucket_lib.merge_bucket_policy(bucket_policy, quilt_statement)
-
-        sns_topic_arn = bucket_lib.get_bucket_notification_sns(
-            args.bucket_name, s3_client=s3_client
-        )
-
         data_account_id = _get_session_account_id(session)
+        plan = bucket_lib.build_bucket_preparation_plan(
+            args.bucket_name,
+            bucket_region,
+            data_account_id,
+            control_account_id=control_account_id,
+            principals=principals or None,
+            s3_client=s3_client,
+            sns_client=sns_client,
+            sqs_client=sqs_client,
+            lambda_client=lambda_client,
+        )
 
         if args.dry_run:
             _print_dry_run_plan(
@@ -470,12 +676,8 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                 effective_principals,
                 principal_source,
                 control_region,
-                args.bucket_name,
-                bucket_region,
-                data_account_id,
                 args.profile,
-                merged_policy,
-                sns_topic_arn,
+                plan,
             )
             return 0
 
@@ -487,42 +689,25 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             effective_principals,
             principal_source,
             control_region,
-            args.bucket_name,
-            bucket_region,
-            data_account_id,
             args.profile,
-            sns_topic_arn,
+            plan,
         ):
             print("Aborted.")
             return 1
 
-        if sns_topic_arn is None:
-            sns_topic_arn = bucket_lib.ensure_sns_topic(
-                args.bucket_name,
-                bucket_region,
-                sns_client=sns_client,
-            )
-
-        bucket_lib.configure_sns_topic_policy(
-            args.bucket_name,
-            sns_topic_arn,
-            data_account_id,
-            effective_principals,
+        bucket_lib.apply_bucket_preparation(
+            plan,
+            s3_client=s3_client,
             sns_client=sns_client,
+            sqs_client=sqs_client,
+            lambda_client=lambda_client,
         )
-
-        bucket_lib.apply_bucket_policy(
-            args.bucket_name,
-            merged_policy,
-            s3_client=s3_client,
-        )
-        bucket_lib.configure_bucket_notifications(
-            args.bucket_name,
-            sns_topic_arn,
-            s3_client=s3_client,
-        )
+        sns_topic_arn = plan.sns_topic_arn
 
         bucket_title = args.title or prior_title or args.bucket_name
+        if force_reregister:
+            stack.admin.buckets.remove(args.bucket_name)
+            existing_bucket = None
         if existing_bucket is None:
             stack.admin.buckets.add(
                 name=args.bucket_name,
@@ -847,11 +1032,8 @@ def _confirm_bucket_add(
     principals: list[str],
     principal_source: str,
     control_region: str,
-    bucket_name: str,
-    bucket_region: str,
-    data_account_id: str,
     profile: str | None,
-    sns_topic_arn: str | None,
+    plan: bucket_lib.BucketPreparationPlan,
 ) -> bool:
     console = Console(width=120)
     _print_context_table(
@@ -864,20 +1046,16 @@ def _confirm_bucket_add(
         principals,
         principal_source,
         control_region,
-        bucket_name,
-        bucket_region,
-        data_account_id,
+        plan.bucket,
+        plan.region,
+        plan.owning_account,
         profile,
-        sns_topic_arn,
+        plan.sns_topic_arn if plan.topic_exists else None,
     )
-    if sns_topic_arn is None:
-        planned_topic_arn = (
-            f"arn:aws:sns:{bucket_region}:{data_account_id}:"
-            f"{bucket_lib._sns_topic_name(bucket_name)}"
-        )
+    if not plan.topic_exists:
         console.print(
             f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
-            f"a new topic will be created: {planned_topic_arn}"
+            f"a new topic will be created: {plan.sns_topic_arn}"
         )
     response = input("Continue? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
@@ -891,12 +1069,8 @@ def _print_dry_run_plan(
     principals: list[str],
     principal_source: str,
     control_region: str,
-    bucket_name: str,
-    bucket_region: str,
-    data_account_id: str,
     profile: str | None,
-    merged_policy: Mapping[str, Any],
-    sns_topic_arn: str | None,
+    plan: bucket_lib.BucketPreparationPlan,
 ) -> None:
     console = Console(width=120)
     _print_context_table(
@@ -909,43 +1083,18 @@ def _print_dry_run_plan(
         principals,
         principal_source,
         control_region,
-        bucket_name,
-        bucket_region,
-        data_account_id,
+        plan.bucket,
+        plan.region,
+        plan.owning_account,
         profile,
-        sns_topic_arn,
+        plan.sns_topic_arn if plan.topic_exists else None,
     )
-    print()
-    print("Planned bucket policy:")
-    _print_json(console, merged_policy)
-
-    planned_topic_arn = sns_topic_arn or (
-        f"arn:aws:sns:{bucket_region}:{data_account_id}:"
-        f"{bucket_lib._sns_topic_name(bucket_name)}"
-    )
-    if sns_topic_arn is None:
+    if not plan.topic_exists:
         console.print(
             f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
-            f"a new topic will be created: {planned_topic_arn}"
+            f"a new topic will be created: {plan.sns_topic_arn}"
         )
-    print("\nPlanned SNS topic policy statement:")
-    _print_json(
-        console,
-        {
-            "Version": "2012-10-17",
-            "Statement": [
-                bucket_lib._build_sns_topic_publish_policy_statement(
-                    bucket_name,
-                    planned_topic_arn,
-                    data_account_id,
-                ),
-                bucket_lib._build_sns_topic_subscribe_policy_statement(
-                    planned_topic_arn,
-                    principals,
-                ),
-            ],
-        },
-    )
+    _print_plan_documents(console, plan)
 
 
 def _print_no_preflight_dry_run(
