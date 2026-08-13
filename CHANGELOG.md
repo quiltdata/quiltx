@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `quiltx bucket prepare` configures cross-account S3 access, SNS policy, and safe object notifications using bucket-owner AWS credentials only, with exact dry-run documents and a minimal JSON handoff for a separate catalog operator.
+- `quiltx bucket prepare --catalog DNS` derives the control account ID from cached stack metadata or, failing that, by logging in as a regular catalog user (no admin role) and reading the account behind the catalog-minted credentials.
 
 ### Changed
 

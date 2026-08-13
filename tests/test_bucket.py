@@ -1146,6 +1146,119 @@ def test_prepare_json_default_profile_fallback_keeps_json_stdout(
     assert "Retrying with profile prod." in captured.err
 
 
+def test_prepare_requires_control_account_principal_or_catalog(capsys) -> None:
+    assert bucket_tool.main(["prepare", "bucket"]) == 1
+    assert (
+        "provide --control-account-id, --principal, or --catalog"
+        in capsys.readouterr().err
+    )
+
+
+def _install_prepare_catalog_fakes(
+    monkeypatch,
+    plan: bucket_lib.BucketPreparationPlan,
+    *,
+    payload: dict[str, Any] | None,
+    allow_auth: bool,
+) -> tuple[list[str], list[str], list[str]]:
+    """Wire prepare fakes plus a fake catalog; return (plan ids, auths, resolved)."""
+    _install_prepare_fakes(monkeypatch, plan)
+    control_ids: list[str] = []
+    auth_calls: list[str] = []
+    resolved: list[str] = []
+
+    def build_plan(*args, **kwargs):
+        control_ids.append(kwargs["control_account_id"])
+        return plan
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib, "build_bucket_preparation_plan", build_plan
+    )
+
+    def ensure_auth(*args, **kwargs):
+        if not allow_auth:
+            raise AssertionError("cached stack metadata must not authenticate")
+        auth_calls.append("auth")
+
+    catalog = SimpleNamespace(
+        catalog_name="open.quiltdata.com", ensure_auth=ensure_auth
+    )
+
+    def resolve_catalog_context(catalog_arg, **kwargs):
+        resolved.append(catalog_arg)
+        return catalog
+
+    monkeypatch.setattr(
+        bucket_tool.stack_lib, "resolve_catalog_context", resolve_catalog_context
+    )
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "load_stack_payload",
+        lambda catalog_name: payload,
+    )
+    return control_ids, auth_calls, resolved
+
+
+def test_prepare_catalog_uses_cached_stack_metadata(monkeypatch, capsys) -> None:
+    plan = _fake_bucket_preparation_plan()
+    control_ids, _auth_calls, resolved = _install_prepare_catalog_fakes(
+        monkeypatch,
+        plan,
+        payload={"account_id": "123456789012"},
+        allow_auth=False,
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run must not write AWS state")
+        ),
+    )
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--catalog", "open.quiltdata.com", "--dry-run"]
+    )
+
+    assert result == 0
+    assert resolved == ["open.quiltdata.com"]
+    assert control_ids == ["123456789012"]
+    assert (
+        "Control account 123456789012 from cached stack metadata"
+        in capsys.readouterr().err
+    )
+
+
+def test_prepare_catalog_falls_back_to_catalog_credentials(monkeypatch, capsys) -> None:
+    plan = _fake_bucket_preparation_plan()
+    control_ids, auth_calls, _resolved = _install_prepare_catalog_fakes(
+        monkeypatch, plan, payload=None, allow_auth=True
+    )
+    monkeypatch.setattr(
+        "quiltx.quilt3_facade.catalog_sts_account_id", lambda: "123456789012"
+    )
+    applied: list[bucket_lib.BucketPreparationPlan] = []
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda candidate, **kwargs: applied.append(candidate),
+    )
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--catalog", "open.quiltdata.com", "--json", "--yes"]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert auth_calls == ["auth"]
+    assert control_ids == ["123456789012"]
+    assert applied == [plan]
+    assert json.loads(captured.out) == plan.handoff()
+    assert (
+        "Control account 123456789012 from open.quiltdata.com catalog credentials"
+        in captured.err
+    )
+
+
 class FakeQuiltBucket:
     def __init__(self, uri: str) -> None:
         self.uri = uri

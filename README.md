@@ -78,7 +78,10 @@ uvx quiltx bucket prepare my-bucket \
 ```
 
 Use repeatable `--principal arn:aws:iam::123456789012:role/...` options to grant
-specific Quilt roles instead of the control-account root. `--dry-run` prints the
+specific Quilt roles instead of the control-account root. If you don't know the
+control account ID, pass `--catalog example.quiltdata.com` instead: any
+logged-in catalog user (no admin role needed) can derive it from the catalog's
+minted credentials. `--dry-run` prints the
 exact final S3 policy, SNS policy, and notification configuration without any
 writes. Preparation preserves unrelated policies and compatible notifications,
 and stops with actionable details when an object-event notification overlaps.

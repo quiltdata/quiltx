@@ -120,8 +120,17 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument(
         "--control-account-id",
         help=(
-            "Quilt control AWS account ID. Required unless --principal is supplied; "
-            "defaults access to that account root."
+            "Quilt control AWS account ID. Required unless --principal or "
+            "--catalog is supplied; defaults access to that account root."
+        ),
+    )
+    prepare_parser.add_argument(
+        "--catalog",
+        help=(
+            "Catalog DNS name used to derive the control account ID when "
+            "--control-account-id and --principal are omitted: reads cached "
+            "stack metadata, else logs in as a regular catalog user (no admin "
+            "required) and asks STS which account minted the credentials."
         ),
     )
     prepare_parser.add_argument(
@@ -441,6 +450,36 @@ def _print_bucket_preparation_plan(plan: bucket_lib.BucketPreparationPlan) -> No
     _print_plan_documents(console, plan)
 
 
+def _control_account_id_from_catalog(catalog_arg: str) -> str:
+    """Derive the Quilt control account ID for a catalog without admin access.
+
+    Cached stack metadata wins (no authentication at all); otherwise log in as
+    a regular catalog user and ask STS which account minted the catalog
+    credentials. Keeps ``bucket prepare`` outside ``catalog_command``: no
+    catalog configuration is loaded and no Quilt admin API is called.
+    """
+    from quiltx import quilt3_facade
+
+    catalog = stack_lib.resolve_catalog_context(catalog_arg)
+    payload = stack_lib.load_stack_payload(catalog.catalog_name)
+    account_id = str((payload or {}).get("account_id") or "")
+    if account_id:
+        print(
+            f"Control account {account_id} from cached stack metadata for "
+            f"{catalog.catalog_name}.",
+            file=sys.stderr,
+        )
+        return account_id
+    catalog.ensure_auth()
+    account_id = quilt3_facade.catalog_sts_account_id()
+    print(
+        f"Control account {account_id} from {catalog.catalog_name} catalog "
+        "credentials.",
+        file=sys.stderr,
+    )
+    return account_id
+
+
 def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
     print(f"Prepare s3://{plan.bucket} in {plan.region} for Quilt access.")
     print(f"SNS topic: {plan.sns_topic_arn}")
@@ -460,17 +499,28 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-    if not args.control_account_id and not principals:
-        print(
-            "Error: provide --control-account-id or at least one --principal",
-            file=sys.stderr,
-        )
-        return 1
     if args.control_account_id and (
         len(args.control_account_id) != 12 or not args.control_account_id.isdigit()
     ):
         print(
             "Error: --control-account-id must be a 12-digit AWS account ID",
+            file=sys.stderr,
+        )
+        return 1
+    control_account_id = args.control_account_id
+    if not control_account_id and not principals and args.catalog:
+        try:
+            control_account_id = _control_account_id_from_catalog(args.catalog)
+        except Exception as exc:
+            print(
+                f"Error: cannot derive control account from catalog "
+                f"{args.catalog}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    if not control_account_id and not principals:
+        print(
+            "Error: provide --control-account-id, --principal, or --catalog",
             file=sys.stderr,
         )
         return 1
@@ -495,7 +545,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         args.bucket_name,
         region,
         owning_account,
-        control_account_id=args.control_account_id,
+        control_account_id=control_account_id,
         principals=principals or None,
         s3_client=s3_client,
         sns_client=sns_client,
