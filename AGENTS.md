@@ -15,6 +15,20 @@ registers through GraphQL only, letting the catalog stack probe with its own
 IAM. The same mode is available for ACL reconciliation with
 `quiltx catalog acl --no-preflight` or `QUILTX_NO_PREFLIGHT=1`.
 
+Post-add verification runs on both add paths (`--no-test` opts out) and reports
+registration, live access, and index wiring separately:
+
+- Live access is a server-side probe: `quiltx.bucket.probe_bucket_access` reads
+  the bucket's full catalog configuration and resubmits it unchanged, so the
+  registry re-validates S3/SNS with the stack's own identity. Configuration is
+  never rewritten; a catalog that cannot answer yields `status "unavailable"`
+  and callers fall back to the index probe.
+- Index wiring is a warning once live access is verified (indexing lags, and
+  empty buckets never index); `--require-index` makes it fatal.
+- `quiltx bucket test BUCKET --pre-registration [--profile P]` checks a
+  cross-account grant before registration using control-account credentials and
+  reports the probing principal.
+
 ### ECS Tool (`quiltx ecs`)
 
 Provides catalog ECS operations:

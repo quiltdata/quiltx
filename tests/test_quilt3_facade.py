@@ -191,3 +191,25 @@ def test_catalog_sts_account_id_fails_on_incomplete_credentials(monkeypatch) -> 
         quilt3_facade.CatalogCredentialsError, match="no usable credentials"
     ):
         quilt3_facade.catalog_sts_account_id()
+
+
+def test_admin_graphql_returns_the_data_payload(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeClient:
+        def execute(self, query: str, variables: dict[str, object]):
+            calls.append({"query": query, "variables": variables})
+            return "raw-response"
+
+        def get_data(self, response: object) -> dict[str, object]:
+            assert response == "raw-response"
+            return {"bucketConfig": {"name": "bucket-a"}}
+
+    monkeypatch.setattr(quilt3_facade, "admin_graphql_client", lambda: _FakeClient())
+
+    data = quilt3_facade.admin_graphql("query Q($name: String!) { x }", {"name": "b"})
+
+    assert data == {"bucketConfig": {"name": "bucket-a"}}
+    assert calls == [
+        {"query": "query Q($name: String!) { x }", "variables": {"name": "b"}}
+    ]

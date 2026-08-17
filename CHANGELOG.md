@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-08-17
+
+### Added
+
+- `quiltx bucket test` and post-add verification now run a server-side live
+  access probe ([#87](https://github.com/quiltdata/quiltx/issues/87)). The
+  catalog re-validates the bucket with the stack's own service identity, so a
+  valid empty bucket passes, revoked access fails even when stale search-index
+  entries remain, and failures name the failed capability (bucket metadata,
+  S3 read, notification configuration, or SNS topic) plus the control account
+  and stack principal. Registration, live access, and index wiring are reported
+  as three separate checks. A catalog that cannot answer the probe is reported
+  as skipped, and verification falls back to the index probe. The probe
+  resubmits the bucket's existing catalog configuration unchanged to trigger
+  re-validation; `QUILTX_NO_LIVE_PROBE=1` skips it.
+- `quiltx bucket test --pre-registration` checks a cross-account grant before
+  any catalog registration exists ([#92](https://github.com/quiltdata/quiltx/issues/92)):
+  bucket reachable, `GetBucketNotification` readable, and the SNS topic policy
+  granting `Subscribe`/`GetTopicAttributes`. It runs from the control account
+  (`--profile`), reports the principal used, and fails when that principal is
+  not in the catalog's control account, so a wrong-account grant surfaces at
+  handoff instead of as an opaque `AccessDenied` inside `catalog acl`. Topic
+  policies are read conservatively: an explicit `Deny` overrides an allow, and a
+  condition-bearing allow is reported as conditional rather than granted.
+- `quiltx bucket test --require-index` and `quiltx bucket add --require-index`
+  treat an empty search index as a failure. By default an empty index is a
+  warning once live access is verified, since indexing lags registration and
+  empty buckets never index.
+
+### Fixed
+
+- `quiltx bucket add --no-preflight` now verifies after registering
+  ([#92](https://github.com/quiltdata/quiltx/issues/92)). The documented
+  cross-account flow previously exited 0 without any check, reporting success
+  for a bucket that was registered but unreadable and unindexed. `--no-test` is
+  now the opt-out on that path too, instead of being silently a no-op, and an
+  already-registered bucket is verified rather than skipped.
+- `quiltx bucket test` reports the Quilt control account and stack principal on
+  failure instead of `unknown`, which is precisely the diagnostic needed when a
+  grant was issued to the wrong account
+  ([#92](https://github.com/quiltdata/quiltx/issues/92)).
+
 ## [0.18.1] - 2026-08-17
 
 ### Fixed
