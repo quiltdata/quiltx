@@ -1305,7 +1305,72 @@ class FakeQuiltBucket:
         return [{"_source": {"key": "file.txt"}}]
 
 
-def _install_fake_quilt3(monkeypatch, *, get_result=None, listed=None, add_calls=None):
+def _fake_bucket_config(name: str) -> dict[str, Any]:
+    """A BucketConfig payload covering every BucketUpdateInput field."""
+    config: dict[str, Any] = {
+        field: None for field in bucket_lib.BUCKET_UPDATE_INPUT_FIELDS
+    }
+    config.update(
+        {
+            "name": name,
+            "lastIndexed": None,
+            "title": name,
+            "browsable": True,
+            "relevanceScore": 0,
+            "prefixes": [],
+        }
+    )
+    return config
+
+
+def _install_fake_graphql(
+    monkeypatch,
+    *,
+    typename: str = "BucketUpdateSuccess",
+    message: str | None = None,
+    registered: bool = True,
+    calls: list[tuple[str, dict[str, Any]]] | None = None,
+    error: BaseException | None = None,
+):
+    """Stub the admin GraphQL transport used by the live-access probe."""
+
+    def fake_graphql(query: str, variables):
+        if calls is not None:
+            calls.append((query, dict(variables)))
+        if error is not None:
+            raise error
+        if "quiltxBucketConfig" in query:
+            if not registered:
+                return {"bucketConfig": None}
+            return {"bucketConfig": _fake_bucket_config(str(variables["name"]))}
+        payload: dict[str, Any] = {"__typename": typename}
+        if message is not None:
+            payload["message"] = message
+        return {"bucketUpdate": payload}
+
+    monkeypatch.setattr(bucket_lib, "_admin_graphql", fake_graphql)
+    return fake_graphql
+
+
+def _stub_verification(monkeypatch, result: int = 0) -> list[str]:
+    """Record post-add verification calls instead of running them."""
+    calls: list[str] = []
+
+    def fake_verify(stack, bucket, **kwargs):
+        calls.append(bucket)
+        return result
+
+    monkeypatch.setattr(
+        bucket_tool, "_verify_bucket_registration_and_access", fake_verify
+    )
+    return calls
+
+
+def _install_fake_quilt3(
+    monkeypatch, *, get_result=None, listed=None, add_calls=None, graphql=True
+):
+    if graphql:
+        _install_fake_graphql(monkeypatch)
     bucket_list = list(listed or [])
     if get_result is not None and listed is None:
         bucket_list.append(get_result)
@@ -1602,6 +1667,7 @@ def test_add_already_registered_skips_post_test_when_no_test_flag(monkeypatch) -
 
 def test_add_no_preflight_registers_without_boto3(monkeypatch, capsys) -> None:
     add_calls: list[tuple[str, str | None]] = []
+    verify_calls: list[str] = []
     _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
     _install_stack_context(monkeypatch)
     monkeypatch.setattr(
@@ -1611,12 +1677,13 @@ def test_add_no_preflight_registers_without_boto3(monkeypatch, capsys) -> None:
             AssertionError("boto3 should not be used")
         ),
     )
+
+    def fake_verify(stack, bucket, **kwargs):
+        verify_calls.append(bucket)
+        return 0
+
     monkeypatch.setattr(
-        bucket_tool,
-        "_verify_bucket_registration_and_access",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("post-add test should not run")
-        ),
+        bucket_tool, "_verify_bucket_registration_and_access", fake_verify
     )
 
     def fake_add_without_preflight(stack, bucket, *, title=None):
@@ -1634,12 +1701,15 @@ def test_add_no_preflight_registers_without_boto3(monkeypatch, capsys) -> None:
     assert "via GraphQL only" in captured.out
     assert "local AWS preflight/setup skipped" in captured.out
     assert add_calls == [("bucket", "bucket")]
+    # Issue #92: the cross-account path verifies, it does not just suggest it.
+    assert verify_calls == ["bucket"]
 
 
 def test_add_no_preflight_env_var(monkeypatch) -> None:
     add_calls: list[str] = []
     _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
     _install_stack_context(monkeypatch)
+    _stub_verification(monkeypatch)
     monkeypatch.setenv("QUILTX_NO_PREFLIGHT", "1")
     monkeypatch.setattr(
         bucket_tool.boto3,
@@ -1666,6 +1736,7 @@ def test_add_no_preflight_env_var(monkeypatch) -> None:
 def test_add_no_preflight_no_prompt_does_not_require_yes(monkeypatch) -> None:
     _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
     _install_stack_context(monkeypatch)
+    _stub_verification(monkeypatch)
     monkeypatch.setattr(
         bucket_tool.bucket_lib,
         "add_bucket_without_preflight",
@@ -1680,6 +1751,7 @@ def test_add_no_preflight_no_prompt_does_not_require_yes(monkeypatch) -> None:
 def test_add_no_preflight_force_removes_then_adds(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
     _install_stack_context(monkeypatch)
+    _stub_verification(monkeypatch)
 
     buckets = SimpleNamespace()
     buckets.get = lambda name: FakeBucket(name, "Existing")
@@ -2161,16 +2233,297 @@ def test_test_checks_registration_and_read_access(monkeypatch, capsys) -> None:
     assert bucket_tool.main(["test", "bucket-a"]) == 0
     captured = capsys.readouterr()
     assert "OK: bucket-a is registered in Quilt as Bucket A" in captured.out
+    assert "OK: catalog stack has live access" in captured.out
     assert "OK: search index is populated" in captured.out
 
 
 def test_test_fails_when_bucket_not_registered(monkeypatch, capsys) -> None:
     _install_stack_context(monkeypatch)
     _install_fake_quilt3(monkeypatch, listed=[FakeBucket("other", "Other")])
+    monkeypatch.setattr(bucket_tool, "_control_context", lambda stack: (None, None))
 
     assert bucket_tool.main(["test", "bucket-a"]) == 1
     captured = capsys.readouterr()
     assert "bucket-a is not registered in Quilt" in captured.err
+    assert "--pre-registration" in captured.err
+
+
+# ------------------------------------------------------------------------
+# Live access verification (issue #87) and where it is wired (issue #92)
+# ------------------------------------------------------------------------
+
+
+def _install_index_probe(monkeypatch, *, results: int | None, error: str | None = None):
+    monkeypatch.setattr(
+        bucket_tool,
+        "_probe_search_index",
+        lambda bucket_name, **kwargs: (results, error),
+    )
+
+
+def test_probe_bucket_access_resubmits_the_current_config_unchanged(
+    monkeypatch,
+) -> None:
+    """The live probe must not rewrite configuration while re-validating."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    _install_fake_graphql(monkeypatch, calls=calls)
+
+    probe = bucket_lib.probe_bucket_access(make_fake_catalog(), "bucket-a")
+
+    assert probe.ok
+    assert probe.capability == "bucket metadata, listing, and object read"
+    query, variables = calls[-1]
+    assert "bucketUpdate" in query
+    expected = _fake_bucket_config("bucket-a")
+    assert variables["input"] == {
+        field: expected[field] for field in bucket_lib.BUCKET_UPDATE_INPUT_FIELDS
+    }
+
+
+@pytest.mark.parametrize(
+    ("typename", "message", "capability"),
+    [
+        (
+            "InsufficientPermissions",
+            "s3:ListBucket denied for arn:aws:iam::123456789012:role/registry",
+            "S3 read access (ListBucket / GetObject)",
+        ),
+        (
+            "NotificationConfigurationError",
+            None,
+            "bucket notification configuration",
+        ),
+        ("NotificationTopicNotFound", None, "SNS notification topic"),
+    ],
+)
+def test_probe_bucket_access_reports_the_failed_capability(
+    monkeypatch, typename, message, capability
+) -> None:
+    _install_fake_graphql(monkeypatch, typename=typename, message=message)
+
+    probe = bucket_lib.probe_bucket_access(make_fake_catalog(), "bucket-a")
+
+    assert probe.failed
+    assert probe.capability == capability
+    assert typename in probe.detail
+    if message:
+        assert message in probe.detail
+
+
+def test_probe_bucket_access_unavailable_when_catalog_cannot_answer(
+    monkeypatch,
+) -> None:
+    _install_fake_graphql(monkeypatch, error=RuntimeError("Cannot query field"))
+
+    probe = bucket_lib.probe_bucket_access(make_fake_catalog(), "bucket-a")
+
+    assert probe.unavailable
+    assert "Cannot query field" in probe.detail
+
+
+def test_probe_bucket_access_reports_unregistered_bucket(monkeypatch) -> None:
+    _install_fake_graphql(monkeypatch, registered=False)
+
+    probe = bucket_lib.probe_bucket_access(make_fake_catalog(), "bucket-a")
+
+    assert probe.failed
+    assert probe.capability == "catalog registration"
+
+
+def test_test_passes_for_empty_bucket_with_no_index_entries(
+    monkeypatch, capsys
+) -> None:
+    """Issue #87: a valid empty bucket passes; an empty index is not a failure."""
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, listed=[FakeBucket("bucket-a", "Bucket A")])
+    _install_index_probe(
+        monkeypatch, results=None, error="search index returned 0 results after ~60s"
+    )
+
+    assert bucket_tool.main(["test", "bucket-a"]) == 0
+    captured = capsys.readouterr()
+    assert "OK: catalog stack has live access" in captured.out
+    assert "WARNING: search index has no entries" in captured.err
+    assert "--require-index" in captured.err
+
+
+def test_test_require_index_treats_empty_index_as_failure(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, listed=[FakeBucket("bucket-a", "Bucket A")])
+    _install_index_probe(monkeypatch, results=None, error="0 results")
+    monkeypatch.setattr(
+        bucket_tool, "_control_context", lambda stack: ("123456789012", None)
+    )
+
+    assert bucket_tool.main(["test", "bucket-a", "--require-index"]) == 1
+    captured = capsys.readouterr()
+    assert "failed at search index probe" in captured.err
+    assert "failed capability: notification/index wiring" in captured.err
+
+
+def test_test_fails_on_revoked_access_despite_stale_index(monkeypatch, capsys) -> None:
+    """Issue #87: a stale index entry must not mask revoked live access."""
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, listed=[FakeBucket("bucket-a", "Bucket A")])
+    _install_fake_graphql(
+        monkeypatch,
+        typename="InsufficientPermissions",
+        message="s3:ListBucket denied",
+    )
+    _install_index_probe(monkeypatch, results=5)
+    monkeypatch.setattr(
+        bucket_tool,
+        "_control_context",
+        lambda stack: ("123456789012", "arn:aws:iam::123456789012:role/quilt-registry"),
+    )
+
+    assert bucket_tool.main(["test", "bucket-a"]) == 1
+    captured = capsys.readouterr()
+    assert "failed at live access probe" in captured.err
+    assert "failed capability: S3 read access" in captured.err
+    assert "s3:ListBucket denied" in captured.err
+    # Issue #92: the lines that identify a wrong-account grant are populated.
+    assert "Quilt control account: 123456789012" in captured.err
+    assert "arn:aws:iam::123456789012:role/quilt-registry" in captured.err
+    assert "OK: search index" not in captured.out
+
+
+def test_test_falls_back_to_index_when_probe_unavailable(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, listed=[FakeBucket("bucket-a", "Bucket A")])
+    _install_fake_graphql(monkeypatch, error=RuntimeError("unknown field bucketUpdate"))
+    _install_index_probe(monkeypatch, results=1)
+
+    assert bucket_tool.main(["test", "bucket-a"]) == 0
+    captured = capsys.readouterr()
+    assert "SKIPPED: live access probe unavailable" in captured.out
+    assert "OK: search index is populated" in captured.out
+
+
+def test_test_unavailable_probe_keeps_index_failure_fatal(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, listed=[FakeBucket("bucket-a", "Bucket A")])
+    _install_fake_graphql(monkeypatch, error=RuntimeError("unknown field bucketUpdate"))
+    _install_index_probe(monkeypatch, results=None, error="0 results")
+    monkeypatch.setattr(bucket_tool, "_control_context", lambda stack: (None, None))
+
+    assert bucket_tool.main(["test", "bucket-a"]) == 1
+    assert "failed at search index probe" in capsys.readouterr().err
+
+
+def test_test_live_probe_can_be_disabled_by_env(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, listed=[FakeBucket("bucket-a", "Bucket A")])
+    _install_fake_graphql(
+        monkeypatch,
+        error=AssertionError("QUILTX_NO_LIVE_PROBE must skip the mutation"),
+    )
+    _install_index_probe(monkeypatch, results=1)
+    monkeypatch.setenv("QUILTX_NO_LIVE_PROBE", "1")
+
+    assert bucket_tool.main(["test", "bucket-a"]) == 0
+    assert "QUILTX_NO_LIVE_PROBE" in capsys.readouterr().out
+
+
+def test_probe_search_index_retries_before_giving_up(monkeypatch) -> None:
+    """Issue #87: indexing delay is retried, then reported as a delay."""
+    attempts: list[int] = []
+
+    class _SlowBucket:
+        def search(self, _query, limit=10):
+            attempts.append(1)
+            return [] if len(attempts) < 3 else [{"_source": {}}]
+
+    monkeypatch.setattr("quiltx.quilt3_facade.make_bucket", lambda _uri: _SlowBucket())
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    assert bucket_tool._probe_search_index("bucket-a", delay=0) == (1, None)
+    assert len(attempts) == 3
+
+
+def test_probe_search_index_reports_indexing_delay(monkeypatch) -> None:
+    class _EmptyBucket:
+        def search(self, _query, limit=10):
+            return []
+
+    monkeypatch.setattr("quiltx.quilt3_facade.make_bucket", lambda _uri: _EmptyBucket())
+
+    count, error = bucket_tool._probe_search_index("bucket-a", attempts=2, delay=0)
+    assert count is None
+    assert error is not None and "0 results" in error
+
+
+def test_add_no_preflight_verification_failure_exits_nonzero(
+    monkeypatch, capsys
+) -> None:
+    """Issue #92: --no-preflight cannot return 0 for an unreadable bucket."""
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(
+        monkeypatch,
+        get_result=None,
+        listed=[FakeBucket("bucket-a", "Bucket A")],
+        add_calls=[],
+    )
+    _install_fake_graphql(
+        monkeypatch, typename="InsufficientPermissions", message="s3:GetObject denied"
+    )
+    _install_index_probe(monkeypatch, results=1)
+    monkeypatch.setattr(
+        bucket_tool, "_control_context", lambda stack: ("123456789012", None)
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        lambda stack, bucket, *, title=None: AddBucketResult(
+            bucket, title or bucket, "", False
+        ),
+    )
+
+    assert bucket_tool.main(["add", "bucket-a", "--no-preflight"]) == 1
+    captured = capsys.readouterr()
+    assert "Registered bucket bucket-a" in captured.out
+    assert "failed at live access probe" in captured.err
+
+
+def test_add_no_preflight_no_test_skips_verification(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
+    monkeypatch.setattr(
+        bucket_tool,
+        "_verify_bucket_registration_and_access",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("--no-test must skip verification")
+        ),
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        lambda stack, bucket, *, title=None: AddBucketResult(
+            bucket, title or bucket, "", False
+        ),
+    )
+
+    assert bucket_tool.main(["add", "bucket-a", "--no-preflight", "--no-test"]) == 0
+    assert "quiltx bucket test bucket-a" in capsys.readouterr().out
+
+
+def test_add_no_preflight_verifies_already_registered_bucket(monkeypatch) -> None:
+    """An existing catalog row does not prove the stack can read the bucket."""
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(
+        monkeypatch, get_result=FakeBucket("bucket-a", "Bucket A"), add_calls=[]
+    )
+    verify_calls = _stub_verification(monkeypatch)
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "add_bucket_without_preflight",
+        lambda stack, bucket, *, title=None: (_ for _ in ()).throw(
+            AssertionError("registered bucket must not be re-added")
+        ),
+    )
+
+    assert bucket_tool.main(["add", "bucket-a", "--no-preflight"]) == 0
+    assert verify_calls == ["bucket-a"]
 
 
 def test_build_parser_uses_bucket_prog() -> None:
@@ -3224,6 +3577,7 @@ def test_add_no_preflight_does_not_prompt_without_yes(monkeypatch) -> None:
     """Spec 7-no-preflight §144: --no-preflight should not need or trigger prompts."""
     _install_fake_quilt3(monkeypatch, get_result=None, add_calls=[])
     _install_stack_context(monkeypatch)
+    _stub_verification(monkeypatch)
     monkeypatch.setattr(
         "builtins.input",
         lambda _prompt="": (_ for _ in ()).throw(
@@ -3239,3 +3593,240 @@ def test_add_no_preflight_does_not_prompt_without_yes(monkeypatch) -> None:
     )
 
     assert bucket_tool.main(["add", "bucket", "--no-preflight"]) == 0
+
+
+# ------------------------------------------------------------------------
+# Pre-registration grant checks (issue #92)
+# ------------------------------------------------------------------------
+
+
+TOPIC_ARN = "arn:aws:sns:us-east-1:111122223333:quilt-bucket-a-notifications"
+
+
+def _grant_sns_policy(*actions: str, principal: str = "arn:aws:iam::123456789012:root"):
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "QuiltCrossAccountSNSAccess",
+                "Effect": "Allow",
+                "Principal": {"AWS": principal},
+                "Action": list(actions),
+                "Resource": TOPIC_ARN,
+            }
+        ],
+    }
+
+
+class _GrantS3:
+    """S3 double covering the calls the pre-registration grant probe makes."""
+
+    def __init__(self, *, location_error=None, list_error=None, topic_arn=TOPIC_ARN):
+        self._location_error = location_error
+        self._list_error = list_error
+        self._topic_arn = topic_arn
+        self.meta = SimpleNamespace(region_name="us-east-1")
+
+    def get_bucket_location(self, Bucket):
+        if self._location_error:
+            raise self._location_error
+        return {"LocationConstraint": None}
+
+    def head_bucket(self, Bucket):
+        if self._location_error:
+            raise self._location_error
+        return {}
+
+    def list_objects_v2(self, Bucket, MaxKeys=1):
+        if self._list_error:
+            raise self._list_error
+        return {"KeyCount": 0}
+
+    def get_bucket_notification_configuration(self, Bucket):
+        if not self._topic_arn:
+            return {}
+        return {
+            "TopicConfigurations": [
+                {
+                    "Id": bucket_lib.SNS_TOPIC_CONFIG_ID,
+                    "TopicArn": self._topic_arn,
+                    "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+                }
+            ]
+        }
+
+
+class _GrantSns:
+    def __init__(self, policy=None, error=None):
+        self._policy = policy
+        self._error = error
+
+    def get_topic_attributes(self, TopicArn):
+        if self._error:
+            raise self._error
+        return {"Attributes": {"Policy": json.dumps(self._policy)}}
+
+
+class _GrantSession:
+    def __init__(self, *, account="123456789012", s3=None, sns=None):
+        self._account = account
+        self._s3 = s3 if s3 is not None else _GrantS3()
+        self._sns = (
+            sns
+            if sns is not None
+            else _GrantSns(_grant_sns_policy("sns:GetTopicAttributes", "sns:Subscribe"))
+        )
+
+    def client(self, service, region_name=None):
+        if service == "sts":
+            return SimpleNamespace(
+                get_caller_identity=lambda: {
+                    "Account": self._account,
+                    "Arn": f"arn:aws:iam::{self._account}:role/operator",
+                }
+            )
+        if service == "s3":
+            return self._s3
+        if service == "sns":
+            return self._sns
+        raise AssertionError(f"unexpected client {service}")
+
+
+def _checks(report) -> dict[str, bool]:
+    return {check.name: check.ok for check in report.checks}
+
+
+def test_probe_bucket_grant_passes_for_usable_grant() -> None:
+    report = bucket_lib.probe_bucket_grant(
+        "bucket-a",
+        session=_GrantSession(),
+        expected_account_id="123456789012",
+    )
+
+    assert report.ok
+    assert report.principal == "arn:aws:iam::123456789012:role/operator"
+    assert report.account_id == "123456789012"
+    assert report.region == "us-east-1"
+    assert all(_checks(report).values())
+
+
+def test_probe_bucket_grant_flags_wrong_control_account() -> None:
+    """A grant issued to the wrong account is detectable at handoff time."""
+    report = bucket_lib.probe_bucket_grant(
+        "bucket-a",
+        session=_GrantSession(account="999988887777"),
+        expected_account_id="123456789012",
+    )
+
+    assert not report.ok
+    assert _checks(report)["control account match"] is False
+    detail = next(
+        check.detail for check in report.checks if check.name == "control account match"
+    )
+    assert "999988887777" in detail
+    assert "123456789012" in detail
+
+
+def test_probe_bucket_grant_reports_unreachable_bucket() -> None:
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+        "GetBucketLocation",
+    )
+    report = bucket_lib.probe_bucket_grant(
+        "bucket-a",
+        session=_GrantSession(s3=_GrantS3(location_error=denied)),
+    )
+
+    assert not report.ok
+    checks = _checks(report)
+    assert checks["bucket reachable (s3:GetBucketLocation)"] is False
+    # Later S3 checks are skipped once the bucket cannot be opened at all.
+    assert "list bucket (s3:ListBucket)" not in checks
+
+
+def test_probe_bucket_grant_flags_missing_subscribe_permission() -> None:
+    report = bucket_lib.probe_bucket_grant(
+        "bucket-a",
+        session=_GrantSession(sns=_GrantSns(_grant_sns_policy("sns:Publish"))),
+        expected_account_id="123456789012",
+    )
+
+    assert not report.ok
+    assert _checks(report)["SNS topic policy grants subscribe"] is False
+
+
+def test_probe_bucket_grant_flags_missing_notification_topic() -> None:
+    report = bucket_lib.probe_bucket_grant(
+        "bucket-a",
+        session=_GrantSession(s3=_GrantS3(topic_arn=None)),
+    )
+
+    assert not report.ok
+    assert _checks(report)["read notifications (s3:GetBucketNotification)"] is False
+
+
+def test_sns_policy_granted_actions_matches_assumed_role_sessions() -> None:
+    policy = _grant_sns_policy(
+        "sns:Subscribe",
+        principal="arn:aws:iam::123456789012:role/operator",
+    )
+    granted = bucket_lib.sns_policy_granted_actions(
+        policy,
+        ("sns:Subscribe",),
+        principal="arn:aws:sts::123456789012:assumed-role/operator/session",
+        account_id="123456789012",
+        topic_arn=TOPIC_ARN,
+    )
+    assert granted == {"sns:Subscribe"}
+
+
+def test_sns_policy_granted_actions_ignores_other_principals() -> None:
+    policy = _grant_sns_policy(
+        "sns:Subscribe", principal="arn:aws:iam::999988887777:root"
+    )
+    granted = bucket_lib.sns_policy_granted_actions(
+        policy,
+        ("sns:Subscribe",),
+        principal="arn:aws:iam::123456789012:role/operator",
+        account_id="123456789012",
+        topic_arn=TOPIC_ARN,
+    )
+    assert granted == set()
+
+
+def test_test_pre_registration_passes_before_registration(monkeypatch, capsys) -> None:
+    """Issue #92: an unregistered bucket is an expected state in this mode."""
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, get_result=None)
+    monkeypatch.setattr(
+        bucket_tool, "_control_context", lambda stack: ("123456789012", None)
+    )
+    monkeypatch.setattr(
+        bucket_tool.boto3, "Session", lambda profile_name=None: _GrantSession()
+    )
+
+    assert bucket_tool.main(["test", "bucket-a", "--pre-registration"]) == 0
+    captured = capsys.readouterr()
+    assert "Pre-registration grant check for s3://bucket-a" in captured.out
+    assert "registered in Quilt: no (expected with --pre-registration)" in captured.out
+    assert "arn:aws:iam::123456789012:role/operator" in captured.out
+    assert "quiltx bucket add bucket-a --no-preflight" in captured.out
+
+
+def test_test_pre_registration_reports_failed_checks(monkeypatch, capsys) -> None:
+    _install_stack_context(monkeypatch)
+    _install_fake_quilt3(monkeypatch, get_result=None)
+    monkeypatch.setattr(
+        bucket_tool, "_control_context", lambda stack: ("123456789012", None)
+    )
+    monkeypatch.setattr(
+        bucket_tool.boto3,
+        "Session",
+        lambda profile_name=None: _GrantSession(account="999988887777"),
+    )
+
+    assert bucket_tool.main(["test", "bucket-a", "--pre-registration"]) == 1
+    captured = capsys.readouterr()
+    assert "FAILED: control account match" in captured.out
+    assert "probing principal: arn:aws:iam::999988887777:role/operator" in captured.err
+    assert "Quilt control account: 123456789012" in captured.err

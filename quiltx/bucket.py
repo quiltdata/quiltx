@@ -1049,6 +1049,523 @@ def add_bucket(
     )
 
 
+# --- Live access verification -------------------------------------------------
+#
+# Registration and search-index state do not prove that the catalog stack can
+# read a bucket right now (issue #87): a stale index entry outlives revoked
+# access, and an empty or freshly registered bucket has nothing to index. The
+# probes below separate the three questions -- is the bucket registered, can the
+# catalog stack read it live, and is notification/index wiring delivering.
+
+# Mirrors BucketUpdateInput in the catalog's GraphQL schema. Every field is read
+# back from BucketConfig and resubmitted unchanged, so re-validation cannot
+# rewrite the bucket's configuration.
+BUCKET_UPDATE_INPUT_FIELDS = (
+    "title",
+    "iconUrl",
+    "description",
+    "linkedData",
+    "overviewUrl",
+    "tags",
+    "relevanceScore",
+    "snsNotificationArn",
+    "scannerParallelShardsDepth",
+    "skipMetaDataIndexing",
+    "fileExtensionsToIndex",
+    "indexContentBytes",
+    "browsable",
+    "prefixes",
+)
+
+BUCKET_CONFIG_QUERY = """
+query quiltxBucketConfig($name: String!) {
+  bucketConfig(name: $name) {
+    name
+    lastIndexed
+    %s
+  }
+}
+""" % ("\n    ".join(BUCKET_UPDATE_INPUT_FIELDS))
+
+BUCKET_REVALIDATE_MUTATION = """
+mutation quiltxBucketRevalidate($name: String!, $input: BucketUpdateInput!) {
+  bucketUpdate(name: $name, input: $input) {
+    __typename
+    ... on BucketUpdateSuccess {
+      bucketConfig {
+        name
+      }
+    }
+    ... on InsufficientPermissions {
+      message
+    }
+  }
+}
+"""
+
+# Which capability the registry's answer implicates, for error output.
+ACCESS_PROBE_CAPABILITIES = {
+    "BucketUpdateSuccess": "bucket metadata, listing, and object read",
+    "InsufficientPermissions": "S3 read access (ListBucket / GetObject)",
+    "NotificationConfigurationError": "bucket notification configuration",
+    "NotificationTopicNotFound": "SNS notification topic",
+    "SnsInvalid": "SNS notification topic",
+    "BucketNotFound": "catalog registration",
+}
+
+LIVE_ACCESS_CAPABILITY = "live S3 access"
+
+
+@dataclass(frozen=True)
+class BucketAccessProbe:
+    """Result of asking the catalog stack to re-verify live bucket access.
+
+    The catalog re-validates the bucket with the stack's own service identity,
+    so the answer describes current S3 access rather than local credentials or
+    search-index state.
+    """
+
+    bucket: str
+    status: str  # "ok" | "failed" | "unavailable"
+    capability: str
+    detail: str
+    principal: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+    @property
+    def failed(self) -> bool:
+        return self.status == "failed"
+
+    @property
+    def unavailable(self) -> bool:
+        return self.status == "unavailable"
+
+
+def _admin_graphql(query: str, variables: Mapping[str, Any]) -> Mapping[str, Any]:
+    from quiltx import quilt3_facade
+
+    return quilt3_facade.admin_graphql(query, variables)
+
+
+def read_bucket_config(bucket: str, *, graphql: Any = None) -> dict[str, Any] | None:
+    """Return the catalog's full configuration for *bucket*, or None if absent."""
+    run = graphql or _admin_graphql
+    data = run(BUCKET_CONFIG_QUERY, {"name": bucket})
+    config = (data or {}).get("bucketConfig")
+    return dict(config) if config else None
+
+
+def probe_bucket_access(
+    stack: stack_lib.Catalog,
+    bucket: str,
+    *,
+    principal: str | None = None,
+    graphql: Any = None,
+) -> BucketAccessProbe:
+    """Ask the catalog stack to re-verify live access to *bucket*.
+
+    Reads the bucket's complete catalog configuration and resubmits it
+    unchanged. The registry validates S3 and SNS access with the stack's own
+    identity while handling that mutation, which makes its answer a live
+    access probe: an empty bucket passes, and revoked access fails even when
+    stale search-index entries remain.
+
+    A catalog that cannot answer either operation yields ``status
+    "unavailable"`` so callers can fall back instead of reporting a failure.
+    """
+    stack.ensure_auth()
+    run = graphql or _admin_graphql
+
+    try:
+        config = read_bucket_config(bucket, graphql=run)
+    except Exception as exc:
+        if stack_lib.is_auth_error(exc):
+            raise
+        return BucketAccessProbe(
+            bucket=bucket,
+            status="unavailable",
+            capability=LIVE_ACCESS_CAPABILITY,
+            detail=f"catalog did not answer the bucketConfig query: {exc}",
+            principal=principal,
+        )
+
+    if config is None:
+        return BucketAccessProbe(
+            bucket=bucket,
+            status="failed",
+            capability="catalog registration",
+            detail=f"{bucket} is not registered in Quilt",
+            principal=principal,
+        )
+
+    payload = {field: config.get(field) for field in BUCKET_UPDATE_INPUT_FIELDS}
+    try:
+        data = run(BUCKET_REVALIDATE_MUTATION, {"name": bucket, "input": payload})
+    except Exception as exc:
+        if stack_lib.is_auth_error(exc):
+            raise
+        return BucketAccessProbe(
+            bucket=bucket,
+            status="unavailable",
+            capability=LIVE_ACCESS_CAPABILITY,
+            detail=f"catalog did not re-validate the bucket: {exc}",
+            principal=principal,
+        )
+
+    result = (data or {}).get("bucketUpdate") or {}
+    typename = str(result.get("__typename") or "")
+    capability = ACCESS_PROBE_CAPABILITIES.get(typename, LIVE_ACCESS_CAPABILITY)
+    if typename == "BucketUpdateSuccess":
+        return BucketAccessProbe(
+            bucket=bucket,
+            status="ok",
+            capability=capability,
+            detail="catalog stack re-validated the bucket with its own identity",
+            principal=principal,
+        )
+
+    message = str(result.get("message") or "").strip()
+    if message:
+        detail = f"{typename}: {message}"
+    elif typename:
+        detail = typename
+    else:
+        detail = f"unexpected bucketUpdate response {result!r}"
+    return BucketAccessProbe(
+        bucket=bucket,
+        status="failed",
+        capability=capability,
+        detail=detail,
+        principal=principal,
+    )
+
+
+# --- Pre-registration grant checks -------------------------------------------
+#
+# A cross-account grant handed back by ``bucket prepare`` is fully checkable
+# before the catalog row exists (issue #92). These checks run from the control
+# account so a wrong-account grant surfaces at handoff time instead of as an
+# opaque AccessDenied inside ``catalog acl``.
+
+GRANT_SNS_ACTIONS = ("sns:GetTopicAttributes", "sns:Subscribe")
+
+
+@dataclass(frozen=True)
+class GrantCheck:
+    """One capability checked against a bucket from the control account."""
+
+    name: str
+    ok: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class BucketGrantReport:
+    """Control-account view of a bucket grant, with the principal that probed it."""
+
+    bucket: str
+    principal: str | None
+    account_id: str | None
+    region: str | None
+    checks: tuple[GrantCheck, ...]
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.checks) and all(check.ok for check in self.checks)
+
+
+def _aws_error_detail(exc: BaseException) -> str:
+    response = getattr(exc, "response", None)
+    if isinstance(response, Mapping):
+        error = response.get("Error")
+        if isinstance(error, Mapping):
+            code = str(error.get("Code") or "").strip()
+            message = str(error.get("Message") or "").strip()
+            if code and message:
+                return f"{code}: {message}"
+            if code:
+                return code
+    return str(exc)
+
+
+def _normalized_principal(principal: str | None) -> str | None:
+    """Map an assumed-role session ARN back to the role ARN policies name."""
+    if not principal:
+        return None
+    parts = principal.split(":")
+    if len(parts) == 6 and parts[2] == "sts" and parts[5].startswith("assumed-role/"):
+        role_name = parts[5].split("/")[1]
+        return f"arn:aws:iam::{parts[4]}:role/{role_name}"
+    return principal
+
+
+def _statement_principals(statement: Mapping[str, Any]) -> list[str]:
+    principal = statement.get("Principal")
+    if principal is None:
+        return []
+    if isinstance(principal, Mapping):
+        aws = principal.get("AWS")
+    else:
+        aws = principal
+    if aws is None:
+        return []
+    if isinstance(aws, str):
+        return [aws]
+    return [str(item) for item in aws]
+
+
+def _statement_matches_principal(
+    statement: Mapping[str, Any], principal: str | None, account_id: str | None
+) -> bool:
+    candidates = {value for value in (_normalized_principal(principal),) if value}
+    if account_id:
+        candidates.add(account_id)
+        candidates.add(f"arn:aws:iam::{account_id}:root")
+    for value in _statement_principals(statement):
+        if value == "*" or value in candidates:
+            return True
+    return False
+
+
+def _statement_actions(statement: Mapping[str, Any]) -> set[str]:
+    actions = statement.get("Action")
+    if actions is None:
+        return set()
+    if isinstance(actions, str):
+        actions = [actions]
+    return {str(action).lower() for action in actions}
+
+
+def sns_policy_granted_actions(
+    policy: Mapping[str, Any] | None,
+    actions: Sequence[str],
+    *,
+    principal: str | None,
+    account_id: str | None,
+    topic_arn: str,
+) -> set[str]:
+    """Return which *actions* an SNS topic policy allows for this principal."""
+    if not policy:
+        return set()
+    statements = policy.get("Statement") or []
+    if isinstance(statements, Mapping):
+        statements = [statements]
+
+    granted: set[str] = set()
+    for statement in statements:
+        if not isinstance(statement, Mapping):
+            continue
+        if str(statement.get("Effect", "Allow")) != "Allow":
+            continue
+        resources = statement.get("Resource")
+        if isinstance(resources, str):
+            resources = [resources]
+        if resources and topic_arn not in resources and "*" not in resources:
+            continue
+        if not _statement_matches_principal(statement, principal, account_id):
+            continue
+        allowed = _statement_actions(statement)
+        for action in actions:
+            lowered = action.lower()
+            service = lowered.split(":", 1)[0]
+            if allowed & {"*", f"{service}:*", lowered}:
+                granted.add(action)
+    return granted
+
+
+def _first_notification_topic(notification_config: Mapping[str, Any]) -> str | None:
+    for config in notification_config.get("TopicConfigurations", []):
+        topic_arn = config.get("TopicArn")
+        if topic_arn and _has_object_notification_event(config.get("Events") or []):
+            return str(topic_arn)
+    return None
+
+
+def _arn_region(arn: str) -> str | None:
+    parts = arn.split(":")
+    return parts[3] if len(parts) > 5 and parts[3] else None
+
+
+def probe_bucket_grant(
+    bucket: str,
+    *,
+    session: Any,
+    expected_account_id: str | None = None,
+) -> BucketGrantReport:
+    """Check a bucket grant from the control account, before registration.
+
+    Reports the principal that ran the checks so a grant issued to the wrong
+    account is identified at the handoff instead of surfacing later as an
+    opaque ``AccessDenied``.
+    """
+    from botocore.exceptions import BotoCoreError
+
+    checks: list[GrantCheck] = []
+    principal: str | None = None
+    account_id: str | None = None
+    region: str | None = None
+
+    try:
+        identity = session.client("sts").get_caller_identity()
+        principal = str(identity.get("Arn") or "") or None
+        account_id = str(identity.get("Account") or "") or None
+        checks.append(
+            GrantCheck(
+                "probing principal (sts:GetCallerIdentity)",
+                True,
+                principal or f"account {account_id}",
+            )
+        )
+    except (ClientError, BotoCoreError) as exc:
+        checks.append(
+            GrantCheck(
+                "probing principal (sts:GetCallerIdentity)",
+                False,
+                _aws_error_detail(exc),
+            )
+        )
+
+    if expected_account_id:
+        matched = account_id == expected_account_id
+        checks.append(
+            GrantCheck(
+                "control account match",
+                matched,
+                (
+                    f"probing in the Quilt control account {expected_account_id}"
+                    if matched
+                    else (
+                        f"probe ran in account {account_id or 'unknown'}, but the "
+                        f"catalog's control account is {expected_account_id}"
+                    )
+                ),
+            )
+        )
+
+    s3_client: Any = None
+    try:
+        s3_client, region = open_bucket_client(bucket, session)
+        checks.append(
+            GrantCheck(
+                "bucket reachable (s3:GetBucketLocation)", True, f"region {region}"
+            )
+        )
+    except (ClientError, BotoCoreError) as exc:
+        checks.append(
+            GrantCheck(
+                "bucket reachable (s3:GetBucketLocation)",
+                False,
+                _aws_error_detail(exc),
+            )
+        )
+
+    topic_arn: str | None = None
+    if s3_client is not None:
+        try:
+            listing = s3_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+            empty = not int(listing.get("KeyCount") or 0)
+            checks.append(
+                GrantCheck(
+                    "list bucket (s3:ListBucket)",
+                    True,
+                    (
+                        "bucket is empty; access is still valid"
+                        if empty
+                        else "listing returned an object"
+                    ),
+                )
+            )
+        except (ClientError, BotoCoreError) as exc:
+            checks.append(
+                GrantCheck("list bucket (s3:ListBucket)", False, _aws_error_detail(exc))
+            )
+
+        try:
+            notifications = get_bucket_notification_configuration(
+                bucket, s3_client=s3_client
+            )
+            topic_arn = _existing_notification_topic(
+                notifications
+            ) or _first_notification_topic(notifications)
+            checks.append(
+                GrantCheck(
+                    "read notifications (s3:GetBucketNotification)",
+                    bool(topic_arn),
+                    (
+                        f"object notifications publish to {topic_arn}"
+                        if topic_arn
+                        else (
+                            "no SNS topic receives object-create/remove events; run "
+                            "`quiltx bucket prepare` in the data account first"
+                        )
+                    ),
+                )
+            )
+        except (ClientError, BotoCoreError) as exc:
+            checks.append(
+                GrantCheck(
+                    "read notifications (s3:GetBucketNotification)",
+                    False,
+                    _aws_error_detail(exc),
+                )
+            )
+
+    if topic_arn:
+        try:
+            sns_client = session.client(
+                "sns", region_name=_arn_region(topic_arn) or region
+            )
+            attributes = sns_client.get_topic_attributes(TopicArn=topic_arn).get(
+                "Attributes", {}
+            )
+            checks.append(
+                GrantCheck(
+                    "read SNS topic (sns:GetTopicAttributes)", True, str(topic_arn)
+                )
+            )
+            granted = sns_policy_granted_actions(
+                _parse_json_document(attributes.get("Policy")),
+                GRANT_SNS_ACTIONS,
+                principal=principal,
+                account_id=account_id,
+                topic_arn=topic_arn,
+            )
+            missing = [action for action in GRANT_SNS_ACTIONS if action not in granted]
+            checks.append(
+                GrantCheck(
+                    "SNS topic policy grants subscribe",
+                    not missing,
+                    (
+                        "topic policy allows " + ", ".join(GRANT_SNS_ACTIONS)
+                        if not missing
+                        else (
+                            f"topic policy does not allow {', '.join(missing)} for "
+                            f"{principal or account_id or 'this principal'}"
+                        )
+                    ),
+                )
+            )
+        except (ClientError, BotoCoreError) as exc:
+            checks.append(
+                GrantCheck(
+                    "read SNS topic (sns:GetTopicAttributes)",
+                    False,
+                    _aws_error_detail(exc),
+                )
+            )
+
+    return BucketGrantReport(
+        bucket=bucket,
+        principal=principal,
+        account_id=account_id,
+        region=region,
+        checks=tuple(checks),
+    )
+
+
 def _bucket_add_typename(result: Any) -> str:
     if isinstance(result, Mapping):
         value = result.get("__typename") or result.get("typename__")

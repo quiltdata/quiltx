@@ -108,8 +108,42 @@ uvx quiltx catalog acl acl.yml --catalog example.quiltdata.com --no-preflight --
 ```
 
 `--no-preflight` submits the GraphQL registration directly, lets the stack probe
-with its IAM, skips local S3/SNS setup, and implies `--no-test`. Set
-`QUILTX_NO_PREFLIGHT=1` to use the same mode for scripted runs.
+with its IAM, and skips local S3/SNS setup. It still verifies afterwards — the
+cross-account path is the one most likely to be misconfigured — so pass
+`--no-test` to opt out. Set `QUILTX_NO_PREFLIGHT=1` to use the same mode for
+scripted runs.
+
+### Verifying access
+
+`quiltx bucket test BUCKET` reports three independent checks:
+
+1. **Registration** — the bucket has a catalog row.
+2. **Live access** — the catalog re-validates the bucket server-side with the
+   stack's own service identity, so an empty bucket passes and revoked access
+   fails even when stale search-index entries remain. Failures name the failed
+   capability, the Quilt control account, and the stack principal. The probe
+   resubmits the bucket's existing catalog configuration unchanged to trigger
+   that re-validation; set `QUILTX_NO_LIVE_PROBE=1` to skip it where no bucket
+   mutation is acceptable.
+3. **Index wiring** — the search index has entries, which proves SNS to SQS
+   delivery is live. Once live access is verified, an empty index is a warning
+   rather than a failure, since indexing lags registration and empty buckets
+   never index. Pass `--require-index` to make it fatal.
+
+Before a bucket is registered, check a cross-account grant straight from the
+handoff with control-account credentials:
+
+```bash
+uvx quiltx bucket test my-bucket --catalog example.quiltdata.com \
+  --pre-registration --profile control-account
+```
+
+That mode treats "not registered" as expected and checks what is checkable:
+the bucket is reachable, `GetBucketNotification` is readable, and the SNS topic
+policy grants `Subscribe`/`GetTopicAttributes`. It reports the principal that
+ran the checks and fails loudly when that principal is not in the catalog's
+control account — which is how a grant issued to the wrong account surfaces at
+handoff time instead of as an opaque `AccessDenied` later.
 
 ### Persistent install (optional)
 

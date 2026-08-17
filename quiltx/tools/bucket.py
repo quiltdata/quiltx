@@ -61,7 +61,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument(
         "--no-test",
         action="store_true",
-        help="Skip the post-add registration/read verification.",
+        help=(
+            "Skip the post-add verification (registration, live access, "
+            "index wiring). Applies to --no-preflight too."
+        ),
+    )
+    add_parser.add_argument(
+        "--require-index",
+        action="store_true",
+        help=(
+            "Fail when the search index has no entries yet. By default an "
+            "empty index is a warning once live access is verified, since "
+            "indexing lags registration and empty buckets never index."
+        ),
     )
     add_parser.add_argument(
         "--no-preflight",
@@ -69,7 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Skip local AWS preflight/setup and submit bucketAdd directly, "
             "letting the catalog stack probe the bucket. Never prompts for "
-            "confirmation (--yes is not required)."
+            "confirmation (--yes is not required). Post-add verification "
+            "still runs; use --no-test to skip it."
         ),
     )
     add_parser.add_argument(
@@ -185,10 +198,38 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser = subparsers.add_parser(
         "test",
         prog="quiltx bucket test",
-        help="Verify the control account can read the bucket (tests cross-account policy).",
+        help=(
+            "Verify registration, live catalog-stack access, and index wiring "
+            "for a bucket (or a grant, with --pre-registration)."
+        ),
     )
     add_catalog_args(test_parser, auth_required=True)
     test_parser.add_argument("bucket_name", help="S3 bucket name to test.")
+    test_parser.add_argument(
+        "--require-index",
+        action="store_true",
+        help=(
+            "Fail when the search index has no entries yet, instead of warning "
+            "once live access is verified."
+        ),
+    )
+    test_parser.add_argument(
+        "--pre-registration",
+        action="store_true",
+        help=(
+            "Check a cross-account grant before the bucket is registered: "
+            "bucket reachable, notifications readable, SNS topic subscribable. "
+            "Runs from the control account and reports the principal used; "
+            "'not registered' is an expected state in this mode."
+        ),
+    )
+    test_parser.add_argument(
+        "--profile",
+        help=(
+            "AWS profile for the Quilt control account, used only by "
+            "--pre-registration."
+        ),
+    )
 
     reindex_parser = subparsers.add_parser(
         "reindex",
@@ -743,6 +784,8 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             stack,
             args.bucket_name,
             control_account_id=control_account_id,
+            principal=_stack_output_value(stack_payload, "RegistryRoleARN"),
+            require_index=bool(getattr(args, "require_index", False)),
         )
     except Exception as exc:
         if stack_lib.is_auth_error(exc):
@@ -767,37 +810,51 @@ def _cmd_add_no_preflight(stack: stack_lib.Catalog, args: argparse.Namespace) ->
             "removing and re-adding (--force) via GraphQL only."
         )
         stack.admin.buckets.remove(args.bucket_name)
-    elif existing_bucket is not None:
-        print(
-            f"Bucket {args.bucket_name}: already registered in Quilt; "
-            "local preflight/setup skipped."
-        )
-        return 0
+        existing_bucket = None
 
-    try:
-        result = bucket_lib.add_bucket_without_preflight(
-            stack,
-            args.bucket_name,
-            title=bucket_title,
-        )
-    except bucket_lib.BucketAddError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    if result.already_registered:
+    if existing_bucket is not None:
         print(
             f"Bucket {args.bucket_name}: already registered in Quilt; "
             "local preflight/setup skipped."
         )
     else:
+        try:
+            result = bucket_lib.add_bucket_without_preflight(
+                stack,
+                args.bucket_name,
+                title=bucket_title,
+            )
+        except bucket_lib.BucketAddError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+        if result.already_registered:
+            print(
+                f"Bucket {args.bucket_name}: already registered in Quilt; "
+                "local preflight/setup skipped."
+            )
+        else:
+            print(
+                f"Registered bucket {result.bucket} as {result.title} "
+                "via GraphQL only; local AWS preflight/setup skipped."
+            )
+
+    if args.no_test:
         print(
-            f"Registered bucket {result.bucket} as {result.title} "
-            "via GraphQL only; local AWS preflight/setup skipped."
+            f"Run `quiltx bucket test {args.bucket_name}` to verify registration and access."
         )
-    print(
-        f"Run `quiltx bucket test {args.bucket_name}` to verify registration and access."
+        return 0
+
+    # --no-preflight is the cross-account flow, spanning two accounts and often
+    # two organizations: the configuration most likely to be wrong. Verification
+    # is catalog-side work and needs no data-account credentials, so it runs
+    # here too (issue #92).
+    print()
+    return _verify_bucket_registration_and_access(
+        stack,
+        args.bucket_name,
+        require_index=bool(getattr(args, "require_index", False)),
     )
-    return 0
 
 
 @stack_lib.catalog_command
@@ -884,17 +941,97 @@ def _cmd_profile(args: argparse.Namespace) -> int:
 
 @stack_lib.catalog_command
 def _cmd_test(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
-    return _verify_bucket_registration_and_access(stack, args.bucket_name)
+    if getattr(args, "pre_registration", False):
+        control_account_id, _principal = _control_context(stack)
+        return _cmd_test_pre_registration(stack, args, control_account_id)
+    # control_account_id / principal are resolved lazily, only when a failure
+    # needs them, so the standalone path reports them instead of "unknown"
+    # (issue #92) without paying for stack discovery on the happy path.
+    return _verify_bucket_registration_and_access(
+        stack,
+        args.bucket_name,
+        require_index=bool(getattr(args, "require_index", False)),
+    )
+
+
+def _cmd_test_pre_registration(
+    stack: stack_lib.Catalog,
+    args: argparse.Namespace,
+    control_account_id: str | None,
+) -> int:
+    """Check a cross-account grant before any catalog registration exists."""
+    bucket_name = args.bucket_name
+    print(f"Pre-registration grant check for s3://{bucket_name}:")
+    if stack.admin.buckets.get(bucket_name) is not None:
+        print(
+            "  registered in Quilt: yes; --pre-registration only checks the "
+            "control-account grant"
+        )
+    else:
+        print("  registered in Quilt: no (expected with --pre-registration)")
+
+    session = boto3.Session(profile_name=args.profile)
+    report = bucket_lib.probe_bucket_grant(
+        bucket_name,
+        session=session,
+        expected_account_id=control_account_id,
+    )
+    for check in report.checks:
+        status = "OK" if check.ok else "FAILED"
+        print(f"  {status}: {check.name}: {check.detail}")
+
+    if report.ok:
+        print(
+            f"OK: the grant on s3://{bucket_name} is usable from "
+            f"{report.principal or 'this principal'}."
+        )
+        print(
+            f"Next step: quiltx bucket add {bucket_name} --no-preflight "
+            "--catalog <catalog>"
+        )
+        return 0
+
+    print(
+        f"FAILED: the grant on s3://{bucket_name} is not usable yet.",
+        file=sys.stderr,
+    )
+    print(
+        f"  - probing principal: {report.principal or 'unknown'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  - Quilt control account: {control_account_id or 'unknown'}",
+        file=sys.stderr,
+    )
+    print(
+        "  - note: checks reflect the probing principal; a grant narrowed to "
+        "specific stack roles may still differ from what the stack sees",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _verify_bucket_registration_and_access(
-    stack: stack_lib.Catalog, bucket_name: str, *, control_account_id: str | None = None
+    stack: stack_lib.Catalog,
+    bucket_name: str,
+    *,
+    control_account_id: str | None = None,
+    principal: str | None = None,
+    require_index: bool = False,
 ) -> int:
-    from quiltx.quilt3_facade import make_bucket
+    """Report registration, live catalog-stack access, and index wiring.
 
-    bucket_uri = f"s3://{bucket_name}"
-    registered = None
-    stage = "registration lookup"
+    The three checks answer different questions and are reported separately
+    (issue #87): registration is a catalog lookup, live access is re-validated
+    server-side with the stack's own identity, and index wiring depends on
+    SNS -> SQS delivery plus an initial scan that legitimately lags.
+
+    ``control_account_id`` and ``principal`` name the Quilt side of a
+    cross-account grant. When omitted they are derived from stack metadata at
+    the moment a failure is reported, so the diagnostic lines are populated
+    even in the standalone ``bucket test`` path (issue #92).
+    """
+    context = _ControlContext(stack, control_account_id, principal)
     try:
         registered = next(
             (
@@ -904,64 +1041,223 @@ def _verify_bucket_registration_and_access(
             ),
             None,
         )
-        if registered is None:
-            raise ValueError(f"{bucket_name} is not registered in Quilt")
-
-        # Direct S3 access check (b.ls()) intentionally skipped: it ran with
-        # the user's locally-cached Quilt STS credentials, which may be stale
-        # or scoped by a role that doesn't grant access to this bucket. That
-        # produced false-negative AccessDenied errors after legitimate
-        # bucket-add operations. See issue tracker for "stale credentials
-        # prevent direct verification".
-
-        stage = "search index probe"
-        # Confirm the catalog's search index actually has entries for this
-        # bucket — proves the SNS -> SQS subscription wiring is live.
-        # Retry briefly since the initial scan can lag a freshly added bucket.
-        import time as _time
-
-        b: Any = make_bucket(bucket_uri)
-        results: list[Any] = []
-        for attempt in range(6):
-            results = b.search("*", limit=1)
-            if results:
-                break
-            if attempt < 5:
-                _time.sleep(10)
-        if not results:
-            raise RuntimeError(
-                "search index returned 0 results after ~60s; SNS "
-                "subscription or initial scan has not indexed this bucket yet"
-            )
-
-        print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
-        print(f"OK: search index is populated ({len(results)}+ result[s])")
-        return 0
     except Exception as exc:
         if stack_lib.is_auth_error(exc):
             raise
-        control_line = (
-            f"  - Quilt control account: {control_account_id}"
-            if control_account_id
-            else "  - Quilt control account: unknown"
+        return _print_verification_failure(
+            bucket_name,
+            stage="registration lookup",
+            registered=False,
+            context=context,
+            capability="catalog registration",
+            error=str(exc),
+            cause="registration lookup failed",
         )
-        registered_tag = "yes" if registered is not None else "no"
-        if stage == "search index probe":
-            cause = (
-                "  - likely cause: bucket's SNS topic is not subscribed to "
-                "this stack's SQS queues, or initial scan has not completed"
-            )
-        else:
-            cause = "  - likely cause: registration lookup failed"
-        lines = [
-            f"FAILED: bucket {bucket_name} verification failed at {stage}.",
-            f"  - registered in Quilt: {registered_tag}",
-            control_line,
-            f"  - error: {exc}",
-            cause,
-        ]
-        print("\n".join(lines), file=sys.stderr)
-        return 1
+
+    if registered is None:
+        return _print_verification_failure(
+            bucket_name,
+            stage="registration lookup",
+            registered=False,
+            context=context,
+            capability="catalog registration",
+            error=f"{bucket_name} is not registered in Quilt",
+            cause="the bucket has no catalog row",
+            hint=(
+                f"to check the grant before registering, run: "
+                f"quiltx bucket test {bucket_name} --pre-registration"
+            ),
+        )
+    print(f"OK: {bucket_name} is registered in Quilt as {registered.title}")
+
+    # Live access: the catalog re-validates the bucket with the stack's own
+    # identity, so an empty bucket passes and revoked access fails even when a
+    # stale search-index entry survives. Re-validation resubmits the bucket's
+    # existing configuration unchanged; QUILTX_NO_LIVE_PROBE=1 opts out for
+    # catalogs where no bucket mutation is acceptable.
+    probe = _live_access_probe(stack, bucket_name)
+    if probe.failed:
+        return _print_verification_failure(
+            bucket_name,
+            stage="live access probe",
+            registered=True,
+            context=context,
+            capability=probe.capability,
+            error=probe.detail,
+            cause=(
+                "the catalog stack's identity cannot read this bucket; check "
+                "the bucket policy grant for the principal above"
+            ),
+        )
+    if probe.unavailable:
+        print(f"SKIPPED: live access probe unavailable ({probe.detail})")
+    else:
+        print(f"OK: catalog stack has live access ({probe.capability})")
+
+    indexed, index_error = _probe_search_index(bucket_name)
+    if indexed is not None:
+        print(f"OK: search index is populated ({indexed}+ result[s])")
+        return 0
+
+    index_failure_is_fatal = require_index or not probe.ok
+    if index_failure_is_fatal:
+        return _print_verification_failure(
+            bucket_name,
+            stage="search index probe",
+            registered=True,
+            context=context,
+            capability="notification/index wiring",
+            error=index_error or "search index returned 0 results",
+            cause=(
+                "bucket's SNS topic is not subscribed to this stack's SQS "
+                "queues, or the initial scan has not completed"
+            ),
+        )
+
+    print(
+        f"WARNING: search index has no entries for {bucket_name} yet "
+        f"({index_error}).",
+        file=sys.stderr,
+    )
+    print(
+        "  - live access is verified, so this is indexing lag, an empty "
+        "bucket, or disabled indexing",
+        file=sys.stderr,
+    )
+    print(
+        f"  - to treat this as a failure, re-run: quiltx bucket test "
+        f"{bucket_name} --require-index",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _live_access_probe(
+    stack: stack_lib.Catalog, bucket_name: str
+) -> bucket_lib.BucketAccessProbe:
+    if _env_flag("QUILTX_NO_LIVE_PROBE"):
+        return bucket_lib.BucketAccessProbe(
+            bucket=bucket_name,
+            status="unavailable",
+            capability=bucket_lib.LIVE_ACCESS_CAPABILITY,
+            detail="disabled by QUILTX_NO_LIVE_PROBE",
+        )
+    return bucket_lib.probe_bucket_access(stack, bucket_name)
+
+
+def _probe_search_index(
+    bucket_name: str, *, attempts: int = 6, delay: float = 10.0
+) -> tuple[int | None, str | None]:
+    """Return (result count, None) once the index answers, else (None, reason).
+
+    Confirms the catalog's search index has entries for this bucket, which
+    proves the SNS -> SQS subscription wiring is live. Retries because the
+    initial scan lags a freshly added bucket.
+    """
+    import time as _time
+
+    from quiltx.quilt3_facade import make_bucket
+
+    try:
+        b: Any = make_bucket(f"s3://{bucket_name}")
+        for attempt in range(attempts):
+            results = b.search("*", limit=1)
+            if results:
+                return len(results), None
+            if attempt < attempts - 1:
+                _time.sleep(delay)
+    except Exception as exc:
+        if stack_lib.is_auth_error(exc):
+            raise
+        return None, f"search failed: {exc}"
+    return None, f"search index returned 0 results after ~{int(attempts * delay)}s"
+
+
+def _print_verification_failure(
+    bucket_name: str,
+    *,
+    stage: str,
+    registered: bool,
+    context: "_ControlContext",
+    capability: str,
+    error: str,
+    cause: str,
+    hint: str | None = None,
+) -> int:
+    control_account_id, principal = context.resolve()
+    lines = [
+        f"FAILED: bucket {bucket_name} verification failed at {stage}.",
+        f"  - registered in Quilt: {'yes' if registered else 'no'}",
+        f"  - Quilt control account: {control_account_id or 'unknown'}",
+        f"  - Quilt stack principal: {principal or 'unknown'}",
+        f"  - failed capability: {capability}",
+        f"  - error: {error}",
+        f"  - likely cause: {cause}",
+    ]
+    if hint:
+        lines.append(f"  - {hint}")
+    print("\n".join(lines), file=sys.stderr)
+    return 1
+
+
+class _ControlContext:
+    """The Quilt-side identity of a grant, resolved only when it is needed.
+
+    Stack discovery is not free, and the control account and stack principal
+    only matter when something failed — but then they are the answer, so they
+    must never be blank (issue #92).
+    """
+
+    def __init__(
+        self,
+        stack: stack_lib.Catalog,
+        control_account_id: str | None = None,
+        principal: str | None = None,
+    ) -> None:
+        self._stack = stack
+        self._control_account_id = control_account_id
+        self._principal = principal
+        self._resolved = control_account_id is not None or principal is not None
+
+    def resolve(self) -> tuple[str | None, str | None]:
+        if not self._resolved:
+            self._control_account_id, self._principal = _control_context(self._stack)
+            self._resolved = True
+        return self._control_account_id, self._principal
+
+
+def _control_context(stack: stack_lib.Catalog) -> tuple[str | None, str | None]:
+    """Return (control account id, stack principal ARN), best effort.
+
+    Both are diagnostic: when a grant was issued to the wrong account, these
+    two lines are the answer, so they must not be blank in the standalone
+    ``bucket test`` path (issue #92).
+    """
+    try:
+        payload = _ensure_stack_payload(stack)
+    except Exception as exc:
+        if stack_lib.is_auth_error(exc):
+            raise
+        print(f"Note: Quilt control account unknown: {exc}", file=sys.stderr)
+        return None, None
+
+    try:
+        control_account_id: str | None = _load_control_account_id(payload)
+    except ValueError as exc:
+        print(f"Note: {exc}", file=sys.stderr)
+        control_account_id = None
+    return control_account_id, _stack_output_value(payload, "RegistryRoleARN")
+
+
+def _stack_output_value(
+    stack_payload: Mapping[str, Any] | None, key: str
+) -> str | None:
+    for output in (stack_payload or {}).get("outputs") or []:
+        if not isinstance(output, Mapping):
+            continue
+        if str(output.get("OutputKey", "")) == key and output.get("OutputValue"):
+            return str(output["OutputValue"])
+    return None
 
 
 def _load_control_account_id(stack_payload: Mapping[str, Any] | None) -> str:
@@ -1132,9 +1428,13 @@ def _print_no_preflight_dry_run(
         "GetBucketPolicy / PutBucketPolicy",
         "SNS topic creation and policy configuration",
         "bucket-notification configuration",
-        "post-add verification (--no-preflight implies --no-test)",
     ):
         print(f"  - {item}")
+    print()
+    print(
+        "Post-add verification (registration, live catalog-stack access, index "
+        "wiring) still runs; pass --no-test to skip it."
+    )
 
 
 def _print_context_table(

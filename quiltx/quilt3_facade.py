@@ -163,6 +163,26 @@ def admin_modules() -> AdminClients:
     )
 
 
+def admin_graphql_client() -> Any:
+    """Return quilt3's authenticated admin GraphQL client for the active catalog."""
+    from quilt3.admin import util
+
+    return util.get_client()
+
+
+def admin_graphql(query: str, variables: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Execute a raw admin GraphQL document and return its ``data`` payload.
+
+    Used for operations quilt3 does not generate a typed method for — notably
+    reading and re-submitting a bucket's complete configuration, which is how
+    the catalog stack is asked to re-verify live bucket access with its own
+    identity.
+    """
+    client = admin_graphql_client()
+    response = client.execute(query=query, variables=dict(variables))
+    return client.get_data(response)
+
+
 def make_bucket(bucket_uri: str) -> object:
     """Return a quilt3.Bucket instance for the given s3:// URI."""
     import quilt3
