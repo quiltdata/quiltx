@@ -3514,7 +3514,8 @@ def test_export_downgrade_warnings_flag_unrepresentable_role_policies() -> None:
     assert len(warnings) == 1
     assert "user 'bob'" in warnings[0]
     assert "READ_WRITE:bucket-a" in warnings[0]
-    assert "DOWNGRADE RISK: applying this file would downgrade user 'bob'" in exported
+    assert "DOWNGRADE RISK: user 'bob'" in exported
+    assert "would downgrade user" not in exported
 
 
 def test_export_downgrade_warnings_empty_for_faithful_capture() -> None:
@@ -3627,14 +3628,54 @@ def test_acl_tool_yaml_warns_about_downgrades_on_stderr(monkeypatch, capsys) -> 
     _add_user(current, "bob", "Observers")
     _install_acl_tool_stack(monkeypatch)
     monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    analysis_calls = 0
+    original_analysis = acl.export_downgrade_warnings
+
+    def count_analysis(state, yaml_text):
+        nonlocal analysis_calls
+        analysis_calls += 1
+        return original_analysis(state, yaml_text)
+
+    monkeypatch.setattr(acl, "export_downgrade_warnings", count_analysis)
 
     result = acl_tool.main(["--yaml"])
     captured = capsys.readouterr()
 
     assert result == 0
-    assert "!! WARNING: this export does not preserve the effective access of 1" in (
-        captured.err
-    )
+    assert analysis_calls == 1
+    assert "!! WARNING: ACL export found 1 downgrade-risk item(s):" in captured.err
     assert "user 'bob'" in captured.err
-    assert "would downgrade them" in captured.err
+    assert "may downgrade existing users" in captured.err
     assert yaml.safe_load(captured.out)["roles"]["Observers"] == {}
+
+
+def test_acl_yaml_with_warnings_reuses_neutral_general_risk(
+    monkeypatch, capsys
+) -> None:
+    """Non-user export failures read correctly in YAML and stderr output."""
+    general_risk = (
+        "the generated ACL is not valid input for `quiltx catalog acl`; "
+        "replaying it may change effective access"
+    )
+    analysis_calls = 0
+
+    def fake_analysis(_current, _yaml_text):
+        nonlocal analysis_calls
+        analysis_calls += 1
+        return [general_risk]
+
+    monkeypatch.setattr(acl, "export_downgrade_warnings", fake_analysis)
+
+    exported, warnings = acl.current_state_as_acl_yaml_with_warnings(
+        _empty_current_state(), catalog="catalog", captured_on="2026-08-17"
+    )
+    acl_tool._print_export_downgrade_warnings(warnings)
+
+    assert analysis_calls == 1
+    assert warnings == [general_risk]
+    assert f"# - DOWNGRADE RISK: {general_risk}" in exported
+    assert "would downgrade the generated ACL" not in exported
+    stderr = capsys.readouterr().err
+    assert "found 1 downgrade-risk item(s)" in stderr
+    assert "1 existing user" not in stderr
+    assert general_risk in stderr

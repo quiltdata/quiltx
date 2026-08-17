@@ -1253,12 +1253,33 @@ def current_state_as_acl_yaml(
     captured_on: str,
     omit_default_users: bool = False,
 ) -> str:
-    """Return current state as replayable ACL YAML with capture metadata.
+    """Return current state as replayable ACL YAML with capture metadata."""
+    exported, _warnings = current_state_as_acl_yaml_with_warnings(
+        current,
+        catalog=catalog,
+        captured_on=captured_on,
+        omit_default_users=omit_default_users,
+    )
+    return exported
+
+
+def current_state_as_acl_yaml_with_warnings(
+    current: CurrentState,
+    *,
+    catalog: str,
+    captured_on: str,
+    omit_default_users: bool = False,
+) -> tuple[str, list[str]]:
+    """Return replayable ACL YAML and its already-computed downgrade risks.
 
     Managed policies are emitted as reusable policies and managed roles as static
     roles. This avoids inventing ladder semantics while preserving the server's
     existing policy-to-role composition. Generated ``__inline`` policies are
     folded back into their owning role.
+
+    Use this form when the caller must also report downgrade risks (for example,
+    the CLI writes them to stderr). It computes the parse+diff analysis once and
+    returns the same warnings embedded in the YAML's ``# not captured:`` notes.
     """
     notes: list[str] = []
     role_entries: dict[str, dict[str, Any]] = {}
@@ -1418,12 +1439,13 @@ def current_state_as_acl_yaml(
         f"# captured: {captured_on}",
         yaml.safe_dump(payload, sort_keys=False).rstrip(),
     ]
-    for warning in export_downgrade_warnings(current, "\n".join(lines)):
-        notes.append(f"DOWNGRADE RISK: applying this file would downgrade {warning}")
+    risk_warnings = export_downgrade_warnings(current, "\n".join(lines))
+    for warning in risk_warnings:
+        notes.append(f"DOWNGRADE RISK: {warning}")
     if notes:
         lines.append("# not captured:")
         lines.extend(f"# - {note}" for note in _dedupe_preserve_order(notes))
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", risk_warnings
 
 
 def _acl_bucket_fields(policy: Any) -> tuple[list[str], list[str], list[str]]:

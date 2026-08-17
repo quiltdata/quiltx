@@ -40,8 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selector, are reported as undetermined rather than guessed, since the
   registry exposes neither IAM grants nor a user's IdP claims.
   New API: `quiltx.acl.analyze_user_downgrades`,
-  `export_downgrade_warnings`, `parse_acl_config_text`, `UserAccess`, and
-  `UserDowngrade`.
+  `current_state_as_acl_yaml_with_warnings`, `export_downgrade_warnings`,
+  `parse_acl_config_text`, `UserAccess`, and `UserDowngrade`.
 
 ## [0.18.2] - 2026-08-17
 
