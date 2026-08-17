@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-08-17
+
+### Added
+
+- Generated ACL state always emits mappings for the catalog's two built-in
+  unmanaged default roles, even when no user or SSO selector references them
+  ([#88](https://github.com/quiltdata/quiltx/issues/88)). The existing roles are
+  discovered and referenced only; reapplying the generated ACL never recreates,
+  converts, updates, or deletes them.
+- `quiltx catalog acl` warns when a generated or reconciled ACL would reduce an
+  existing user's effective access
+  ([#89](https://github.com/quiltdata/quiltx/issues/89)). `--yaml` export writes
+  a prominent warning to stderr (visible when stdout is redirected) plus a note
+  in the `# not captured` section; `--dry-run` names each affected user with a
+  before/after summary of primary role, extra roles, and admin status, including
+  downgrades caused indirectly by role-policy changes, role deletion, SSO
+  mapping replacement, or default-role changes. Neutral role renames and
+  privilege increases are not flagged, and cases that cannot be calculated
+  exactly warn conservatively.
+
 ## [0.18.2] - 2026-08-17
 
 ### Added
