@@ -140,7 +140,9 @@ uvx quiltx bucket test my-bucket --catalog example.quiltdata.com \
 
 That mode treats "not registered" as expected and checks what is checkable:
 the bucket is reachable, `GetBucketNotification` is readable, and the SNS topic
-policy grants `Subscribe`/`GetTopicAttributes`. It reports the principal that
+policy grants `Subscribe`/`GetTopicAttributes`. Topic policies are read
+conservatively — an explicit `Deny` counts, and a condition-bearing `Allow` is
+reported as conditional rather than assumed to apply. It reports the principal that
 ran the checks and fails loudly when that principal is not in the catalog's
 control account — which is how a grant issued to the wrong account surfaces at
 handoff time instead of as an opaque `AccessDenied` later.

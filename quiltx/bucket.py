@@ -1339,26 +1339,65 @@ def _statement_actions(statement: Mapping[str, Any]) -> set[str]:
     return {str(action).lower() for action in actions}
 
 
-def sns_policy_granted_actions(
+@dataclass(frozen=True)
+class SnsPolicyEvaluation:
+    """Static reading of an SNS topic policy for one principal.
+
+    ``conditional`` holds actions that only a condition-bearing statement
+    allows. Conditions are not evaluated, so those actions are reported apart
+    from ``granted`` rather than assumed to apply -- the canonical SNS owner
+    statement, for instance, allows Subscribe only to the topic owner.
+    """
+
+    granted: frozenset[str]
+    denied: frozenset[str]
+    conditional: frozenset[str]
+
+    def missing(self, actions: Sequence[str]) -> list[str]:
+        return [action for action in actions if action not in self.granted]
+
+
+def _statement_covers_actions(
+    statement: Mapping[str, Any], actions: Sequence[str]
+) -> set[str]:
+    listed = _statement_actions(statement)
+    covered: set[str] = set()
+    for action in actions:
+        lowered = action.lower()
+        service = lowered.split(":", 1)[0]
+        if listed & {"*", f"{service}:*", lowered}:
+            covered.add(action)
+    return covered
+
+
+def evaluate_sns_policy(
     policy: Mapping[str, Any] | None,
     actions: Sequence[str],
     *,
     principal: str | None,
     account_id: str | None,
     topic_arn: str,
-) -> set[str]:
-    """Return which *actions* an SNS topic policy allows for this principal."""
+) -> SnsPolicyEvaluation:
+    """Read which *actions* an SNS topic policy allows for this principal.
+
+    An explicit ``Deny`` overrides any allow, matching IAM evaluation. Only
+    unconditional allows count as granted; ``NotPrincipal`` and ``NotAction``
+    are not interpreted, so a policy using them is read conservatively.
+    """
     if not policy:
-        return set()
+        return SnsPolicyEvaluation(frozenset(), frozenset(), frozenset())
     statements = policy.get("Statement") or []
     if isinstance(statements, Mapping):
         statements = [statements]
 
     granted: set[str] = set()
+    denied: set[str] = set()
+    conditional: set[str] = set()
     for statement in statements:
         if not isinstance(statement, Mapping):
             continue
-        if str(statement.get("Effect", "Allow")) != "Allow":
+        effect = str(statement.get("Effect", "Allow"))
+        if effect not in {"Allow", "Deny"}:
             continue
         resources = statement.get("Resource")
         if isinstance(resources, str):
@@ -1367,13 +1406,56 @@ def sns_policy_granted_actions(
             continue
         if not _statement_matches_principal(statement, principal, account_id):
             continue
-        allowed = _statement_actions(statement)
-        for action in actions:
-            lowered = action.lower()
-            service = lowered.split(":", 1)[0]
-            if allowed & {"*", f"{service}:*", lowered}:
-                granted.add(action)
-    return granted
+        covered = _statement_covers_actions(statement, actions)
+        if not covered:
+            continue
+        if effect == "Deny":
+            # A conditional deny may not apply, but treating it as binding is
+            # the safe reading: the probe under-reports access rather than
+            # promising a grant AWS refuses.
+            denied |= covered
+        elif statement.get("Condition"):
+            conditional |= covered
+        else:
+            granted |= covered
+
+    return SnsPolicyEvaluation(
+        granted=frozenset(granted - denied),
+        denied=frozenset(denied),
+        conditional=frozenset(conditional - denied),
+    )
+
+
+def _sns_grant_detail(
+    evaluation: SnsPolicyEvaluation,
+    *,
+    principal: str | None,
+    account_id: str | None,
+) -> str:
+    """Explain an SNS policy reading in terms an operator can act on."""
+    who = principal or account_id or "this principal"
+    missing = evaluation.missing(GRANT_SNS_ACTIONS)
+    if not missing:
+        return f"topic policy allows {', '.join(GRANT_SNS_ACTIONS)} for {who}"
+
+    reasons: list[str] = []
+    denied = [action for action in missing if action in evaluation.denied]
+    if denied:
+        reasons.append(f"explicitly denied: {', '.join(denied)}")
+    conditional = [action for action in missing if action in evaluation.conditional]
+    if conditional:
+        reasons.append(
+            f"allowed only under conditions quiltx does not evaluate: "
+            f"{', '.join(conditional)}"
+        )
+    absent = [
+        action
+        for action in missing
+        if action not in evaluation.denied and action not in evaluation.conditional
+    ]
+    if absent:
+        reasons.append(f"not allowed: {', '.join(absent)}")
+    return f"topic policy for {who}: " + "; ".join(reasons)
 
 
 def _first_notification_topic(notification_config: Mapping[str, Any]) -> str | None:
@@ -1526,25 +1608,19 @@ def probe_bucket_grant(
                     "read SNS topic (sns:GetTopicAttributes)", True, str(topic_arn)
                 )
             )
-            granted = sns_policy_granted_actions(
+            evaluation = evaluate_sns_policy(
                 _parse_json_document(attributes.get("Policy")),
                 GRANT_SNS_ACTIONS,
                 principal=principal,
                 account_id=account_id,
                 topic_arn=topic_arn,
             )
-            missing = [action for action in GRANT_SNS_ACTIONS if action not in granted]
             checks.append(
                 GrantCheck(
                     "SNS topic policy grants subscribe",
-                    not missing,
-                    (
-                        "topic policy allows " + ", ".join(GRANT_SNS_ACTIONS)
-                        if not missing
-                        else (
-                            f"topic policy does not allow {', '.join(missing)} for "
-                            f"{principal or account_id or 'this principal'}"
-                        )
+                    not evaluation.missing(GRANT_SNS_ACTIONS),
+                    _sns_grant_detail(
+                        evaluation, principal=principal, account_id=account_id
                     ),
                 )
             )

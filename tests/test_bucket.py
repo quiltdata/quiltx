@@ -3765,33 +3765,84 @@ def test_probe_bucket_grant_flags_missing_notification_topic() -> None:
     assert _checks(report)["read notifications (s3:GetBucketNotification)"] is False
 
 
-def test_sns_policy_granted_actions_matches_assumed_role_sessions() -> None:
+def _evaluate(policy, *, principal="arn:aws:iam::123456789012:role/operator"):
+    return bucket_lib.evaluate_sns_policy(
+        policy,
+        ("sns:Subscribe",),
+        principal=principal,
+        account_id="123456789012",
+        topic_arn=TOPIC_ARN,
+    )
+
+
+def test_evaluate_sns_policy_matches_assumed_role_sessions() -> None:
     policy = _grant_sns_policy(
         "sns:Subscribe",
         principal="arn:aws:iam::123456789012:role/operator",
     )
-    granted = bucket_lib.sns_policy_granted_actions(
-        policy,
-        ("sns:Subscribe",),
-        principal="arn:aws:sts::123456789012:assumed-role/operator/session",
-        account_id="123456789012",
-        topic_arn=TOPIC_ARN,
+    evaluation = _evaluate(
+        policy, principal="arn:aws:sts::123456789012:assumed-role/operator/session"
     )
-    assert granted == {"sns:Subscribe"}
+    assert evaluation.granted == {"sns:Subscribe"}
+    assert evaluation.missing(("sns:Subscribe",)) == []
 
 
-def test_sns_policy_granted_actions_ignores_other_principals() -> None:
+def test_evaluate_sns_policy_ignores_other_principals() -> None:
     policy = _grant_sns_policy(
         "sns:Subscribe", principal="arn:aws:iam::999988887777:root"
     )
-    granted = bucket_lib.sns_policy_granted_actions(
-        policy,
-        ("sns:Subscribe",),
-        principal="arn:aws:iam::123456789012:role/operator",
-        account_id="123456789012",
-        topic_arn=TOPIC_ARN,
+    assert _evaluate(policy).granted == frozenset()
+
+
+def test_evaluate_sns_policy_honors_explicit_deny() -> None:
+    policy = _grant_sns_policy("sns:Subscribe")
+    policy["Statement"].append(
+        {
+            "Sid": "BlockSubscribe",
+            "Effect": "Deny",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+            "Action": "sns:Subscribe",
+            "Resource": TOPIC_ARN,
+        }
     )
-    assert granted == set()
+    evaluation = _evaluate(policy)
+    assert evaluation.granted == frozenset()
+    assert evaluation.denied == {"sns:Subscribe"}
+    assert evaluation.missing(("sns:Subscribe",)) == ["sns:Subscribe"]
+
+
+def test_evaluate_sns_policy_does_not_assume_conditional_allows() -> None:
+    """The canonical owner statement allows Subscribe only to the topic owner."""
+    policy = bucket_lib._build_default_sns_owner_policy(TOPIC_ARN, "111122223333")
+    evaluation = _evaluate(policy)
+    assert evaluation.granted == frozenset()
+    assert evaluation.conditional == {"sns:Subscribe"}
+
+
+def test_probe_bucket_grant_flags_denied_subscribe(capsys) -> None:
+    policy = _grant_sns_policy("sns:GetTopicAttributes", "sns:Subscribe")
+    policy["Statement"].append(
+        {
+            "Sid": "BlockSubscribe",
+            "Effect": "Deny",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+            "Action": "sns:Subscribe",
+            "Resource": TOPIC_ARN,
+        }
+    )
+    report = bucket_lib.probe_bucket_grant(
+        "bucket-a",
+        session=_GrantSession(sns=_GrantSns(policy)),
+        expected_account_id="123456789012",
+    )
+
+    assert not report.ok
+    detail = next(
+        check.detail
+        for check in report.checks
+        if check.name == "SNS topic policy grants subscribe"
+    )
+    assert "explicitly denied: sns:Subscribe" in detail
 
 
 def test_test_pre_registration_passes_before_registration(monkeypatch, capsys) -> None:

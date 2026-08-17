@@ -29,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   granting `Subscribe`/`GetTopicAttributes`. It runs from the control account
   (`--profile`), reports the principal used, and fails when that principal is
   not in the catalog's control account, so a wrong-account grant surfaces at
-  handoff instead of as an opaque `AccessDenied` inside `catalog acl`.
+  handoff instead of as an opaque `AccessDenied` inside `catalog acl`. Topic
+  policies are read conservatively: an explicit `Deny` overrides an allow, and a
+  condition-bearing allow is reported as conditional rather than granted.
 - `quiltx bucket test --require-index` and `quiltx bucket add --require-index`
   treat an empty search index as a failure. By default an empty index is a
   warning once live access is verified, since indexing lags registration and
