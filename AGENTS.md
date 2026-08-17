@@ -57,8 +57,10 @@ entry for every unmanaged role it finds so captures replay cleanly.
 (roles, admin, composed bucket permissions) before and after a diff.
 `--dry-run` prints a `!! DOWNGRADE` block per affected user; `--yaml` re-parses
 its own output, diffs it against the captured state, and reports risks both in
-the `# not captured:` notes and on stderr. Opaque (unmanaged) roles are reported
-as undetermined; SSO and default-role effects are evaluated for SSO-only users.
+the `# not captured:` notes and on stderr. Opaque (unmanaged) roles and roles
+kept under a changed SSO selector are reported as undetermined; SSO and
+default-role effects apply to SSO-only users, and only when the SSO document
+itself changes.
 
 ### Config API (`quiltx.config`)
 

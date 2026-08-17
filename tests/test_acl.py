@@ -3308,6 +3308,119 @@ roles:
     assert "falls back to the default role 'Narrow'" in downgrade.causes
 
 
+def _sso_document(*mappings: tuple[str, str, str], default_role: str) -> str:
+    return yaml.safe_dump(
+        {
+            "version": "1.0",
+            "union_roles": True,
+            "default_role": default_role,
+            "mappings": [
+                {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            claim: {"type": "array", "contains": {"const": value}}
+                        },
+                        "required": [claim],
+                    },
+                    "roles": [role],
+                }
+                for role, claim, value in mappings
+            ],
+        },
+        sort_keys=False,
+    )
+
+
+def test_compute_diff_flags_undetermined_when_sso_selector_narrows(
+    tmp_path: Path,
+) -> None:
+    """A role kept under a different selector is undetermined, not silent.
+
+    The registry does not expose a user's IdP claims, so quiltx cannot tell
+    whether they still match the replacement selector.
+    """
+    current = _state_with_role(
+        "Analysts",
+        [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)],
+    )
+    current = replace(
+        current,
+        default_role_name="Analysts",
+        sso_config_text=_sso_document(
+            ("Analysts", "groups", "Everyone"), default_role="Analysts"
+        ),
+    )
+    _add_user(current, "sso-user", "Analysts", sso_only=True)
+    _add_user(current, "local-user", "Analysts", sso_only=False)
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-a]
+roles:
+  Analysts:
+    sso.groups: [Engineering]
+    config.policies: [AnalystPolicy]
+    config.default_role: true
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert diff.sso_needs_update
+    assert [d.name for d in diff.user_downgrades] == ["sso-user"]
+    downgrade = diff.user_downgrades[0]
+    assert downgrade.after.primary_role == "Analysts"
+    assert downgrade.lost_permissions == ()
+    assert downgrade.undetermined == (
+        "SSO selectors for role 'Analysts' change from sso.groups=Everyone to "
+        "sso.groups=Engineering; whether this user still matches them cannot "
+        "be determined from the registry",
+    )
+
+
+def test_compute_diff_stays_quiet_when_sso_document_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    """An unchanged SSO document cannot change what an SSO-only user holds."""
+    current = _state_with_role(
+        "Analysts",
+        [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)],
+    )
+    current = _with_unmanaged_roles(current, "ReadQuiltBucket")
+    current = replace(
+        current,
+        default_role_name="Analysts",
+        sso_config_text=_sso_document(
+            ("Analysts", "groups", "Everyone"), default_role="Analysts"
+        ),
+    )
+    # An extra role no SSO mapping grants: unchanged SSO leaves it alone.
+    _add_user(
+        current, "sso-user", "Analysts", extras=("ReadQuiltBucket",), sso_only=True
+    )
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-a]
+roles:
+  Analysts:
+    sso.groups: [Everyone]
+    config.policies: [AnalystPolicy]
+    config.default_role: true
+  ReadQuiltBucket:
+    config.unmanaged: true
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert not diff.sso_needs_update
+    assert diff.user_downgrades == []
+
+
 def test_compute_diff_flags_undetermined_access_when_unmanaged_role_removed(
     tmp_path: Path,
 ) -> None:

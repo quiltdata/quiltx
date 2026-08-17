@@ -254,7 +254,9 @@ flagged, and neither are increases. Permissions granted by an unmanaged role are
 invisible to the registry, so losing one is reported as undetermined rather than
 quantified. SSO mapping and default-role effects are evaluated for SSO-only
 users, whose roles are recomputed at each login; a password user keeps their
-stored assignment until something explicitly changes it.
+stored assignment until something explicitly changes it. The registry does not
+expose a user's IdP claims, so when a role survives under a different selector
+the outcome is reported as undetermined rather than resolved.
 
 ### Usage
 

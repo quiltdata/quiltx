@@ -36,7 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state, listing affected users in the `# not captured:` notes and repeating
   them on stderr so the warning survives `--yaml > file`. Neutral role renames
   and privilege increases are not flagged; permissions granted by an
-  IAM-backed unmanaged role are reported as undetermined rather than guessed.
+  IAM-backed unmanaged role, and roles that survive under a changed SSO
+  selector, are reported as undetermined rather than guessed, since the
+  registry exposes neither IAM grants nor a user's IdP claims.
   New API: `quiltx.acl.analyze_user_downgrades`,
   `export_downgrade_warnings`, `parse_acl_config_text`, `UserAccess`, and
   `UserDowngrade`.

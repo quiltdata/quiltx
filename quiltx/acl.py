@@ -875,17 +875,34 @@ def _projected_user_access(
             for role in before.roles
             if role in deleted
         )
-        # SSO-only users are re-mapped on every login: a role the desired SSO
-        # no longer grants is not regranted, whoever holds it today.
-        if getattr(user, "is_sso_only", False) and state.sso_mappings:
-            mapped = {mapping.role_name for mapping in state.sso_mappings}
-            dropped = [role for role in roles if role not in mapped]
+        # SSO-only users are re-mapped on every login, so a replacement SSO
+        # document decides what they hold next. Only worth analysing when the
+        # document actually changes.
+        if (
+            getattr(user, "is_sso_only", False)
+            and state.sso_mappings
+            and diff.sso_needs_update
+        ):
+            desired_selectors = _selectors_by_role(state.sso_mappings)
+            dropped = [role for role in roles if role not in desired_selectors]
             causes.extend(
                 f"no SSO mapping grants role {role!r}; an SSO-only user loses it "
                 "at next login"
                 for role in dropped
             )
-            roles = [role for role in roles if role in mapped]
+            roles = [role for role in roles if role in desired_selectors]
+            # A role can survive with different selectors. The registry does not
+            # expose a user's IdP claims, so whether this user still matches the
+            # new selectors is unknowable here.
+            current_selectors = _current_selectors_by_role(current.sso_config_text)
+            undetermined.extend(
+                f"SSO selectors for role {role!r} change from "
+                f"{_format_selectors(current_selectors.get(role, set()))} to "
+                f"{_format_selectors(desired_selectors[role])}; whether this user "
+                "still matches them cannot be determined from the registry"
+                for role in roles
+                if current_selectors.get(role, set()) != desired_selectors[role]
+            )
         if not roles:
             fallback = state.default_role_name or current.default_role_name
             if fallback is None:
@@ -978,6 +995,50 @@ def _desired_role_permissions(
             continue
         _merge_permissions(permissions, _permission_map(policy_update.permissions))
     return permissions, known
+
+
+def _selectors_by_role(
+    mappings: list[_SsoMapping],
+) -> dict[str, set[tuple[str, str]]]:
+    selectors: dict[str, set[tuple[str, str]]] = {}
+    for mapping in mappings:
+        selectors.setdefault(mapping.role_name, set()).add(
+            (mapping.claim, mapping.value)
+        )
+    return selectors
+
+
+def _current_selectors_by_role(
+    sso_config_text: str | None,
+) -> dict[str, set[tuple[str, str]]]:
+    """Decode the server SSO document into role -> {(claim, value)}.
+
+    Mappings quiltx cannot decode are skipped, which makes a role look less
+    granted than it is; the comparison that uses this therefore errs toward
+    reporting the outcome as undetermined.
+    """
+    if not sso_config_text:
+        return {}
+    try:
+        raw = yaml.safe_load(sso_config_text) or {}
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    selectors: dict[str, set[tuple[str, str]]] = {}
+    for mapping in raw.get("mappings") or []:
+        decoded = _decode_acl_sso_mapping(mapping)
+        if decoded is None:
+            continue
+        role_name, claim, value, _admin = decoded
+        selectors.setdefault(role_name, set()).add((claim, value))
+    return selectors
+
+
+def _format_selectors(selectors: set[tuple[str, str]]) -> str:
+    if not selectors:
+        return "(none)"
+    return ", ".join(f"sso.{claim}={value}" for claim, value in sorted(selectors))
 
 
 def _permission_map(permissions: Any) -> dict[str, str]:
