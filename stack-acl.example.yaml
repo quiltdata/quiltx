@@ -43,3 +43,10 @@ roles:
     config.policies:    [public, internal]
     buckets.read_write: [quilt-leadership]
     config.is_admin:    true
+
+  # Reference a catalog built-in (IAM-backed) role by name. quiltx never
+  # creates, updates, or deletes it; the entry only keeps it addressable from
+  # `users:`, sso selectors, and config.default_role. Unmanaged roles cannot
+  # carry config.policies or buckets.* grants.
+  ReadWriteQuiltBucket:
+    config.unmanaged:   true

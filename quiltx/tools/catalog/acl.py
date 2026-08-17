@@ -118,14 +118,17 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                     )
                 )
             elif args.yaml:
-                print(
-                    acl_lib.current_state_as_acl_yaml(
-                        current,
-                        catalog=stack.catalog_name,
-                        captured_on=date.today().isoformat(),
-                        omit_default_users=args.omit_default_users,
-                    ),
-                    end="",
+                exported = acl_lib.current_state_as_acl_yaml(
+                    current,
+                    catalog=stack.catalog_name,
+                    captured_on=date.today().isoformat(),
+                    omit_default_users=args.omit_default_users,
+                )
+                print(exported, end="")
+                # Repeat the embedded risk notes on stderr so they stay visible
+                # when the YAML is redirected to a file.
+                _print_export_downgrade_warnings(
+                    acl_lib.export_downgrade_warnings(current, exported)
                 )
             else:
                 acl_lib.print_current_state(current)
@@ -190,6 +193,24 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             print(f"Failure type: {type(exc).__name__}", file=sys.stderr)
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _print_export_downgrade_warnings(warnings: list[str]) -> None:
+    """Announce export privilege-loss risks on stderr."""
+    if not warnings:
+        return
+    print(
+        "!! WARNING: this export does not preserve the effective access of "
+        f"{len(warnings)} existing user(s):",
+        file=sys.stderr,
+    )
+    for warning in warnings:
+        print(f"  - {warning}", file=sys.stderr)
+    print(
+        "Applying this file as-is would downgrade them. "
+        "See the '# not captured:' notes in the generated YAML.",
+        file=sys.stderr,
+    )
 
 
 def _confirm_apply() -> bool:

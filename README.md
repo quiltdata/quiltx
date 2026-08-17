@@ -202,12 +202,67 @@ password signups. A selector-less static role may be the default; when the file
 also generates SSO configuration, the same role is used as its fallback default.
 Files with any `sso.<claim>` selectors must declare exactly one default role.
 
+### Built-in unmanaged roles
+
+Every catalog ships with unmanaged roles (IAM-role-backed, created by the stack
+rather than the registry). `config.unmanaged: true` references one by name:
+
+```yaml
+roles:
+  ReadQuiltBucket:
+    config.unmanaged: true
+  ReadWriteQuiltBucket:
+    config.unmanaged: true
+    sso.groups: [Employees]
+```
+
+Referenced this way, a role stays addressable from `users:`, `sso.<claim>`
+selectors, and `config.default_role` while quiltx never creates, updates, or
+deletes it. Because their bucket grants live in IAM rather than the registry,
+unmanaged roles cannot carry `config.policies`, `buckets.read`, or
+`buckets.read_write`.
+
+`--yaml` always emits these entries for the unmanaged roles it finds, even when
+no user or selector currently references them, so a capture stays replayable.
+
+### Downgrade warnings
+
+Both export and reconciliation compare each existing user's effective access
+(role, extra roles, admin, and composed bucket permissions) before and after.
+
+`--dry-run` prints a per-user block for anything that would reduce access,
+including reductions caused indirectly by a narrowed policy, a deleted role, a
+replaced SSO mapping, or a changed default role:
+
+```text
+!! DOWNGRADE: user alice would lose access
+    primary role: Analysts -> Default
+    extra roles: Leads -> (none)
+    admin: true -> false
+    lost permissions: READ_WRITE:quilt-bake
+    cause: role 'Analysts' would be deleted
+    cause: falls back to the default role 'Default'
+```
+
+`--yaml` re-parses its own output and diffs it against the state it captured. If
+replaying the file would not preserve someone's access, the affected users are
+listed in the generated `# not captured:` notes and repeated on stderr, so the
+warning is still visible when stdout is redirected to a file.
+
+Limitations: role renames and reassignments that preserve permissions are not
+flagged, and neither are increases. Permissions granted by an unmanaged role are
+invisible to the registry, so losing one is reported as undetermined rather than
+quantified. SSO mapping and default-role effects are evaluated for SSO-only
+users, whose roles are recomputed at each login; a password user keeps their
+stored assignment until something explicitly changes it.
+
 ### Usage
 
 With no config file, the command reports the complete server ACL state, including
 users and their active and extra role assignments. Pass `--json` for a complete
 machine-readable reporting export, or `--yaml` for a replayable ACL config that
-can be saved and passed back to `catalog acl --dry-run`.
+can be saved and passed back to `catalog acl --dry-run`. Read the stderr output
+of `--yaml` before replaying: that is where downgrade risks are reported.
 
 ```bash
 # Show current server ACL state

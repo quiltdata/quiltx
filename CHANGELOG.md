@@ -12,21 +12,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Generated ACL state always emits mappings for the catalog's two built-in
-  unmanaged default roles, even when no user or SSO selector references them
-  ([#88](https://github.com/quiltdata/quiltx/issues/88)). The existing roles are
-  discovered and referenced only; reapplying the generated ACL never recreates,
-  converts, updates, or deletes them.
-- `quiltx catalog acl` warns when a generated or reconciled ACL would reduce an
+- ACL configs can reference the catalog's built-in unmanaged roles with
+  `config.unmanaged: true`, and `quiltx catalog acl --yaml` always emits an
+  entry for every unmanaged role it finds — including the two built-in defaults
+  — even when no user or SSO selector references them
+  ([#88](https://github.com/quiltdata/quiltx/issues/88)). The roles are
+  discovered and referenced by name only: they stay addressable from `users:`,
+  `sso.<claim>` selectors, and `config.default_role`, while reapplying the
+  generated ACL never recreates, converts, updates, or deletes them. Declaring
+  a role unmanaged also protects a same-named managed role from deletion, and
+  `config.policies`/`buckets.*` are rejected on unmanaged entries because those
+  grants live in IAM. Users, SSO mappings, and the settings default role that
+  point at an unmanaged role now round-trip instead of landing in
+  `# not captured`.
+- `quiltx catalog acl` warns when an export or reconciliation would reduce an
   existing user's effective access
-  ([#89](https://github.com/quiltdata/quiltx/issues/89)). `--yaml` export writes
-  a prominent warning to stderr (visible when stdout is redirected) plus a note
-  in the `# not captured` section; `--dry-run` names each affected user with a
-  before/after summary of primary role, extra roles, and admin status, including
-  downgrades caused indirectly by role-policy changes, role deletion, SSO
-  mapping replacement, or default-role changes. Neutral role renames and
-  privilege increases are not flagged, and cases that cannot be calculated
-  exactly warn conservatively.
+  ([#89](https://github.com/quiltdata/quiltx/issues/89)). Access is composed
+  role -> policy -> bucket permission, so `--dry-run` prints a per-user
+  `!! DOWNGRADE` block with before/after primary role, extra roles, admin
+  status, and lost permissions, covering reductions caused indirectly by a
+  narrowed policy, a deleted role, a replaced SSO mapping, or a changed default
+  role. `--yaml` re-parses its own output and diffs it against the captured
+  state, listing affected users in the `# not captured:` notes and repeating
+  them on stderr so the warning survives `--yaml > file`. Neutral role renames
+  and privilege increases are not flagged; permissions granted by an
+  IAM-backed unmanaged role are reported as undetermined rather than guessed.
+  New API: `quiltx.acl.analyze_user_downgrades`,
+  `export_downgrade_warnings`, `parse_acl_config_text`, `UserAccess`, and
+  `UserDowngrade`.
 
 ## [0.18.2] - 2026-08-17
 

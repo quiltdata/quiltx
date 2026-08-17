@@ -162,7 +162,10 @@ roles:
     assert "unknown" in role_message
     assert "sso.users" not in role_message
     assert "sso.<claim>" in role_message
-    assert "Explicit roles also support the magic config.policies key" in role_message
+    assert (
+        "Explicit roles also support the magic config.policies and "
+        "config.unmanaged keys" in role_message
+    )
 
 
 def test_parse_acl_config_accepts_arbitrary_sso_claims(tmp_path: Path) -> None:
@@ -2266,6 +2269,17 @@ def _current_state_for_config(config: acl.AclConfig) -> acl.CurrentState:
             policy = managed_policies.get(policy_summary.title)
             if policy is not None:
                 policy.roles.append(role)
+    unmanaged_roles = {
+        name: FakeRole(
+            id=f"u-{name}",
+            name=name,
+            policies=None,
+            permissions=[],
+            typename__="UnmanagedRole",
+        )
+        for name, role in config.roles.items()
+        if role.unmanaged
+    }
     buckets = {
         bucket: FakeBucket(name=bucket, title=bucket)
         for bucket in acl.all_buckets(config)
@@ -2278,8 +2292,8 @@ def _current_state_for_config(config: acl.AclConfig) -> acl.CurrentState:
         unmanaged_policies={},
         all_policies=dict(managed_policies),
         managed_roles=managed_roles,
-        unmanaged_roles={},
-        all_roles=dict(managed_roles),
+        unmanaged_roles=unmanaged_roles,
+        all_roles={**unmanaged_roles, **managed_roles},
         sso_config_text=sso_config_text,
         default_role_name=desired_state.default_role_name,
     )
@@ -2745,3 +2759,769 @@ def test_apply_acl_default_role_falls_back_to_name_when_unlisted() -> None:
     acl.apply_acl(stack, _default_role_diff(), _empty_current_state())
 
     assert set_default_calls == ["demo"]
+
+
+# --- built-in unmanaged role mappings (#88) ---------------------------------
+
+
+def _unmanaged_role(name: str, *, id_: str | None = None) -> FakeRole:
+    """A catalog built-in role: IAM-backed, no registry policies."""
+    return FakeRole(
+        id=id_ or f"u-{name}",
+        name=name,
+        policies=None,
+        permissions=[],
+        typename__="UnmanagedRole",
+    )
+
+
+def _with_unmanaged_roles(current: acl.CurrentState, *names: str) -> acl.CurrentState:
+    for name in names:
+        role = _unmanaged_role(name)
+        current.unmanaged_roles[name] = role
+        current.all_roles[name] = role
+    return current
+
+
+def test_current_state_yaml_emits_unused_builtin_unmanaged_roles() -> None:
+    """Both built-in unmanaged roles are captured even when nothing uses them."""
+    current = _with_unmanaged_roles(
+        _empty_current_state(), "ReadQuiltBucket", "ReadWriteQuiltBucket"
+    )
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="catalog", captured_on="2026-08-17"
+    )
+    payload = yaml.safe_load(exported)
+
+    assert payload["roles"] == {
+        "ReadQuiltBucket": {"config.unmanaged": True},
+        "ReadWriteQuiltBucket": {"config.unmanaged": True},
+    }
+    assert "not captured" not in exported
+
+
+def test_replaying_captured_unmanaged_roles_never_manages_them() -> None:
+    """Reapplying the capture leaves the built-in roles completely alone."""
+    current = _with_unmanaged_roles(
+        _empty_current_state(), "ReadQuiltBucket", "ReadWriteQuiltBucket"
+    )
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="catalog", captured_on="2026-08-17"
+    )
+
+    parsed = acl.parse_acl_config_text(exported)
+    diff = acl.compute_diff(parsed, current)
+
+    assert set(parsed.roles) == {"ReadQuiltBucket", "ReadWriteQuiltBucket"}
+    assert all(role.unmanaged for role in parsed.roles.values())
+    assert not diff.has_changes()
+    assert diff.roles_to_create == []
+    assert diff.roles_to_update == []
+    assert diff.roles_to_delete == []
+    assert diff.policies_to_create == []
+    assert diff.warnings == []
+
+
+def test_current_state_yaml_captures_users_and_default_on_unmanaged_role() -> None:
+    """A user and the settings default on a built-in role round-trip cleanly."""
+    current = replace(
+        _with_unmanaged_roles(_empty_current_state(), "ReadQuiltBucket"),
+        default_role_name="ReadQuiltBucket",
+    )
+    current.users.append(
+        SimpleNamespace(
+            name="alice",
+            role=current.unmanaged_roles["ReadQuiltBucket"],
+            extra_roles=[],
+            is_admin=False,
+        )
+    )
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="catalog", captured_on="2026-08-17"
+    )
+    payload = yaml.safe_load(exported)
+    diff = acl.compute_diff(acl.parse_acl_config_text(exported), current)
+
+    assert payload["roles"]["ReadQuiltBucket"] == {
+        "config.unmanaged": True,
+        "config.default_role": True,
+    }
+    assert payload["users"]["alice"] == {"role": "ReadQuiltBucket", "admin": False}
+    assert not diff.has_changes()
+    assert diff.user_downgrades == []
+    assert "not captured" not in exported
+
+
+def test_current_state_yaml_round_trips_sso_mapped_unmanaged_role() -> None:
+    """An SSO mapping onto a built-in role no longer leaves SSO uncaptured."""
+    current = replace(
+        _with_unmanaged_roles(_empty_current_state(), "ReadQuiltBucket"),
+        default_role_name="ReadQuiltBucket",
+        sso_config_text=yaml.safe_dump(
+            {
+                "version": "1.0",
+                "union_roles": True,
+                "default_role": "ReadQuiltBucket",
+                "mappings": [
+                    {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "groups": {
+                                    "type": "array",
+                                    "contains": {"const": "Everyone"},
+                                }
+                            },
+                            "required": ["groups"],
+                        },
+                        "roles": ["ReadQuiltBucket"],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+    )
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="catalog", captured_on="2026-08-17"
+    )
+    parsed = acl.parse_acl_config_text(exported)
+    diff = acl.compute_diff(parsed, current)
+
+    assert parsed.roles["ReadQuiltBucket"].sso == {"groups": ["Everyone"]}
+    assert parsed.roles["ReadQuiltBucket"].unmanaged is True
+    assert not diff.sso_needs_update
+    assert not diff.has_changes()
+
+
+def test_parse_acl_config_rejects_grants_on_unmanaged_role(tmp_path: Path) -> None:
+    path = tmp_path / "acl.yml"
+    path.write_text("""
+policies: {}
+roles:
+  ReadQuiltBucket:
+    config.unmanaged: true
+    buckets.read: [bucket-a]
+""")
+
+    with pytest.raises(ValueError) as error:
+        acl.parse_acl_config(path)
+
+    message = str(error.value)
+    assert "roles.ReadQuiltBucket cannot set buckets.read" in message
+    assert "config.unmanaged is true" in message
+
+
+def test_parse_acl_config_rejects_non_boolean_unmanaged(tmp_path: Path) -> None:
+    path = tmp_path / "acl.yml"
+    path.write_text("""
+policies: {}
+roles:
+  ReadQuiltBucket:
+    config.unmanaged: "yes"
+""")
+
+    with pytest.raises(ValueError) as error:
+        acl.parse_acl_config(path)
+
+    assert "roles.ReadQuiltBucket.config.unmanaged must be a boolean" in str(
+        error.value
+    )
+
+
+def test_compute_diff_warns_when_declared_unmanaged_role_is_absent() -> None:
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            "ReadQuiltBucket": acl.AclStaticRole(name="ReadQuiltBucket", unmanaged=True)
+        },
+    )
+
+    diff = acl.compute_diff(desired, _empty_current_state())
+
+    assert any("does not exist on the server" in w for w in diff.warnings)
+    assert diff.roles_to_create == []
+    assert diff.policies_to_create == []
+
+
+def test_compute_diff_protects_managed_role_declared_unmanaged() -> None:
+    """A name/type mismatch warns instead of deleting a real managed role."""
+    current = _empty_current_state()
+    managed = FakeRole(id="r1", name="Analysts", policies=[], permissions=[])
+    current.managed_roles["Analysts"] = managed
+    current.all_roles["Analysts"] = managed
+    desired = acl.AclConfig(
+        policies=[],
+        roles={"Analysts": acl.AclStaticRole(name="Analysts", unmanaged=True)},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert any("exists as a managed role" in w for w in diff.warnings)
+    assert diff.roles_to_delete == []
+    assert diff.roles_to_update == []
+
+
+# --- downgrade detection (#89) ----------------------------------------------
+
+
+def _state_with_role(
+    role_name: str,
+    permissions: list[Permission],
+    *,
+    policy_title: str = "AnalystPolicy",
+) -> acl.CurrentState:
+    current = _empty_current_state()
+    policy = FakePolicy(
+        id=f"id-{policy_title}",
+        title=policy_title,
+        managed=True,
+        permissions=permissions,
+        roles=[],
+    )
+    role = FakeRole(
+        id=f"id-{role_name}",
+        name=role_name,
+        policies=[FakePolicySummary(id=policy.id, title=policy_title)],
+        permissions=[],
+    )
+    policy.roles.append(role)
+    current.managed_policies[policy_title] = policy
+    current.all_policies[policy_title] = policy
+    current.managed_roles[role_name] = role
+    current.all_roles[role_name] = role
+    return current
+
+
+def _add_user(
+    current: acl.CurrentState,
+    name: str,
+    primary: str,
+    *,
+    extras: tuple[str, ...] = (),
+    admin: bool = False,
+    sso_only: bool = False,
+) -> None:
+    current.users.append(
+        SimpleNamespace(
+            name=name,
+            role=current.all_roles[primary],
+            extra_roles=[current.all_roles[role] for role in extras],
+            is_admin=admin,
+            is_sso_only=sso_only,
+        )
+    )
+
+
+def test_compute_diff_reports_downgrade_from_policy_shrink(tmp_path: Path) -> None:
+    """Narrowing a policy downgrades every user holding the role."""
+    current = _state_with_role(
+        "Analysts",
+        [
+            Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE),
+            Permission(bucket="bucket-b", level=BucketPermissionLevel.READ),
+        ],
+    )
+    _add_user(current, "alice", "Analysts")
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert [d.name for d in diff.user_downgrades] == ["alice"]
+    downgrade = diff.user_downgrades[0]
+    assert downgrade.lost_permissions == ("READ_WRITE:bucket-a", "READ:bucket-b")
+    assert downgrade.lost_roles == ()
+    assert downgrade.admin_lost is False
+
+
+def test_compute_diff_reports_no_downgrade_when_permissions_grow(
+    tmp_path: Path,
+) -> None:
+    current = _state_with_role(
+        "Analysts", [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)]
+    )
+    _add_user(current, "alice", "Analysts")
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert diff.policies_to_update
+    assert diff.user_downgrades == []
+
+
+def test_compute_diff_reports_no_downgrade_for_neutral_role_reassignment(
+    tmp_path: Path,
+) -> None:
+    """Moving a user to an equivalent role is a rename, not a downgrade."""
+    current = _state_with_role(
+        "Analysts", [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)]
+    )
+    twin_policy = FakePolicy(
+        id="id-TwinPolicy",
+        title="TwinPolicy",
+        managed=True,
+        permissions=[Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)],
+        roles=[],
+    )
+    twin = FakeRole(
+        id="id-Scientists",
+        name="Scientists",
+        policies=[FakePolicySummary(id="id-TwinPolicy", title="TwinPolicy")],
+        permissions=[],
+    )
+    current.managed_policies["TwinPolicy"] = twin_policy
+    current.all_policies["TwinPolicy"] = twin_policy
+    current.managed_roles["Scientists"] = twin
+    current.all_roles["Scientists"] = twin
+    _add_user(current, "alice", "Analysts")
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+  TwinPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+  Scientists:
+    config.policies: [TwinPolicy]
+users:
+  alice:
+    role: Scientists
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert [u.name for u in diff.users_to_update] == ["alice"]
+    assert diff.user_downgrades == []
+
+
+def test_compute_diff_reports_admin_and_extra_role_loss(tmp_path: Path) -> None:
+    current = _state_with_role(
+        "Analysts", [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)]
+    )
+    extra_policy = FakePolicy(
+        id="id-LeadPolicy",
+        title="LeadPolicy",
+        managed=True,
+        permissions=[
+            Permission(bucket="bucket-c", level=BucketPermissionLevel.READ_WRITE)
+        ],
+        roles=[],
+    )
+    leads = FakeRole(
+        id="id-Leads",
+        name="Leads",
+        policies=[FakePolicySummary(id="id-LeadPolicy", title="LeadPolicy")],
+        permissions=[],
+    )
+    current.managed_policies["LeadPolicy"] = extra_policy
+    current.all_policies["LeadPolicy"] = extra_policy
+    current.managed_roles["Leads"] = leads
+    current.all_roles["Leads"] = leads
+    _add_user(current, "alice", "Analysts", extras=("Leads",), admin=True)
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+  LeadPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-c]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+  Leads:
+    config.policies: [LeadPolicy]
+users:
+  alice:
+    role: Analysts
+    admin: false
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+    downgrade = diff.user_downgrades[0]
+
+    assert downgrade.name == "alice"
+    assert downgrade.admin_lost is True
+    assert downgrade.lost_roles == ("Leads",)
+    assert downgrade.lost_permissions == ("READ_WRITE:bucket-c",)
+    assert "the users: entry sets admin: false" in downgrade.causes
+
+
+def test_compute_diff_reports_downgrade_from_role_deletion(tmp_path: Path) -> None:
+    """A user is downgraded indirectly when their role disappears."""
+    current = _state_with_role(
+        "Analysts",
+        [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)],
+    )
+    default_policy = FakePolicy(
+        id="id-DefaultPolicy",
+        title="DefaultPolicy",
+        managed=True,
+        permissions=[],
+        roles=[],
+    )
+    default_role = FakeRole(
+        id="id-Default",
+        name="Default",
+        policies=[FakePolicySummary(id="id-DefaultPolicy", title="DefaultPolicy")],
+        permissions=[],
+    )
+    current.managed_policies["DefaultPolicy"] = default_policy
+    current.all_policies["DefaultPolicy"] = default_policy
+    current.managed_roles["Default"] = default_role
+    current.all_roles["Default"] = default_role
+    current = replace(current, default_role_name="Default")
+    _add_user(current, "alice", "Analysts")
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  DefaultPolicy:
+    config.synthesize: false
+roles:
+  Default:
+    config.policies: [DefaultPolicy]
+    config.default_role: true
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+    downgrade = diff.user_downgrades[0]
+
+    assert diff.roles_to_delete == ["Analysts"]
+    assert downgrade.name == "alice"
+    assert downgrade.before.primary_role == "Analysts"
+    assert downgrade.after.primary_role == "Default"
+    assert downgrade.lost_permissions == ("READ_WRITE:bucket-a",)
+    assert "role 'Analysts' would be deleted" in downgrade.causes
+    assert "falls back to the default role 'Default'" in downgrade.causes
+
+
+def test_compute_diff_reports_sso_only_downgrade_from_mapping_replacement(
+    tmp_path: Path,
+) -> None:
+    """An SSO-only user loses a role the replacement SSO no longer grants."""
+    current = _state_with_role(
+        "Employees",
+        [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)],
+    )
+    guest_policy = FakePolicy(
+        id="id-GuestPolicy", title="GuestPolicy", managed=True, permissions=[], roles=[]
+    )
+    guests = FakeRole(
+        id="id-Guests",
+        name="Guests",
+        policies=[FakePolicySummary(id="id-GuestPolicy", title="GuestPolicy")],
+        permissions=[],
+    )
+    current.managed_policies["GuestPolicy"] = guest_policy
+    current.all_policies["GuestPolicy"] = guest_policy
+    current.managed_roles["Guests"] = guests
+    current.all_roles["Guests"] = guests
+    current = replace(current, default_role_name="Guests")
+    _add_user(current, "sso-user", "Employees", sso_only=True)
+    _add_user(current, "local-user", "Employees", sso_only=False)
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  GuestPolicy:
+    sso.groups: [Everyone]
+    config.default_role: true
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-a]
+roles:
+  Employees:
+    config.policies: [AnalystPolicy]
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert diff.sso_needs_update
+    # The local user keeps the role assignment; only the SSO-only user is remapped.
+    assert [d.name for d in diff.user_downgrades] == ["sso-user"]
+    downgrade = diff.user_downgrades[0]
+    assert downgrade.after.primary_role == "GuestPolicy"
+    assert downgrade.lost_permissions == ("READ_WRITE:bucket-a",)
+    assert any("no SSO mapping grants role 'Employees'" in c for c in downgrade.causes)
+
+
+def test_compute_diff_reports_downgrade_from_default_role_change(
+    tmp_path: Path,
+) -> None:
+    """Changing the default role downgrades SSO-only users who fall back to it."""
+    current = _state_with_role(
+        "Broad",
+        [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)],
+        policy_title="BroadPolicy",
+    )
+    current = replace(current, default_role_name="Broad")
+    _add_user(current, "sso-user", "Broad", sso_only=True)
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  Narrow:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+  BroadPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-a]
+roles:
+  Broad:
+    config.policies: [BroadPolicy]
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+    downgrade = diff.user_downgrades[0]
+
+    assert diff.default_role_needs_update
+    assert diff.default_role_name == "Narrow"
+    assert diff.roles_to_delete == []
+    assert downgrade.name == "sso-user"
+    assert downgrade.after.primary_role == "Narrow"
+    assert downgrade.lost_permissions == ("READ_WRITE:bucket-a",)
+    assert "falls back to the default role 'Narrow'" in downgrade.causes
+
+
+def test_compute_diff_flags_undetermined_access_when_unmanaged_role_removed(
+    tmp_path: Path,
+) -> None:
+    """Losing an IAM-backed role is reported as undetermined, not silently."""
+    current = _state_with_role(
+        "Analysts", [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)]
+    )
+    current = _with_unmanaged_roles(current, "ReadWriteQuiltBucket")
+    _add_user(current, "alice", "Analysts", extras=("ReadWriteQuiltBucket",))
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+users:
+  alice:
+    role: Analysts
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+    downgrade = diff.user_downgrades[0]
+
+    assert downgrade.lost_permissions == ()
+    assert downgrade.lost_roles == ("ReadWriteQuiltBucket",)
+    assert any("is unmanaged" in note for note in downgrade.undetermined)
+    assert downgrade.is_downgrade()
+
+
+def test_compute_diff_keeps_unmanaged_role_silent_when_retained(
+    tmp_path: Path,
+) -> None:
+    """Holding an opaque role on both sides is not a downgrade."""
+    current = _state_with_role(
+        "Analysts", [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)]
+    )
+    current = _with_unmanaged_roles(current, "ReadWriteQuiltBucket")
+    _add_user(current, "alice", "Analysts", extras=("ReadWriteQuiltBucket",))
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+  ReadWriteQuiltBucket:
+    config.unmanaged: true
+users:
+  alice:
+    role: Analysts
+    extra_roles: [ReadWriteQuiltBucket]
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert diff.user_downgrades == []
+
+
+def test_export_downgrade_warnings_flag_unrepresentable_role_policies() -> None:
+    """An export that cannot keep a shared inline policy warns about its users."""
+    current = _empty_current_state()
+    inline = FakePolicy(
+        id="p-inline",
+        title=f"Analysts{acl.INLINE_POLICY_SUFFIX}",
+        managed=True,
+        permissions=[
+            Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)
+        ],
+        roles=[],
+    )
+    summary = FakePolicySummary(id="p-inline", title=inline.title)
+    analysts = FakeRole(id="r1", name="Analysts", policies=[summary], permissions=[])
+    observers = FakeRole(id="r2", name="Observers", policies=[summary], permissions=[])
+    current.managed_policies[inline.title] = inline
+    current.all_policies[inline.title] = inline
+    for role in (analysts, observers):
+        current.managed_roles[role.name] = role
+        current.all_roles[role.name] = role
+    _add_user(current, "bob", "Observers")
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="catalog", captured_on="2026-08-17"
+    )
+    warnings = acl.export_downgrade_warnings(current, exported)
+
+    assert len(warnings) == 1
+    assert "user 'bob'" in warnings[0]
+    assert "READ_WRITE:bucket-a" in warnings[0]
+    assert "DOWNGRADE RISK: applying this file would downgrade user 'bob'" in exported
+
+
+def test_export_downgrade_warnings_empty_for_faithful_capture() -> None:
+    current = _state_with_role(
+        "Analysts", [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)]
+    )
+    _add_user(current, "alice", "Analysts", admin=True)
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="catalog", captured_on="2026-08-17"
+    )
+
+    assert acl.export_downgrade_warnings(current, exported) == []
+    assert "DOWNGRADE RISK" not in exported
+
+
+def test_export_downgrade_warnings_report_unparseable_output() -> None:
+    warnings = acl.export_downgrade_warnings(
+        _empty_current_state(), "policies: [not-a-mapping]\n"
+    )
+
+    assert len(warnings) == 1
+    assert "not valid input for `quiltx catalog acl`" in warnings[0]
+
+
+def test_print_diff_shows_user_downgrade_block(capsys) -> None:
+    diff = acl.AclDiff(
+        user_downgrades=[
+            acl.UserDowngrade(
+                name="alice",
+                before=acl.UserAccess(
+                    primary_role="Analysts",
+                    extra_roles=("Leads",),
+                    admin=True,
+                    permissions={"bucket-a": "READ_WRITE"},
+                ),
+                after=acl.UserAccess(primary_role="Default"),
+                lost_roles=("Analysts", "Leads"),
+                admin_lost=True,
+                lost_permissions=("READ_WRITE:bucket-a",),
+                causes=("role 'Analysts' would be deleted",),
+                undetermined=("role 'Legacy' is unmanaged",),
+            )
+        ]
+    )
+
+    acl.print_diff(diff)
+    out = capsys.readouterr().out
+
+    assert "!! DOWNGRADE: user alice would lose access" in out
+    assert "primary role: Analysts -> Default" in out
+    assert "extra roles: Leads -> (none)" in out
+    assert "admin: true -> false" in out
+    assert "lost permissions: READ_WRITE:bucket-a" in out
+    assert "cause: role 'Analysts' would be deleted" in out
+    assert "undetermined: role 'Legacy' is unmanaged" in out
+
+
+def test_acl_tool_dry_run_reports_downgrade(monkeypatch, capsys, tmp_path) -> None:
+    current = _state_with_role(
+        "Analysts",
+        [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)],
+    )
+    _add_user(current, "alice", "Analysts")
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+""")
+    _install_acl_tool_stack(monkeypatch)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "apply_acl",
+        lambda *a, **k: pytest.fail("dry run must not apply"),
+    )
+
+    result = acl_tool.main([str(config), "--dry-run"])
+    out = capsys.readouterr().out
+
+    assert result == 0
+    assert "!! DOWNGRADE: user alice would lose access" in out
+    assert "lost permissions: READ_WRITE:bucket-a" in out
+
+
+def test_acl_tool_yaml_warns_about_downgrades_on_stderr(monkeypatch, capsys) -> None:
+    """The warning survives `--yaml > file` because it goes to stderr."""
+    current = _empty_current_state()
+    inline = FakePolicy(
+        id="p-inline",
+        title=f"Analysts{acl.INLINE_POLICY_SUFFIX}",
+        managed=True,
+        permissions=[
+            Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)
+        ],
+        roles=[],
+    )
+    summary = FakePolicySummary(id="p-inline", title=inline.title)
+    current.managed_policies[inline.title] = inline
+    current.all_policies[inline.title] = inline
+    for name in ("Analysts", "Observers"):
+        role = FakeRole(id=f"r-{name}", name=name, policies=[summary], permissions=[])
+        current.managed_roles[name] = role
+        current.all_roles[name] = role
+    _add_user(current, "bob", "Observers")
+    _install_acl_tool_stack(monkeypatch)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+
+    result = acl_tool.main(["--yaml"])
+    captured = capsys.readouterr()
+
+    assert result == 0
+    assert "!! WARNING: this export does not preserve the effective access of 1" in (
+        captured.err
+    )
+    assert "user 'bob'" in captured.err
+    assert "would downgrade them" in captured.err
+    assert yaml.safe_load(captured.out)["roles"]["Observers"] == {}
