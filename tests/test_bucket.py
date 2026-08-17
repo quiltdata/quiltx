@@ -3811,6 +3811,77 @@ def test_evaluate_sns_policy_honors_explicit_deny() -> None:
     assert evaluation.missing(("sns:Subscribe",)) == ["sns:Subscribe"]
 
 
+def test_evaluate_sns_policy_honors_oddly_spelled_deny() -> None:
+    """A Deny must never be skipped for spelling: that would over-report access."""
+    policy = _grant_sns_policy("sns:Subscribe")
+    policy["Statement"].append(
+        {
+            "Effect": "deny",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+            "Action": "sns:Subscribe",
+            "Resource": TOPIC_ARN,
+        }
+    )
+    evaluation = _evaluate(policy)
+    assert evaluation.granted == frozenset()
+    assert evaluation.denied == {"sns:Subscribe"}
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [
+        "arn:aws:sts::123456789012:assumed-role",
+        "arn:aws:sts::123456789012:assumed-role/",
+        "arn:aws:sts::123456789012:federated-user/someone",
+        "not-an-arn",
+    ],
+)
+def test_normalized_principal_leaves_unparseable_arns_alone(principal) -> None:
+    assert bucket_lib._normalized_principal(principal) == principal
+
+
+def test_normalized_principal_maps_assumed_role_to_role_arn() -> None:
+    assert (
+        bucket_lib._normalized_principal(
+            "arn:aws:sts::123456789012:assumed-role/operator/session-name"
+        )
+        == "arn:aws:iam::123456789012:role/operator"
+    )
+
+
+def test_control_context_uses_supplied_values_without_rediscovery(monkeypatch) -> None:
+    """A caller that already loaded the stack payload is not made to reload it."""
+    monkeypatch.setattr(
+        bucket_tool,
+        "_control_context",
+        lambda stack: (_ for _ in ()).throw(
+            AssertionError("supplied context must not trigger stack discovery")
+        ),
+    )
+    context = bucket_tool._ControlContext(
+        make_fake_catalog(), "123456789012", principal=None
+    )
+    assert context.resolve() == ("123456789012", None)
+
+
+def test_control_context_derives_when_nothing_is_supplied(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_context(stack):
+        calls.append("resolved")
+        return "123456789012", "arn:aws:iam::123456789012:role/quilt-registry"
+
+    monkeypatch.setattr(bucket_tool, "_control_context", fake_context)
+    context = bucket_tool._ControlContext(make_fake_catalog())
+
+    assert context.resolve() == (
+        "123456789012",
+        "arn:aws:iam::123456789012:role/quilt-registry",
+    )
+    assert context.resolve()[0] == "123456789012"
+    assert calls == ["resolved"]
+
+
 def test_evaluate_sns_policy_does_not_assume_conditional_allows() -> None:
     """The canonical owner statement allows Subscribe only to the topic owner."""
     policy = bucket_lib._build_default_sns_owner_policy(TOPIC_ARN, "111122223333")

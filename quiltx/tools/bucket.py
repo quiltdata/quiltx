@@ -1206,6 +1206,11 @@ class _ControlContext:
     Stack discovery is not free, and the control account and stack principal
     only matter when something failed — but then they are the answer, so they
     must never be blank (issue #92).
+
+    Callers either supply both values or neither: both come from the same stack
+    payload, so a caller that already loaded it passes what that payload holds
+    (``principal`` is None when the stack has no ``RegistryRoleARN`` output) and
+    re-deriving would repeat the work for the same answer.
     """
 
     def __init__(

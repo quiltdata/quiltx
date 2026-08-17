@@ -1292,14 +1292,22 @@ def _aws_error_detail(exc: BaseException) -> str:
 
 
 def _normalized_principal(principal: str | None) -> str | None:
-    """Map an assumed-role session ARN back to the role ARN policies name."""
+    """Map an assumed-role session ARN back to the role ARN policies name.
+
+    ``sts:GetCallerIdentity`` answers
+    ``arn:aws:sts::123:assumed-role/Role/session`` while policies name
+    ``arn:aws:iam::123:role/Role``. Any ARN shape that does not parse cleanly is
+    returned unchanged rather than rewritten into a guess.
+    """
     if not principal:
         return None
     parts = principal.split(":")
-    if len(parts) == 6 and parts[2] == "sts" and parts[5].startswith("assumed-role/"):
-        role_name = parts[5].split("/")[1]
-        return f"arn:aws:iam::{parts[4]}:role/{role_name}"
-    return principal
+    if len(parts) != 6 or parts[2] != "sts":
+        return principal
+    resource = parts[5].split("/")
+    if len(resource) < 2 or resource[0] != "assumed-role" or not resource[1]:
+        return principal
+    return f"arn:aws:iam::{parts[4]}:role/{resource[1]}"
 
 
 def _statement_principals(statement: Mapping[str, Any]) -> list[str]:
@@ -1396,8 +1404,10 @@ def evaluate_sns_policy(
     for statement in statements:
         if not isinstance(statement, Mapping):
             continue
-        effect = str(statement.get("Effect", "Allow"))
-        if effect not in {"Allow", "Deny"}:
+        # Casefold the effect so an oddly-spelled Deny is still honored rather
+        # than silently skipped, which would over-report access.
+        effect = str(statement.get("Effect", "Allow")).strip().lower()
+        if effect not in {"allow", "deny"}:
             continue
         resources = statement.get("Resource")
         if isinstance(resources, str):
@@ -1409,7 +1419,7 @@ def evaluate_sns_policy(
         covered = _statement_covers_actions(statement, actions)
         if not covered:
             continue
-        if effect == "Deny":
+        if effect == "deny":
             # A conditional deny may not apply, but treating it as binding is
             # the safe reading: the probe under-reports access rather than
             # promising a grant AWS refuses.
