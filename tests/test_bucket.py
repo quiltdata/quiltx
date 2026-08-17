@@ -12,9 +12,11 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
 from quiltx import bucket as bucket_lib
+from quiltx import quilt3_facade
 from quiltx.bucket import AddBucketResult, add_bucket
 from quiltx.tools import bucket as bucket_tool
 
@@ -1254,9 +1256,42 @@ def test_prepare_catalog_falls_back_to_catalog_credentials(monkeypatch, capsys) 
     assert applied == [plan]
     assert json.loads(captured.out) == plan.handoff()
     assert (
-        "Control account 123456789012 from open.quiltdata.com catalog credentials"
-        in captured.err
+        "Control account 123456789012 from registry-issued credentials for "
+        "open.quiltdata.com" in captured.err
     )
+
+
+def test_prepare_catalog_refuses_ambient_credentials(monkeypatch, capsys) -> None:
+    """Issue #91: never fall back to the local AWS profile's account ID."""
+    plan = _fake_bucket_preparation_plan()
+    _control_ids, auth_calls, _resolved = _install_prepare_catalog_fakes(
+        monkeypatch, plan, payload=None, allow_auth=True
+    )
+
+    def refuse() -> str:
+        raise quilt3_facade.CatalogCredentialsError(
+            "refusing to use credentials from the ambient AWS credential chain"
+        )
+
+    monkeypatch.setattr("quiltx.quilt3_facade.catalog_sts_account_id", refuse)
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not write AWS state without a control account")
+        ),
+    )
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--catalog", "open.quiltdata.com", "--json", "--yes"]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert auth_calls == ["auth"]
+    assert "ambient AWS credential chain" in captured.err
+    assert "--control-account-id" in captured.err
+    assert "Control account" not in captured.err
 
 
 class FakeQuiltBucket:
@@ -2633,6 +2668,144 @@ def test_cmd_profile_finds_profile_for_bucket(monkeypatch, capsys) -> None:
     assert bucket_tool.main(["profile", "quilt-example"]) == 0
     assert capsys.readouterr().out.strip() == "prod"
     assert calls == ["sales", "open", "prod"]
+
+
+class _CrossRegionS3:
+    """S3 double where GetBucketLocation only answers in the bucket's region."""
+
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+        "GetBucketLocation",
+    )
+
+    def __init__(self, region: str, bucket_region: str = "us-west-2") -> None:
+        self.meta = SimpleNamespace(region_name=region)
+        self.bucket_region = bucket_region
+        self.location_calls = 0
+        self.head_calls = 0
+
+    def get_bucket_location(self, Bucket: str) -> dict[str, Any]:
+        self.location_calls += 1
+        if self.meta.region_name != self.bucket_region:
+            raise self.denied
+        return {"LocationConstraint": self.bucket_region}
+
+    def head_bucket(self, Bucket: str) -> dict[str, Any]:
+        self.head_calls += 1
+        return {"BucketRegion": self.bucket_region}
+
+
+class _CrossRegionSession:
+    """Session double handing out region-pinned :class:`_CrossRegionS3` clients."""
+
+    available_profiles = ["default"]
+
+    def __init__(self, profile_name: str | None = None) -> None:
+        self.profile_name = profile_name or "default"
+        self.clients: list[_CrossRegionS3] = []
+
+    def client(self, service: str, region_name: str | None = None) -> _CrossRegionS3:
+        assert service == "s3"
+        created = _CrossRegionS3(region_name or "us-east-1")
+        self.clients.append(created)
+        return created
+
+
+def test_open_bucket_client_retries_in_the_buckets_region() -> None:
+    """Issue #91: an out-of-region bucket is not mistaken for an unreadable one."""
+    session = _CrossRegionSession()
+
+    s3_client, region = bucket_lib.open_bucket_client("quilt-example", session)
+
+    assert region == "us-west-2"
+    assert s3_client.meta.region_name == "us-west-2"
+    assert [client.meta.region_name for client in session.clients] == [
+        "us-east-1",
+        "us-west-2",
+    ]
+
+
+def test_open_bucket_client_accepts_head_only_access() -> None:
+    """HeadBucket in the right region proves access even if GetBucketLocation fails."""
+
+    class HeadOnlyS3(_CrossRegionS3):
+        def get_bucket_location(self, Bucket: str) -> dict[str, Any]:
+            self.location_calls += 1
+            raise self.denied
+
+    class HeadOnlySession(_CrossRegionSession):
+        def client(self, service: str, region_name: str | None = None) -> HeadOnlyS3:
+            created = HeadOnlyS3(region_name or "us-east-1")
+            self.clients.append(created)
+            return created
+
+    s3_client, region = bucket_lib.open_bucket_client(
+        "quilt-example", HeadOnlySession()
+    )
+
+    assert region == "us-west-2"
+    assert s3_client.meta.region_name == "us-west-2"
+
+
+def test_open_bucket_client_raises_on_same_region_denial() -> None:
+    """A denial in the bucket's own region stays a denial."""
+
+    class DeniedS3(_CrossRegionS3):
+        def get_bucket_location(self, Bucket: str) -> dict[str, Any]:
+            self.location_calls += 1
+            raise self.denied
+
+    class DeniedSession(_CrossRegionSession):
+        def client(self, service: str, region_name: str | None = None) -> DeniedS3:
+            created = DeniedS3(region_name or "us-west-2")
+            self.clients.append(created)
+            return created
+
+    session = DeniedSession()
+    with pytest.raises(ClientError):
+        bucket_lib.open_bucket_client("quilt-example", session)
+    assert len(session.clients) == 1
+
+
+def test_resolve_bucket_session_keeps_out_of_region_profile(monkeypatch) -> None:
+    """The first profile is kept when only the probe region was wrong."""
+    monkeypatch.setattr(boto3, "Session", _CrossRegionSession)
+
+    session, s3_client, region, profile = bucket_lib.resolve_bucket_session(
+        "quilt-example", "default", assume_yes=False
+    )
+
+    assert profile == "default"
+    assert region == "us-west-2"
+    assert s3_client.meta.region_name == "us-west-2"
+    assert isinstance(session, _CrossRegionSession)
+
+
+def test_head_bucket_region_reads_error_header() -> None:
+    class RedirectS3:
+        def head_bucket(self, Bucket: str) -> dict[str, Any]:
+            raise ClientError(
+                {
+                    "Error": {"Code": "301", "Message": "Moved Permanently"},
+                    "ResponseMetadata": {
+                        "HTTPHeaders": {"x-amz-bucket-region": "eu-central-1"}
+                    },
+                },
+                "HeadBucket",
+            )
+
+    assert bucket_lib.head_bucket_region(RedirectS3(), "b") == "eu-central-1"
+
+
+def test_head_bucket_region_is_none_without_a_hint() -> None:
+    class OpaqueS3:
+        def head_bucket(self, Bucket: str) -> dict[str, Any]:
+            raise ClientError(
+                {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadBucket"
+            )
+
+    assert bucket_lib.head_bucket_region(OpaqueS3(), "b") is None
+    assert bucket_lib.head_bucket_region(object(), "b") is None
 
 
 def test_resolve_bucket_session_switches_on_access_denied(monkeypatch, capsys) -> None:
