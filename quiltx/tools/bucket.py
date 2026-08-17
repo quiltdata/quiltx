@@ -130,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Catalog DNS name used to derive the control account ID when "
             "--control-account-id and --principal are omitted: reads cached "
             "stack metadata, else logs in as a regular catalog user (no admin "
-            "required) and asks STS which account minted the credentials."
+            "required) and asks STS which account minted the catalog's own "
+            "credentials; never falls back to ambient AWS credentials."
         ),
     )
     prepare_parser.add_argument(
@@ -457,6 +458,10 @@ def _control_account_id_from_catalog(catalog_arg: str) -> str:
     a regular catalog user and ask STS which account minted the catalog
     credentials. Keeps ``bucket prepare`` outside ``catalog_command``: no
     catalog configuration is loaded and no Quilt admin API is called.
+
+    Never falls back to the ambient AWS credential chain: an account ID that
+    tracks ``AWS_PROFILE`` would silently produce a bucket policy granting an
+    unrelated account (issue #91).
     """
     from quiltx import quilt3_facade
 
@@ -471,10 +476,17 @@ def _control_account_id_from_catalog(catalog_arg: str) -> str:
         )
         return account_id
     catalog.ensure_auth()
-    account_id = quilt3_facade.catalog_sts_account_id()
+    try:
+        account_id = quilt3_facade.catalog_sts_account_id()
+    except quilt3_facade.CatalogCredentialsError as exc:
+        raise RuntimeError(
+            f"{exc}. Pass --control-account-id or --principal explicitly, or "
+            f"refresh the stack cache with: quiltx catalog stack "
+            f"--catalog {catalog.catalog_name}"
+        ) from exc
     print(
-        f"Control account {account_id} from {catalog.catalog_name} catalog "
-        "credentials.",
+        f"Control account {account_id} from registry-issued credentials for "
+        f"{catalog.catalog_name}.",
         file=sys.stderr,
     )
     return account_id

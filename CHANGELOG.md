@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-17
+
+### Fixed
+
+- `quiltx bucket prepare --catalog DNS` no longer reports the ambient AWS
+  account as the Quilt control account ([#91](https://github.com/quiltdata/quiltx/issues/91)).
+  Without cached stack metadata, the account is now derived from credentials
+  minted by the catalog's own registry; if the catalog will not mint them,
+  the command fails and asks for an explicit `--control-account-id` or
+  `--principal` instead of emitting a plausible wrong principal. The message
+  names the credential source it actually used.
+- Bucket access probes resolve the bucket's region before testing access, so a
+  bucket outside the profile's default region is no longer reported as
+  unreachable (`GetBucketLocation` answers `AccessDenied` across regions).
+  `bucket prepare`, `bucket add`, and `catalog acl` can now preflight
+  out-of-region buckets.
+
 ## [0.18.0] - 2026-08-12
 
 ### Added

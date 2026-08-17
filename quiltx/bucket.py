@@ -13,15 +13,86 @@ from quiltx import stack as stack_lib
 from quiltx.utils import get_bucket_region
 
 
+def _reported_bucket_region(payload: Any) -> str | None:
+    """Extract the bucket region S3 reports in a response or error payload.
+
+    HeadBucket answers ``x-amz-bucket-region`` (surfaced as ``BucketRegion``)
+    even when the call itself fails, which is how an out-of-region bucket can
+    be told apart from one the caller cannot read at all.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    region = payload.get("BucketRegion")
+    if region:
+        return str(region)
+    error = payload.get("Error")
+    if isinstance(error, Mapping):
+        region = error.get("BucketRegion") or error.get("Region")
+        if region:
+            return str(region)
+    metadata = payload.get("ResponseMetadata")
+    headers = metadata.get("HTTPHeaders") if isinstance(metadata, Mapping) else None
+    if isinstance(headers, Mapping):
+        region = headers.get("x-amz-bucket-region")
+        if region:
+            return str(region)
+    return None
+
+
+def head_bucket_region(s3_client: Any, bucket: str) -> str | None:
+    """Return the region HeadBucket reports for *bucket*, or None if unknown.
+
+    Best-effort probe: any failure to learn the region (including clients that
+    do not implement HeadBucket) yields None so callers keep their original
+    error.
+    """
+    try:
+        response = s3_client.head_bucket(Bucket=bucket)
+    except Exception as exc:  # region hint only; never mask the caller's error
+        return _reported_bucket_region(getattr(exc, "response", None))
+    return _reported_bucket_region(response)
+
+
+def open_bucket_client(bucket: str, session: Any) -> tuple[Any, str]:
+    """Return an S3 client bound to *bucket*'s region plus that region.
+
+    Probes with the session's default region first, then retries against the
+    region HeadBucket reports. Without the retry, a bucket outside the
+    profile's default region answers ``AccessDenied`` on GetBucketLocation and
+    looks unreachable even with a full cross-account grant (issue #91).
+
+    Raises the underlying ``ClientError``/``BotoCoreError`` when the session
+    genuinely cannot read the bucket.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    s3_client = session.client("s3")
+    try:
+        return s3_client, get_bucket_region(bucket, s3_client=s3_client)
+    except (ClientError, BotoCoreError):
+        region = head_bucket_region(s3_client, bucket)
+        probed_region = getattr(getattr(s3_client, "meta", None), "region_name", None)
+        if region is None or region == probed_region:
+            raise
+
+    regional_client = session.client("s3", region_name=region)
+    try:
+        return regional_client, get_bucket_region(bucket, s3_client=regional_client)
+    except (ClientError, BotoCoreError):
+        # HeadBucket named the region, so treat it as authoritative only when
+        # an in-region HeadBucket also proves access.
+        regional_client.head_bucket(Bucket=bucket)
+        return regional_client, region
+
+
 def find_profile_for_bucket(bucket: str, profiles: Sequence[str]) -> str | None:
-    """Return the first profile whose GetBucketLocation succeeds for *bucket*."""
+    """Return the first profile that can read *bucket* in the bucket's region."""
     import boto3
     from botocore.exceptions import BotoCoreError, ClientError
 
     for name in profiles:
         try:
-            session = boto3.Session(profile_name=name)
-            session.client("s3").get_bucket_location(Bucket=bucket)
+            open_bucket_client(bucket, boto3.Session(profile_name=name))
         except (ClientError, BotoCoreError):
             continue
         return name
@@ -54,9 +125,8 @@ def resolve_bucket_session(
     ask = prompt if prompt is not None else input
 
     session = boto3.Session(profile_name=profile)
-    s3_client = session.client("s3")
     try:
-        region = get_bucket_region(bucket, s3_client=s3_client)
+        s3_client, region = open_bucket_client(bucket, session)
         return session, s3_client, region, profile
     except (ClientError, BotoCoreError) as exc:
         print(
@@ -88,8 +158,7 @@ def resolve_bucket_session(
             return None, None, "", profile
 
     new_session = boto3.Session(profile_name=match)
-    new_s3 = new_session.client("s3")
-    region = get_bucket_region(bucket, s3_client=new_s3)
+    new_s3, region = open_bucket_client(bucket, new_session)
     return new_session, new_s3, region, match
 
 
