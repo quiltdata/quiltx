@@ -118,15 +118,19 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
                     )
                 )
             elif args.yaml:
-                print(
-                    acl_lib.current_state_as_acl_yaml(
+                exported, risk_warnings = (
+                    acl_lib.current_state_as_acl_yaml_with_warnings(
                         current,
                         catalog=stack.catalog_name,
                         captured_on=date.today().isoformat(),
                         omit_default_users=args.omit_default_users,
-                    ),
-                    end="",
+                    )
                 )
+                print(exported, end="")
+                # Repeat the embedded risk notes on stderr so they stay visible
+                # when the YAML is redirected to a file. The analysis already
+                # ran while rendering the YAML; do not parse+diff a second time.
+                _print_export_downgrade_warnings(risk_warnings)
             else:
                 acl_lib.print_current_state(current)
             return 0
@@ -190,6 +194,23 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
             print(f"Failure type: {type(exc).__name__}", file=sys.stderr)
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _print_export_downgrade_warnings(warnings: list[str]) -> None:
+    """Announce export privilege-loss risks on stderr."""
+    if not warnings:
+        return
+    print(
+        f"!! WARNING: ACL export found {len(warnings)} downgrade-risk item(s):",
+        file=sys.stderr,
+    )
+    for warning in warnings:
+        print(f"  - {warning}", file=sys.stderr)
+    print(
+        "Applying this file as-is may downgrade existing users. "
+        "See the '# not captured:' notes in the generated YAML.",
+        file=sys.stderr,
+    )
 
 
 def _confirm_apply() -> bool:

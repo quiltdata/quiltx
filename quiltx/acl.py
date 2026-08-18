@@ -25,6 +25,7 @@ USER_ENTRY_KEYS = {"role", "extra_roles", "admin"}
 POLICY_ROLE_NAME_KEY = "name"
 CONFIG_POLICIES_KEY = "config.policies"
 CONFIG_SYNTHESIZE_KEY = "config.synthesize"
+CONFIG_UNMANAGED_KEY = "config.unmanaged"
 EVERYONE_GROUP = "Everyone"
 REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
 REGISTRY_MANAGED_ROLE_EXCLUSIONS = frozenset({"Canary"})
@@ -51,6 +52,14 @@ class AclStaticRole:
     read_write: list[str] = field(default_factory=list)
     default_role: bool = False
     is_admin: bool = False
+    unmanaged: bool = False
+    """Reference an existing unmanaged (catalog built-in) role by name only.
+
+    Unmanaged roles are IAM-role-backed and their permissions live outside the
+    registry, so quiltx never creates, updates, or deletes them. Declaring one
+    keeps it addressable from ``users:``, SSO selectors, and
+    ``config.default_role`` so a captured ACL stays replayable.
+    """
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,45 @@ class AclUserUpdate:
     admin_changed: bool = False
 
 
+@dataclass(frozen=True)
+class UserAccess:
+    """A user's effective access, as far as it can be determined."""
+
+    primary_role: str | None
+    extra_roles: tuple[str, ...] = ()
+    admin: bool = False
+    permissions: dict[str, str] = field(default_factory=dict)
+    opaque_roles: tuple[str, ...] = ()
+    """Roles whose bucket permissions cannot be enumerated from the registry."""
+
+    @property
+    def roles(self) -> tuple[str, ...]:
+        primary = () if self.primary_role is None else (self.primary_role,)
+        return (*primary, *self.extra_roles)
+
+
+@dataclass(frozen=True)
+class UserDowngrade:
+    """One existing user whose effective access would shrink."""
+
+    name: str
+    before: UserAccess
+    after: UserAccess
+    lost_roles: tuple[str, ...] = ()
+    admin_lost: bool = False
+    lost_permissions: tuple[str, ...] = ()
+    causes: tuple[str, ...] = ()
+    undetermined: tuple[str, ...] = ()
+
+    def is_downgrade(self) -> bool:
+        """True when access is reduced or cannot be shown to be preserved.
+
+        Losing a role name is not by itself a downgrade: renames and
+        reassignments that keep the same effective permissions are neutral.
+        """
+        return bool(self.lost_permissions or self.admin_lost or self.undetermined)
+
+
 @dataclass
 class AclDiff:
     buckets_to_add: list[str] = field(default_factory=list)
@@ -120,6 +168,7 @@ class AclDiff:
     warnings: list[str] = field(default_factory=list)
     users_to_update: list[AclUserUpdate] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
+    user_downgrades: list[UserDowngrade] = field(default_factory=list)
 
     def has_changes(self) -> bool:
         return any(
@@ -155,6 +204,7 @@ class _ResolvedStaticRole:
     is_admin: bool
     default_role: bool
     inline_policy_title: str | None
+    unmanaged: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,6 +233,11 @@ class _DesiredAclState:
     sso_mappings: list[_SsoMapping]
     default_role_name: str | None
     warnings: list[str] = field(default_factory=list)
+    unmanaged_role_names: frozenset[str] = frozenset()
+
+    def all_role_names(self) -> set[str]:
+        """Every role the config addresses, managed or reference-only."""
+        return set(self.role_updates) | set(self.unmanaged_role_names)
 
 
 def format_exception(exc: Exception) -> str:
@@ -207,8 +262,13 @@ def format_exception(exc: Exception) -> str:
 
 
 def parse_acl_config(path: str | Path) -> AclConfig:
-    """Load and validate ACL configuration from YAML."""
-    raw = yaml.safe_load(Path(path).read_text()) or {}
+    """Load and validate ACL configuration from a YAML file."""
+    return parse_acl_config_text(Path(path).read_text())
+
+
+def parse_acl_config_text(text: str) -> AclConfig:
+    """Load and validate ACL configuration from YAML text."""
+    raw = yaml.safe_load(text) or {}
     if not isinstance(raw, dict):
         raise ValueError("ACL config must be a mapping at the top level")
 
@@ -311,6 +371,21 @@ def parse_acl_config(path: str | Path) -> AclConfig:
                 f"roles.{name}.config.is_admin cannot be true without an "
                 "sso.<claim> selector"
             )
+        unmanaged = value.get(CONFIG_UNMANAGED_KEY, False)
+        if not isinstance(unmanaged, bool):
+            raise ValueError(f"roles.{name}.{CONFIG_UNMANAGED_KEY} must be a boolean")
+        if unmanaged:
+            forbidden = sorted(
+                key
+                for key in (CONFIG_POLICIES_KEY, "buckets.read", "buckets.read_write")
+                if value.get(key)
+            )
+            if forbidden:
+                raise ValueError(
+                    f"roles.{name} cannot set {', '.join(forbidden)} when "
+                    f"{CONFIG_UNMANAGED_KEY} is true: an unmanaged role's "
+                    "permissions live outside the registry and are never modified"
+                )
         policy_refs = _coerce_string_list(
             value.get(CONFIG_POLICIES_KEY, []), f"roles.{name}.{CONFIG_POLICIES_KEY}"
         )
@@ -331,6 +406,7 @@ def parse_acl_config(path: str | Path) -> AclConfig:
             read_write=entry.read_write,
             default_role=entry.default_role,
             is_admin=bool(entry.is_admin),
+            unmanaged=unmanaged,
         )
         role_names.add(name)
         if entry.default_role:
@@ -480,7 +556,21 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         and title not in REGISTRY_MANAGED_POLICY_EXCLUSIONS
     )
 
-    desired_role_names = set(desired_state.role_updates)
+    desired_role_names = desired_state.all_role_names()
+    for name in sorted(desired_state.unmanaged_role_names):
+        if name in current.unmanaged_roles:
+            continue
+        if name in current.managed_roles:
+            diff.warnings.append(
+                f"Role '{name}' is declared {CONFIG_UNMANAGED_KEY}: true but exists "
+                "as a managed role; leaving it unchanged."
+            )
+        else:
+            diff.warnings.append(
+                f"Role '{name}' is declared {CONFIG_UNMANAGED_KEY}: true but does "
+                "not exist on the server; unmanaged roles are never created."
+            )
+
     for name, role_update in desired_state.role_updates.items():
         if name in current.unmanaged_roles:
             diff.warnings.append(
@@ -520,6 +610,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     available_user_roles = set(desired_state.role_updates) | set(
         current.unmanaged_roles
     )
+    applied_user_names: set[str] = set()
     for name, configured_user in desired.users.items():
         requested_roles = {configured_user.role, *configured_user.extra_roles}
         unknown_roles = sorted(requested_roles - available_user_roles)
@@ -535,6 +626,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
                 f"Configured user '{name}' does not exist on the server; skipping."
             )
             continue
+        applied_user_names.add(name)
         current_role = current_user.role.name if current_user.role else None
         current_extras = tuple(
             role.name for role in (current_user.extra_roles or []) if role is not None
@@ -566,7 +658,409 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         diff.sso_is_create = current.sso_config_text is None
         diff.sso_needs_update = True
 
+    diff.user_downgrades = analyze_user_downgrades(
+        desired,
+        current,
+        diff,
+        desired_state=desired_state,
+        applied_user_names=applied_user_names,
+    )
+
     return diff
+
+
+_PERMISSION_RANK = {"READ": 1, "READ_WRITE": 2}
+
+
+def analyze_user_downgrades(
+    desired: AclConfig,
+    current: CurrentState,
+    diff: AclDiff,
+    *,
+    desired_state: _DesiredAclState | None = None,
+    applied_user_names: set[str] | None = None,
+) -> list[UserDowngrade]:
+    """Return existing users whose effective access *diff* would reduce.
+
+    Effective access is composed role -> policy -> bucket permission, so
+    reductions caused indirectly by policy edits, role deletion, SSO mapping
+    replacement, or a default-role change are detected alongside explicit
+    ``users:`` entries. Roles whose permissions the registry cannot enumerate
+    (unmanaged, IAM-backed) are treated as opaque: losing one is reported as
+    undetermined rather than assumed harmless.
+    """
+    state = desired_state or _build_desired_acl_state(desired)
+    if applied_user_names is None:
+        applied_user_names = set(desired.users) & {
+            user.name for user in current.users if getattr(user, "name", None)
+        }
+    downgrades: list[UserDowngrade] = []
+    for user in sorted(current.users, key=lambda item: str(getattr(item, "name", ""))):
+        downgrade = _analyze_user_downgrade(
+            user, desired, current, diff, state, applied_user_names
+        )
+        if downgrade is not None and downgrade.is_downgrade():
+            downgrades.append(downgrade)
+    return downgrades
+
+
+def format_user_downgrade(downgrade: UserDowngrade) -> list[str]:
+    """Render a multi-line before/after summary for one downgraded user."""
+    before, after = downgrade.before, downgrade.after
+    lines = [
+        f"user {downgrade.name} would lose access",
+        f"    primary role: {before.primary_role or '(none)'} "
+        f"-> {after.primary_role or '(none)'}",
+    ]
+    if before.extra_roles or after.extra_roles:
+        lines.append(
+            f"    extra roles: {', '.join(before.extra_roles) or '(none)'} "
+            f"-> {', '.join(after.extra_roles) or '(none)'}"
+        )
+    if downgrade.admin_lost:
+        lines.append(
+            f"    admin: {str(before.admin).lower()} -> {str(after.admin).lower()}"
+        )
+    if downgrade.lost_permissions:
+        lines.append(f"    lost permissions: {', '.join(downgrade.lost_permissions)}")
+    lines.extend(f"    cause: {cause}" for cause in downgrade.causes)
+    lines.extend(f"    undetermined: {item}" for item in downgrade.undetermined)
+    return lines
+
+
+def summarize_user_downgrade(downgrade: UserDowngrade) -> str:
+    """Render a one-line summary for stderr and generated YAML comments."""
+    parts: list[str] = []
+    if downgrade.lost_permissions:
+        parts.append("loses " + ", ".join(downgrade.lost_permissions))
+    if downgrade.admin_lost:
+        parts.append("loses admin")
+    if downgrade.lost_roles:
+        parts.append("loses role(s) " + ", ".join(downgrade.lost_roles))
+    parts.extend(downgrade.undetermined)
+    detail = "; ".join(parts) or "effective access could not be shown to be preserved"
+    return f"user {downgrade.name!r}: {detail}"
+
+
+def print_user_downgrades(
+    downgrades: list[UserDowngrade], *, stream: Any = None
+) -> None:
+    """Print a prominent, user-specific downgrade block for each entry."""
+    out = sys.stdout if stream is None else stream
+    for downgrade in downgrades:
+        head, *rest = format_user_downgrade(downgrade)
+        print(f"!! DOWNGRADE: {head}", file=out)
+        for line in rest:
+            print(line, file=out)
+
+
+def export_downgrade_warnings(current: CurrentState, yaml_text: str) -> list[str]:
+    """Warn when replaying generated ACL YAML would not preserve access.
+
+    The generated document is re-parsed and diffed against the state it was
+    captured from, so any assignment or mapping the export could not represent
+    surfaces as a concrete, per-user warning.
+    """
+    try:
+        replayed = parse_acl_config_text(yaml_text)
+        diff = compute_diff(replayed, current)
+    except Exception as exc:
+        return [
+            "the generated ACL is not valid input for `quiltx catalog acl` "
+            f"({format_exception(exc)}); replaying it may change effective access"
+        ]
+    return [summarize_user_downgrade(item) for item in diff.user_downgrades]
+
+
+def _analyze_user_downgrade(
+    user: Any,
+    desired: AclConfig,
+    current: CurrentState,
+    diff: AclDiff,
+    state: _DesiredAclState,
+    applied_user_names: set[str],
+) -> UserDowngrade | None:
+    name = getattr(user, "name", None)
+    if not name:
+        return None
+    before = _current_user_access(user, current)
+    if not before.roles and not before.admin:
+        return None
+
+    after, causes, undetermined = _projected_user_access(
+        user, before, desired, current, diff, state, applied_user_names
+    )
+    after_roles = set(after.roles)
+    lost_roles = tuple(role for role in before.roles if role not in after_roles)
+    lost_permissions = tuple(
+        f"{level}:{bucket}"
+        for bucket, level in sorted(before.permissions.items())
+        if _PERMISSION_RANK.get(after.permissions.get(bucket, ""), 0)
+        < _PERMISSION_RANK.get(level, 0)
+    )
+    admin_lost = before.admin and not after.admin
+
+    notes = list(undetermined)
+    for role in before.opaque_roles:
+        if role not in after_roles:
+            notes.append(
+                f"role {role!r} is unmanaged, so the access it granted cannot "
+                "be enumerated or compared"
+            )
+    if lost_permissions or admin_lost or notes:
+        for role in after.opaque_roles:
+            if role not in set(before.roles):
+                notes.append(
+                    f"replacement role {role!r} is unmanaged, so whether it "
+                    "restores that access cannot be determined"
+                )
+
+    return UserDowngrade(
+        name=name,
+        before=before,
+        after=after,
+        lost_roles=lost_roles,
+        admin_lost=admin_lost,
+        lost_permissions=lost_permissions,
+        causes=tuple(dict.fromkeys(causes)),
+        undetermined=tuple(dict.fromkeys(notes)),
+    )
+
+
+def _current_user_access(user: Any, current: CurrentState) -> UserAccess:
+    primary = getattr(getattr(user, "role", None), "name", None)
+    extras = tuple(
+        role.name
+        for role in (getattr(user, "extra_roles", None) or [])
+        if role is not None and role.name != primary
+    )
+    permissions: dict[str, str] = {}
+    opaque: list[str] = []
+    for role_name in ((primary,) if primary else ()) + extras:
+        role_permissions, known = _current_role_permissions(role_name, current)
+        _merge_permissions(permissions, role_permissions)
+        if not known:
+            opaque.append(role_name)
+    return UserAccess(
+        primary_role=primary,
+        extra_roles=extras,
+        admin=bool(getattr(user, "is_admin", False)),
+        permissions=permissions,
+        opaque_roles=tuple(dict.fromkeys(opaque)),
+    )
+
+
+def _projected_user_access(
+    user: Any,
+    before: UserAccess,
+    desired: AclConfig,
+    current: CurrentState,
+    diff: AclDiff,
+    state: _DesiredAclState,
+    applied_user_names: set[str],
+) -> tuple[UserAccess, list[str], list[str]]:
+    name = user.name
+    causes: list[str] = []
+    undetermined: list[str] = []
+    configured = desired.users.get(name) if name in applied_user_names else None
+
+    if configured is not None:
+        roles = [configured.role, *configured.extra_roles]
+        causes.append("the users: entry reassigns roles")
+    else:
+        deleted = set(diff.roles_to_delete)
+        roles = [role for role in before.roles if role not in deleted]
+        causes.extend(
+            f"role {role!r} would be deleted"
+            for role in before.roles
+            if role in deleted
+        )
+        # SSO-only users are re-mapped on every login, so a replacement SSO
+        # document decides what they hold next. Only worth analysing when the
+        # document actually changes.
+        if (
+            getattr(user, "is_sso_only", False)
+            and state.sso_mappings
+            and diff.sso_needs_update
+        ):
+            desired_selectors = _selectors_by_role(state.sso_mappings)
+            dropped = [role for role in roles if role not in desired_selectors]
+            causes.extend(
+                f"no SSO mapping grants role {role!r}; an SSO-only user loses it "
+                "at next login"
+                for role in dropped
+            )
+            roles = [role for role in roles if role in desired_selectors]
+            # A role can survive with different selectors. The registry does not
+            # expose a user's IdP claims, so whether this user still matches the
+            # new selectors is unknowable here.
+            current_selectors = _current_selectors_by_role(current.sso_config_text)
+            undetermined.extend(
+                f"SSO selectors for role {role!r} change from "
+                f"{_format_selectors(current_selectors.get(role, set()))} to "
+                f"{_format_selectors(desired_selectors[role])}; whether this user "
+                "still matches them cannot be determined from the registry"
+                for role in roles
+                if current_selectors.get(role, set()) != desired_selectors[role]
+            )
+        if not roles:
+            fallback = state.default_role_name or current.default_role_name
+            if fallback is None:
+                causes.append("no role would remain and no default role is configured")
+            else:
+                causes.append(f"falls back to the default role {fallback!r}")
+                roles = [fallback]
+
+    primary = roles[0] if roles else None
+    extras = tuple(dict.fromkeys(role for role in roles[1:] if role != primary))
+
+    admin = before.admin
+    if configured is not None and configured.admin is not None:
+        admin = configured.admin
+        if before.admin and not admin:
+            causes.append("the users: entry sets admin: false")
+    else:
+        vetoed = sorted(
+            {
+                mapping.role_name
+                for mapping in state.sso_mappings
+                if mapping.admin is False
+            }
+            & {role for role in roles}
+        )
+        if before.admin and vetoed:
+            admin = False
+            causes.append(
+                "SSO mapping for role(s) " + ", ".join(vetoed) + " vetoes admin"
+            )
+
+    permissions: dict[str, str] = {}
+    opaque: list[str] = []
+    for role_name in ((primary,) if primary else ()) + extras:
+        role_permissions, known = _desired_role_permissions(role_name, state, current)
+        _merge_permissions(permissions, role_permissions)
+        if not known:
+            opaque.append(role_name)
+
+    after = UserAccess(
+        primary_role=primary,
+        extra_roles=extras,
+        admin=admin,
+        permissions=permissions,
+        opaque_roles=tuple(dict.fromkeys(opaque)),
+    )
+    return after, causes, undetermined
+
+
+def _current_role_permissions(
+    name: str, current: CurrentState
+) -> tuple[dict[str, str], bool]:
+    """Return (bucket -> level, permissions_are_knowable) for a server role."""
+    role = current.all_roles.get(name)
+    if role is None:
+        return {}, False
+    permissions = _permission_map(getattr(role, "permissions", None))
+    if name in current.unmanaged_roles:
+        # IAM-backed: the registry does not expose the bucket grants.
+        return permissions, False
+    known = True
+    for summary in getattr(role, "policies", None) or []:
+        policy = current.all_policies.get(summary.title)
+        if policy is None:
+            known = False
+            continue
+        _merge_permissions(
+            permissions, _permission_map(getattr(policy, "permissions", None))
+        )
+    return permissions, known
+
+
+def _desired_role_permissions(
+    name: str, state: _DesiredAclState, current: CurrentState
+) -> tuple[dict[str, str], bool]:
+    update = state.role_updates.get(name)
+    if update is None:
+        # Not managed by this config: an unmanaged reference, or a server role
+        # the config leaves alone.
+        server_permissions, server_known = _current_role_permissions(name, current)
+        if name in state.unmanaged_role_names:
+            return server_permissions, False
+        return server_permissions, server_known
+    permissions: dict[str, str] = {}
+    known = True
+    for title in update.policy_titles:
+        policy_update = state.policy_updates.get(title)
+        if policy_update is None:
+            known = False
+            continue
+        _merge_permissions(permissions, _permission_map(policy_update.permissions))
+    return permissions, known
+
+
+def _selectors_by_role(
+    mappings: list[_SsoMapping],
+) -> dict[str, set[tuple[str, str]]]:
+    selectors: dict[str, set[tuple[str, str]]] = {}
+    for mapping in mappings:
+        selectors.setdefault(mapping.role_name, set()).add(
+            (mapping.claim, mapping.value)
+        )
+    return selectors
+
+
+def _current_selectors_by_role(
+    sso_config_text: str | None,
+) -> dict[str, set[tuple[str, str]]]:
+    """Decode the server SSO document into role -> {(claim, value)}.
+
+    Mappings quiltx cannot decode are skipped, which makes a role look less
+    granted than it is; the comparison that uses this therefore errs toward
+    reporting the outcome as undetermined.
+    """
+    if not sso_config_text:
+        return {}
+    try:
+        raw = yaml.safe_load(sso_config_text) or {}
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    selectors: dict[str, set[tuple[str, str]]] = {}
+    for mapping in raw.get("mappings") or []:
+        decoded = _decode_acl_sso_mapping(mapping)
+        if decoded is None:
+            continue
+        role_name, claim, value, _admin = decoded
+        selectors.setdefault(role_name, set()).add((claim, value))
+    return selectors
+
+
+def _format_selectors(selectors: set[tuple[str, str]]) -> str:
+    if not selectors:
+        return "(none)"
+    return ", ".join(f"sso.{claim}={value}" for claim, value in sorted(selectors))
+
+
+def _permission_map(permissions: Any) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for permission in permissions or []:
+        level = str(getattr(permission, "level", "")).split(".")[-1]
+        if level not in _PERMISSION_RANK:
+            continue
+        bucket = getattr(permission, "bucket", None)
+        if not bucket:
+            continue
+        existing = result.get(bucket)
+        if existing is None or _PERMISSION_RANK[existing] < _PERMISSION_RANK[level]:
+            result[bucket] = level
+    return result
+
+
+def _merge_permissions(target: dict[str, str], source: dict[str, str]) -> None:
+    for bucket, level in source.items():
+        existing = target.get(bucket)
+        if existing is None or _PERMISSION_RANK[existing] < _PERMISSION_RANK[level]:
+            target[bucket] = level
 
 
 def build_sso_config(config: AclConfig) -> str | None:
@@ -614,6 +1108,7 @@ def print_diff(
     """Print a readable summary of ACL changes."""
     if verbose and desired is not None:
         _print_verbose_state(diff, desired, current)
+        print_user_downgrades(diff.user_downgrades)
         for notice in diff.notices:
             print(f"NONFATAL: {notice}")
         for warning in diff.warnings:
@@ -656,6 +1151,8 @@ def print_diff(
         if verbose and diff.sso_config_text:
             for line in diff.sso_config_text.rstrip().splitlines():
                 print(f"    {line}")
+
+    print_user_downgrades(diff.user_downgrades)
 
     for notice in diff.notices:
         print(f"NONFATAL: {notice}")
@@ -756,12 +1253,33 @@ def current_state_as_acl_yaml(
     captured_on: str,
     omit_default_users: bool = False,
 ) -> str:
-    """Return current state as replayable ACL YAML with capture metadata.
+    """Return current state as replayable ACL YAML with capture metadata."""
+    exported, _warnings = current_state_as_acl_yaml_with_warnings(
+        current,
+        catalog=catalog,
+        captured_on=captured_on,
+        omit_default_users=omit_default_users,
+    )
+    return exported
+
+
+def current_state_as_acl_yaml_with_warnings(
+    current: CurrentState,
+    *,
+    catalog: str,
+    captured_on: str,
+    omit_default_users: bool = False,
+) -> tuple[str, list[str]]:
+    """Return replayable ACL YAML and its already-computed downgrade risks.
 
     Managed policies are emitted as reusable policies and managed roles as static
     roles. This avoids inventing ladder semantics while preserving the server's
     existing policy-to-role composition. Generated ``__inline`` policies are
     folded back into their owning role.
+
+    Use this form when the caller must also report downgrade risks (for example,
+    the CLI writes them to stderr). It computes the parse+diff analysis once and
+    returns the same warnings embedded in the YAML's ``# not captured:`` notes.
     """
     notes: list[str] = []
     role_entries: dict[str, dict[str, Any]] = {}
@@ -830,6 +1348,19 @@ def current_state_as_acl_yaml(
             policy_entry["buckets.read_write"] = read_write
         policy_entries[title] = policy_entry
 
+    # Existing unmanaged roles (the catalog's built-in defaults) are emitted as
+    # reference-only entries so users, SSO selectors, and the default role that
+    # point at them survive a capture/replay round trip. They are always
+    # emitted, even when nothing currently references them.
+    for name in sorted(current.unmanaged_roles):
+        if name in REGISTRY_MANAGED_ROLE_EXCLUSIONS:
+            notes.append(f"registry-managed role {name!r}")
+            continue
+        if name in role_entries:
+            notes.append(f"unmanaged role {name!r} collides with a managed role")
+            continue
+        role_entries[name] = {CONFIG_UNMANAGED_KEY: True}
+
     sso_notes, selectors, admin_roles, sso_default_role = _acl_sso_fields(
         current, set(role_entries)
     )
@@ -889,8 +1420,6 @@ def current_state_as_acl_yaml(
         user_entry["admin"] = is_admin
         user_entries[user.name] = user_entry
 
-    for name in sorted(current.unmanaged_roles):
-        notes.append(f"unmanaged role {name!r}")
     for title in sorted(set(current.unmanaged_policies) - referenced_policy_names):
         notes.append(f"unmanaged policy {title!r}")
     for name in sorted(set(current.managed_roles) & REGISTRY_MANAGED_ROLE_EXCLUSIONS):
@@ -910,10 +1439,13 @@ def current_state_as_acl_yaml(
         f"# captured: {captured_on}",
         yaml.safe_dump(payload, sort_keys=False).rstrip(),
     ]
+    risk_warnings = export_downgrade_warnings(current, "\n".join(lines))
+    for warning in risk_warnings:
+        notes.append(f"DOWNGRADE RISK: {warning}")
     if notes:
         lines.append("# not captured:")
         lines.extend(f"# - {note}" for note in _dedupe_preserve_order(notes))
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", risk_warnings
 
 
 def _acl_bucket_fields(policy: Any) -> tuple[list[str], list[str], list[str]]:
@@ -2307,7 +2839,38 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
             default_role_name = synthesized_role.name
 
     static_roles: list[_ResolvedStaticRole] = []
+    unmanaged_role_names: set[str] = set()
     for role in config.roles.values():
+        if role.unmanaged:
+            # Reference only: no policies, no role_updates entry, so the role is
+            # never created, updated, or deleted. SSO selectors and the default
+            # role may still point at it.
+            unmanaged_role_names.add(role.name)
+            static_roles.append(
+                _ResolvedStaticRole(
+                    name=role.name,
+                    sso=role.sso,
+                    policy_titles=[],
+                    is_admin=role.is_admin,
+                    default_role=role.default_role,
+                    inline_policy_title=None,
+                    unmanaged=True,
+                )
+            )
+            for claim, values in role.sso.items():
+                for value in values:
+                    sso_mappings.append(
+                        _SsoMapping(
+                            claim=claim,
+                            value=value,
+                            role_name=role.name,
+                            admin=True if role.is_admin else None,
+                        )
+                    )
+            if role.default_role:
+                default_role_name = role.name
+            continue
+
         policy_titles = list(role.policies)
         inline_policy_title: str | None = None
         if role.read or role.read_write:
@@ -2350,6 +2913,7 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         sso_mappings=sso_mappings,
         default_role_name=default_role_name,
         warnings=warnings,
+        unmanaged_role_names=frozenset(unmanaged_role_names),
     )
 
 
@@ -2388,7 +2952,7 @@ def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) 
     if section == "policies":
         allowed_keys.update({POLICY_ROLE_NAME_KEY, CONFIG_SYNTHESIZE_KEY})
     if section == "roles":
-        allowed_keys.add(CONFIG_POLICIES_KEY)
+        allowed_keys.update({CONFIG_POLICIES_KEY, CONFIG_UNMANAGED_KEY})
     unknown_keys = sorted(
         key for key in value if key not in allowed_keys and not key.startswith("sso.")
     )
@@ -2399,7 +2963,10 @@ def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) 
         "and any `sso.<claim>` selector."
     )
     if section == "roles":
-        hint += f" Explicit roles also support the magic {CONFIG_POLICIES_KEY} key."
+        hint += (
+            f" Explicit roles also support the magic {CONFIG_POLICIES_KEY} and "
+            f"{CONFIG_UNMANAGED_KEY} keys."
+        )
     if section == "policies" and CONFIG_POLICIES_KEY in unknown_keys:
         hint += (
             f" {CONFIG_POLICIES_KEY} is only valid under top-level 'roles:' "

@@ -48,6 +48,20 @@ Uses the flat `policies:` / `roles:` YAML format documented in
 [`stack-acl.example.yaml`](stack-acl.example.yaml).
 The old `bucket_policies:` / `roles:` / `sso:` format is no longer supported.
 
+`config.unmanaged: true` references an existing IAM-backed role by name. Such
+roles are never created, updated, or deleted; they only stay addressable from
+`users:`, SSO selectors, and `config.default_role`. `--yaml` always emits an
+entry for every unmanaged role it finds so captures replay cleanly.
+
+`quiltx.acl.analyze_user_downgrades` compares each user's effective access
+(roles, admin, composed bucket permissions) before and after a diff.
+`--dry-run` prints a `!! DOWNGRADE` block per affected user; `--yaml` re-parses
+its own output, diffs it against the captured state, and reports risks both in
+the `# not captured:` notes and on stderr. Opaque (unmanaged) roles and roles
+kept under a changed SSO selector are reported as undetermined; SSO and
+default-role effects apply to SSO-only users, and only when the SSO document
+itself changes.
+
 ### Config API (`quiltx.config`)
 
 Functions for catalog configuration and credentials. Use `from quiltx.config import` for programmatic access.

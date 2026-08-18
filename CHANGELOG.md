@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-08-17
+
+### Added
+
+- ACL configs can reference the catalog's built-in unmanaged roles with
+  `config.unmanaged: true`, and `quiltx catalog acl --yaml` always emits an
+  entry for every unmanaged role it finds — including the two built-in defaults
+  — even when no user or SSO selector references them
+  ([#88](https://github.com/quiltdata/quiltx/issues/88)). The roles are
+  discovered and referenced by name only: they stay addressable from `users:`,
+  `sso.<claim>` selectors, and `config.default_role`, while reapplying the
+  generated ACL never recreates, converts, updates, or deletes them. Declaring
+  a role unmanaged also protects a same-named managed role from deletion, and
+  `config.policies`/`buckets.*` are rejected on unmanaged entries because those
+  grants live in IAM. Users, SSO mappings, and the settings default role that
+  point at an unmanaged role now round-trip instead of landing in
+  `# not captured`.
+- `quiltx catalog acl` warns when an export or reconciliation would reduce an
+  existing user's effective access
+  ([#89](https://github.com/quiltdata/quiltx/issues/89)). Access is composed
+  role -> policy -> bucket permission, so `--dry-run` prints a per-user
+  `!! DOWNGRADE` block with before/after primary role, extra roles, admin
+  status, and lost permissions, covering reductions caused indirectly by a
+  narrowed policy, a deleted role, a replaced SSO mapping, or a changed default
+  role. `--yaml` re-parses its own output and diffs it against the captured
+  state, listing affected users in the `# not captured:` notes and repeating
+  them on stderr so the warning survives `--yaml > file`. Neutral role renames
+  and privilege increases are not flagged; permissions granted by an
+  IAM-backed unmanaged role, and roles that survive under a changed SSO
+  selector, are reported as undetermined rather than guessed, since the
+  registry exposes neither IAM grants nor a user's IdP claims.
+  New API: `quiltx.acl.analyze_user_downgrades`,
+  `current_state_as_acl_yaml_with_warnings`, `export_downgrade_warnings`,
+  `parse_acl_config_text`, `UserAccess`, and `UserDowngrade`.
+
 ## [0.18.2] - 2026-08-17
 
 ### Added
