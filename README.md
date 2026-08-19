@@ -219,11 +219,17 @@ roles:
 Referenced this way, a role stays addressable from `users:`, `sso.<claim>`
 selectors, and `config.default_role` while quiltx never creates, updates, or
 deletes it. Because their bucket grants live in IAM rather than the registry,
-unmanaged roles cannot carry `config.policies`, `buckets.read`, or
-`buckets.read_write`.
+unmanaged roles cannot carry `config.policies` or `buckets.*` grants. The two
+QuiltStack built-ins are the exception for registration references:
+`ReadQuiltBucket.buckets.read` and
+`ReadWriteQuiltBucket.buckets.read_write` may list buckets that the ACL should
+register, but those fields never modify the roles' IAM permissions. Other
+bucket fields and bucket fields on custom unmanaged roles remain invalid.
 
-`--yaml` always emits these entries for the unmanaged roles it finds, even when
-no user or selector currently references them, so a capture stays replayable.
+`--yaml` always emits entries for the unmanaged roles it finds, even when no
+user or selector currently references them. Registered buckets not already
+represented by managed permissions are listed on both built-in roles, so a
+capture can register them when replayed without duplicating explicit grants.
 
 ### Downgrade warnings
 

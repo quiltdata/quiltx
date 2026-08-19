@@ -47,6 +47,9 @@ roles:
   # Reference a catalog built-in (IAM-backed) role by name. quiltx never
   # creates, updates, or deletes it; the entry only keeps it addressable from
   # `users:`, sso selectors, and config.default_role. Unmanaged roles cannot
-  # carry config.policies or buckets.* grants.
+  # carry config.policies or buckets.* grants. QuiltStack's two built-ins may
+  # carry their matching bucket field as a registration-only reference:
+  # ReadQuiltBucket.buckets.read or ReadWriteQuiltBucket.buckets.read_write.
+  # Those fields do not modify IAM permissions.
   ReadWriteQuiltBucket:
     config.unmanaged:   true

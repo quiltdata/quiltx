@@ -1948,6 +1948,9 @@ def test_acl_tool_no_config_shows_current_state(monkeypatch, capsys) -> None:
 
 def test_acl_tool_json_exports_valid_json_without_header(monkeypatch, capsys) -> None:
     current = replace(_empty_current_state(), default_role_name="readers")
+    current.buckets["orphan-bucket"] = FakeBucket(
+        name="orphan-bucket", title="Orphan bucket"
+    )
     role = FakeRole(id="role-1", name="readers", policies=[], permissions=[])
     current.managed_roles[role.name] = role
     current.all_roles[role.name] = role
@@ -1977,6 +1980,7 @@ def test_acl_tool_json_exports_valid_json_without_header(monkeypatch, capsys) ->
     assert result == 0
     assert payload["catalog"] == "catalog"
     assert payload["default_role"] == "readers"
+    assert payload["buckets"] == [{"name": "orphan-bucket", "title": "Orphan bucket"}]
     assert payload["users"] == [
         {
             "name": "alice",
@@ -2783,44 +2787,82 @@ def _with_unmanaged_roles(current: acl.CurrentState, *names: str) -> acl.Current
     return current
 
 
-def test_current_state_yaml_emits_unused_builtin_unmanaged_roles() -> None:
-    """Both built-in unmanaged roles are captured even when nothing uses them."""
+def test_current_state_yaml_preserves_only_unrepresented_buckets_on_builtins() -> None:
+    """Built-in registration references omit buckets captured by managed grants."""
+    config = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(
+                name="shared",
+                read=["policy-bucket"],
+                synthesize=False,
+            )
+        ],
+        roles={
+            "Analysts": acl.AclStaticRole(
+                name="Analysts",
+                policies=["shared"],
+                read_write=["inline-bucket"],
+            )
+        },
+    )
     current = _with_unmanaged_roles(
-        _empty_current_state(), "ReadQuiltBucket", "ReadWriteQuiltBucket"
+        _current_state_for_config(config),
+        "ReadQuiltBucket",
+        "ReadWriteQuiltBucket",
+    )
+    current.buckets["orphan-bucket"] = FakeBucket(
+        name="orphan-bucket", title="Orphan bucket"
     )
 
     exported = acl.current_state_as_acl_yaml(
-        current, catalog="catalog", captured_on="2026-08-17"
+        current, catalog="catalog", captured_on="2026-08-19"
     )
     payload = yaml.safe_load(exported)
 
-    assert payload["roles"] == {
-        "ReadQuiltBucket": {"config.unmanaged": True},
-        "ReadWriteQuiltBucket": {"config.unmanaged": True},
+    assert payload["policies"]["shared"]["buckets.read"] == ["policy-bucket"]
+    assert payload["roles"]["Analysts"]["buckets.read_write"] == ["inline-bucket"]
+    assert payload["roles"]["ReadQuiltBucket"] == {
+        "config.unmanaged": True,
+        "buckets.read": ["orphan-bucket"],
+    }
+    assert payload["roles"]["ReadWriteQuiltBucket"] == {
+        "config.unmanaged": True,
+        "buckets.read_write": ["orphan-bucket"],
     }
     assert "not captured" not in exported
 
 
-def test_replaying_captured_unmanaged_roles_never_manages_them() -> None:
-    """Reapplying the capture leaves the built-in roles completely alone."""
+def test_replaying_captured_unmanaged_roles_only_registers_missing_buckets() -> None:
+    """Built-in bucket markers register buckets without managing the roles."""
     current = _with_unmanaged_roles(
         _empty_current_state(), "ReadQuiltBucket", "ReadWriteQuiltBucket"
     )
+    current.buckets["orphan-bucket"] = FakeBucket(
+        name="orphan-bucket", title="Orphan bucket"
+    )
     exported = acl.current_state_as_acl_yaml(
-        current, catalog="catalog", captured_on="2026-08-17"
+        current, catalog="catalog", captured_on="2026-08-19"
     )
 
     parsed = acl.parse_acl_config_text(exported)
-    diff = acl.compute_diff(parsed, current)
+    source_diff = acl.compute_diff(parsed, current)
+    target = _with_unmanaged_roles(
+        _empty_current_state(), "ReadQuiltBucket", "ReadWriteQuiltBucket"
+    )
+    target_diff = acl.compute_diff(parsed, target)
 
     assert set(parsed.roles) == {"ReadQuiltBucket", "ReadWriteQuiltBucket"}
     assert all(role.unmanaged for role in parsed.roles.values())
-    assert not diff.has_changes()
-    assert diff.roles_to_create == []
-    assert diff.roles_to_update == []
-    assert diff.roles_to_delete == []
-    assert diff.policies_to_create == []
-    assert diff.warnings == []
+    assert not source_diff.has_changes()
+    assert source_diff.warnings == []
+    assert target_diff.buckets_to_add == ["orphan-bucket"]
+    assert target_diff.roles_to_create == []
+    assert target_diff.roles_to_update == []
+    assert target_diff.roles_to_delete == []
+    assert target_diff.policies_to_create == []
+    assert target_diff.policies_to_update == []
+    assert target_diff.policies_to_delete == []
+    assert target_diff.warnings == []
 
 
 def test_current_state_yaml_captures_users_and_default_on_unmanaged_role() -> None:
@@ -2896,12 +2938,14 @@ def test_current_state_yaml_round_trips_sso_mapped_unmanaged_role() -> None:
     assert not diff.has_changes()
 
 
-def test_parse_acl_config_rejects_grants_on_unmanaged_role(tmp_path: Path) -> None:
+def test_parse_acl_config_rejects_grants_on_custom_unmanaged_role(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "acl.yml"
     path.write_text("""
 policies: {}
 roles:
-  ReadQuiltBucket:
+  CustomUnmanaged:
     config.unmanaged: true
     buckets.read: [bucket-a]
 """)
@@ -2910,7 +2954,7 @@ roles:
         acl.parse_acl_config(path)
 
     message = str(error.value)
-    assert "roles.ReadQuiltBucket cannot set buckets.read" in message
+    assert "roles.CustomUnmanaged cannot set buckets.read" in message
     assert "config.unmanaged is true" in message
 
 
