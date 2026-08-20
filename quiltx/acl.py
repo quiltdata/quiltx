@@ -29,6 +29,10 @@ CONFIG_UNMANAGED_KEY = "config.unmanaged"
 EVERYONE_GROUP = "Everyone"
 REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
 REGISTRY_MANAGED_ROLE_EXCLUSIONS = frozenset({"Canary"})
+BUILTIN_BUCKET_REGISTRATION_FIELDS = {
+    "ReadQuiltBucket": "buckets.read",
+    "ReadWriteQuiltBucket": "buckets.read_write",
+}
 
 
 @dataclass(frozen=True)
@@ -58,7 +62,9 @@ class AclStaticRole:
     Unmanaged roles are IAM-role-backed and their permissions live outside the
     registry, so quiltx never creates, updates, or deletes them. Declaring one
     keeps it addressable from ``users:``, SSO selectors, and
-    ``config.default_role`` so a captured ACL stays replayable.
+    ``config.default_role`` so a captured ACL stays replayable. The built-in
+    QuiltStack bucket roles may also carry their matching ``buckets.*`` field
+    as a registration reference; it never changes the role's IAM permissions.
     """
 
 
@@ -375,10 +381,12 @@ def parse_acl_config_text(text: str) -> AclConfig:
         if not isinstance(unmanaged, bool):
             raise ValueError(f"roles.{name}.{CONFIG_UNMANAGED_KEY} must be a boolean")
         if unmanaged:
+            allowed_registration_field = BUILTIN_BUCKET_REGISTRATION_FIELDS.get(name)
             forbidden = sorted(
                 key
                 for key in (CONFIG_POLICIES_KEY, "buckets.read", "buckets.read_write")
-                if value.get(key)
+                if key in value
+                and (key == CONFIG_POLICIES_KEY or key != allowed_registration_field)
             )
             if forbidden:
                 raise ValueError(
@@ -1284,6 +1292,7 @@ def current_state_as_acl_yaml_with_warnings(
     notes: list[str] = []
     role_entries: dict[str, dict[str, Any]] = {}
     policy_entries: dict[str, dict[str, Any]] = {}
+    represented_buckets: set[str] = set()
 
     managed_roles = {
         name: role
@@ -1306,6 +1315,8 @@ def current_state_as_acl_yaml_with_warnings(
             else:
                 read, read_write, permission_notes = _acl_bucket_fields(inline_policy)
                 notes.extend(permission_notes)
+                represented_buckets.update(read)
+                represented_buckets.update(read_write)
                 if read:
                     entry["buckets.read"] = read
                 if read_write:
@@ -1341,6 +1352,8 @@ def current_state_as_acl_yaml_with_warnings(
             continue
         read, read_write, permission_notes = _acl_bucket_fields(policy)
         notes.extend(permission_notes)
+        represented_buckets.update(read)
+        represented_buckets.update(read_write)
         policy_entry: dict[str, Any] = {CONFIG_SYNTHESIZE_KEY: False}
         if read:
             policy_entry["buckets.read"] = read
@@ -1351,7 +1364,10 @@ def current_state_as_acl_yaml_with_warnings(
     # Existing unmanaged roles (the catalog's built-in defaults) are emitted as
     # reference-only entries so users, SSO selectors, and the default role that
     # point at them survive a capture/replay round trip. They are always
-    # emitted, even when nothing currently references them.
+    # emitted, even when nothing currently references them. The matching bucket
+    # fields on QuiltStack's two built-ins preserve registration only; their IAM
+    # permissions remain unmanaged.
+    unrepresented_buckets = sorted(set(current.buckets) - represented_buckets)
     for name in sorted(current.unmanaged_roles):
         if name in REGISTRY_MANAGED_ROLE_EXCLUSIONS:
             notes.append(f"registry-managed role {name!r}")
@@ -1359,7 +1375,11 @@ def current_state_as_acl_yaml_with_warnings(
         if name in role_entries:
             notes.append(f"unmanaged role {name!r} collides with a managed role")
             continue
-        role_entries[name] = {CONFIG_UNMANAGED_KEY: True}
+        entry = {CONFIG_UNMANAGED_KEY: True}
+        registration_field = BUILTIN_BUCKET_REGISTRATION_FIELDS.get(name)
+        if registration_field is not None and unrepresented_buckets:
+            entry[registration_field] = unrepresented_buckets
+        role_entries[name] = entry
 
     sso_notes, selectors, admin_roles, sso_default_role = _acl_sso_fields(
         current, set(role_entries)

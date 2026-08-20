@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-08-19
+
+### Fixed
+
+- `quiltx catalog acl --yaml` now preserves registered buckets that have no
+  explicit managed-policy association
+  ([#97](https://github.com/quiltdata/quiltx/issues/97)). Otherwise-unrepresented
+  buckets are emitted as registration-only references on the built-in
+  `ReadQuiltBucket` and `ReadWriteQuiltBucket` roles, while buckets already
+  represented by managed policies or managed-role inline policies are not
+  duplicated. Captures remain parseable and replayable: a compatible target
+  plans only missing bucket registration, never policy changes or mutations to
+  the IAM-backed built-in roles. Custom unmanaged roles still reject
+  `buckets.*`, and `config.policies` remains invalid on every unmanaged role.
+
 ## [0.18.3] - 2026-08-17
 
 ### Added
