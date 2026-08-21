@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-20
+
+### Changed
+
+- Pin `quilt3>=8.0.0,<9` and raise `requires-python` to `>=3.10`. quiltx
+  previously declared `quilt3>=7.3.0` with no upper bound while its lockfile
+  resolved 7.3.0, so `pipx install quiltx` in deployment CI could resolve a
+  quilt3 release the project had never tested against — quilt3 8.0.0 shipped
+  2026-08-04 and dropped Python 3.9. The lockfile now resolves quilt3 8.0.0,
+  and the full suite (473 tests) passes against it on Python 3.10 and 3.14.
+- CI now runs the test suite across Python 3.10-3.14 instead of 3.14 alone, so
+  the supported range is verified rather than assumed. Linting and type
+  checking run once in a separate job.
+
 ## [0.18.4] - 2026-08-19
 
 ### Fixed
