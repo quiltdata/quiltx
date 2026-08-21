@@ -1,9 +1,9 @@
 [project]
 name = "quiltx"
-version = "0.18.4"
+version = "0.19.0"
 description = "Unified toolkit for Quilt workflows."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
   { name = "Quiltx Contributors" }
@@ -17,7 +17,7 @@ classifiers = [
 dependencies = [
   "keyring>=24.0",
   "pyyaml",
-  "quilt3>=7.3.0",
+  "quilt3>=8.0.0,<9",
   "rich"
 ]
 
