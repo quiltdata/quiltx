@@ -47,7 +47,7 @@ class Catalog(CatalogContext):
     # API-path API key passed via Catalog.from_dns(api_key=...).
     # Used as the first step of the API resolver ladder; never set on the CLI path.
     _api_key: str | None = field(default=None, init=False, repr=False)
-    # ContextVar token returned by bind_active_catalog; reset on __exit__.
+    # quilt3 resolver token returned by bind_active_catalog; reset on __exit__.
     _bind_token: Any = field(default=None, init=False, repr=False)
     # True after a successful ensure_auth(); short-circuits redundant
     # lock/login work on every .admin access. Cleared by skip_keyring=True
@@ -74,8 +74,8 @@ class Catalog(CatalogContext):
 
     @property
     def admin(self) -> AdminClients:
-        # ensure_auth() is a no-op if auth=False was set; when active it binds
-        # quilt3's global state to this catalog before we access admin modules.
+        # ensure_auth() is a no-op if auth=False was set; when active it scopes
+        # quilt3's registry resolver to this catalog before admin calls.
         self.ensure_auth()
         if self._admin is None:
             from quiltx.quilt3_facade import admin_modules
@@ -121,8 +121,9 @@ class Catalog(CatalogContext):
 
         Per spec [05 §5] / [06 §3.1]:
         1. Resolve a single API key from the resolver ladder.
-        2. Bind catalog URL via ContextVar override (no config.yml write).
-        3. Call login_with_api_key().
+        2. Bind the resolved registry through quilt3's supported context API
+           (no config.yml write).
+        3. Bind the API key explicitly to that registry.
 
         ``skip_keyring`` is set by the retry envelope after an auth failure
         so the resolver re-prompts instead of replaying the bad keyring entry
@@ -131,19 +132,15 @@ class Catalog(CatalogContext):
         if not self.auth_required:
             return
 
-        # Idempotency guard: avoid redundant lock acquisitions and
-        # login_with_api_key calls on repeated .admin accesses (e.g.
+        # Idempotency guard: avoid redundant resolver and login calls on
+        # repeated .admin accesses (e.g.
         # acl.fetch_current_state hits .admin five times). The retry path
         # passes skip_keyring=True, which we treat as a forced re-auth.
         if self._authenticated and not skip_keyring:
             return
 
         from quiltx.auth import CredentialError, resolve_api, resolve_cli
-        from quiltx.quilt3_facade import (
-            _QUILT3_LOCK,
-            bind_active_catalog,
-            login_with_api_key,
-        )
+        from quiltx.quilt3_facade import bind_active_catalog, login_with_api_key
 
         if args is not None:
             try:
@@ -160,12 +157,11 @@ class Catalog(CatalogContext):
             except CredentialError as exc:
                 raise ValueError(str(exc)) from exc
 
-        with _QUILT3_LOCK:
+        if self._bind_token is None:
             token = bind_active_catalog(self.catalog_url)
-            if self._bind_token is None:
-                object.__setattr__(self, "_bind_token", token)
-            login_with_api_key(resolved.api_key)
-            object.__setattr__(self, "_authenticated", True)
+            object.__setattr__(self, "_bind_token", token)
+        login_with_api_key(resolved.api_key, self.catalog_url)
+        object.__setattr__(self, "_authenticated", True)
 
     @classmethod
     def from_dns(

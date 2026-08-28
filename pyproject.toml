@@ -17,7 +17,7 @@ classifiers = [
 dependencies = [
   "keyring>=24.0",
   "pyyaml",
-  "quilt3>=8.0.0,<9",
+  "quilt3>=8.1.0a2,<9",
   "rich"
 ]
 

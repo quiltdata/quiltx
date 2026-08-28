@@ -13,8 +13,9 @@ def test_login_with_api_key_calls_quilt3_session(monkeypatch) -> None:
 
     fake_session = ModuleType("quilt3.session")
 
-    def fake_login_with_api_key(key: str) -> None:
+    def fake_login_with_api_key(key: str, *, registry_url: str) -> None:
         captured["key"] = key
+        captured["registry_url"] = registry_url
 
     fake_session.login_with_api_key = fake_login_with_api_key  # type: ignore[attr-defined]
 
@@ -22,16 +23,25 @@ def test_login_with_api_key_calls_quilt3_session(monkeypatch) -> None:
     fake_quilt3.session = fake_session  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
     monkeypatch.setitem(sys.modules, "quilt3.session", fake_session)
+    monkeypatch.setattr(
+        quilt3_facade,
+        "_resolve_registry_for_active_catalog",
+        lambda _catalog_url: "https://registry.example.com",
+    )
 
-    quilt3_facade.login_with_api_key("qk_test_value")
+    quilt3_facade.login_with_api_key("qk_test_value", "https://catalog.example.com")
 
-    assert captured == {"key": "qk_test_value"}
+    assert captured == {
+        "key": "qk_test_value",
+        "registry_url": "https://registry.example.com",
+    }
 
 
 def test_login_with_api_key_propagates_quilt3_errors(monkeypatch) -> None:
     fake_session = ModuleType("quilt3.session")
 
-    def fake_login_with_api_key(_key: str) -> None:
+    def fake_login_with_api_key(_key: str, *, registry_url: str) -> None:
+        assert registry_url == "https://registry.example.com"
         raise ValueError("invalid api key prefix")
 
     fake_session.login_with_api_key = fake_login_with_api_key  # type: ignore[attr-defined]
@@ -39,11 +49,87 @@ def test_login_with_api_key_propagates_quilt3_errors(monkeypatch) -> None:
     fake_quilt3.session = fake_session  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
     monkeypatch.setitem(sys.modules, "quilt3.session", fake_session)
+    monkeypatch.setattr(
+        quilt3_facade,
+        "_resolve_registry_for_active_catalog",
+        lambda _catalog_url: "https://registry.example.com",
+    )
 
     import pytest
 
     with pytest.raises(ValueError, match="invalid api key prefix"):
-        quilt3_facade.login_with_api_key("not-a-real-key")
+        quilt3_facade.login_with_api_key(
+            "not-a-real-key", "https://catalog.example.com"
+        )
+
+
+def test_catalog_binding_uses_quilt3_registry_resolver(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+    token = object()
+    fake_session = ModuleType("quilt3.session")
+
+    def set_registry_url_resolver(resolver):
+        calls["registry_url"] = resolver()
+        return token
+
+    def reset_registry_url_resolver(received_token) -> None:
+        calls["reset_token"] = received_token
+
+    fake_session.set_registry_url_resolver = set_registry_url_resolver  # type: ignore[attr-defined]
+    fake_session.reset_registry_url_resolver = reset_registry_url_resolver  # type: ignore[attr-defined]
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(sys.modules, "quilt3.session", fake_session)
+    monkeypatch.setattr(
+        quilt3_facade,
+        "_resolve_registry_for_active_catalog",
+        lambda _catalog_url: "https://registry.example.com",
+    )
+
+    received_token = quilt3_facade.bind_active_catalog("https://catalog.example.com")
+    quilt3_facade.reset_active_catalog(received_token)
+
+    assert received_token is token
+    assert calls == {
+        "registry_url": "https://registry.example.com",
+        "reset_token": token,
+    }
+
+
+def test_published_quilt3_apis_isolate_catalog_api_keys(monkeypatch) -> None:
+    import quilt3.session
+
+    catalog_a = "https://catalog-a.example.com"
+    catalog_b = "https://catalog-b.example.com"
+    registry_a = "https://registry-a.example.com"
+    registry_b = "https://registry-b.example.com"
+    registries = {catalog_a: registry_a, catalog_b: registry_b}
+    monkeypatch.setattr(
+        quilt3_facade,
+        "_resolve_registry_for_active_catalog",
+        registries.__getitem__,
+    )
+
+    quilt3.session.clear_api_key()
+    token_a = quilt3_facade.bind_active_catalog(catalog_a)
+    try:
+        quilt3_facade.login_with_api_key("qk_catalog_a", catalog_a)
+        session_a = quilt3.session.get_session()
+
+        token_b = quilt3_facade.bind_active_catalog(catalog_b)
+        try:
+            quilt3_facade.login_with_api_key("qk_catalog_b", catalog_b)
+            session_b = quilt3.session.get_session()
+        finally:
+            quilt3_facade.reset_active_catalog(token_b)
+
+        assert quilt3.session.get_registry_url() == registry_a
+        assert session_a.headers["Authorization"] == "Bearer qk_catalog_a"
+        assert session_b.headers["Authorization"] == "Bearer qk_catalog_b"
+    finally:
+        quilt3_facade.reset_active_catalog(token_a)
+        quilt3.session.clear_api_key()
 
 
 class _FakeCredentials:
