@@ -58,7 +58,7 @@ def test_two_catalogs_bind_sequentially(tmp_path, monkeypatch):
     credentials.store(dns_b, "qk_for_b")
 
     bound_to: list[str] = []
-    keys_used: list[str] = []
+    keys_used: list[tuple[str, str]] = []
 
     cat_a = _make_catalog(dns_a)
     cat_b = _make_catalog(dns_b)
@@ -70,14 +70,17 @@ def test_two_catalogs_bind_sequentially(tmp_path, monkeypatch):
         ),
         patch(
             "quiltx.quilt3_facade.login_with_api_key",
-            lambda key: keys_used.append(key),
+            lambda key, catalog_url: keys_used.append((key, catalog_url)),
         ),
     ):
         cat_a.ensure_auth()
         cat_b.ensure_auth()
 
     assert bound_to == ["https://cat-a.example.com", "https://cat-b.example.com"]
-    assert keys_used == ["qk_for_a", "qk_for_b"]
+    assert keys_used == [
+        ("qk_for_a", "https://cat-a.example.com"),
+        ("qk_for_b", "https://cat-b.example.com"),
+    ]
 
 
 def test_keyring_entries_dont_cross_contaminate(tmp_path, monkeypatch):
@@ -135,7 +138,7 @@ def test_catalog_from_dns_api_key_threaded_to_resolver(tmp_path, monkeypatch):
     _tmp_fallback(monkeypatch, tmp_path)
     _clear_env(monkeypatch)
 
-    keys_used: list[str] = []
+    keys_used: list[tuple[str, str]] = []
 
     cat = Catalog.from_dns("kw.example.com", source="flag", api_key="qk_kw")
 
@@ -146,9 +149,9 @@ def test_catalog_from_dns_api_key_threaded_to_resolver(tmp_path, monkeypatch):
         ),
         patch(
             "quiltx.quilt3_facade.login_with_api_key",
-            lambda key: keys_used.append(key),
+            lambda key, catalog_url: keys_used.append((key, catalog_url)),
         ),
     ):
         cat.ensure_auth()
 
-    assert keys_used == ["qk_kw"]
+    assert keys_used == [("qk_kw", "https://kw.example.com")]

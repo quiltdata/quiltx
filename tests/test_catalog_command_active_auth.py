@@ -81,7 +81,7 @@ def test_ensure_auth_uses_keyring_api_key(tmp_path, monkeypatch):
     credentials.store("test.example.com", "qk_stored")
 
     bound: list[str] = []
-    logged_in: list[str] = []
+    logged_in: list[tuple[str, str]] = []
 
     cat = _fake_catalog(auth_required=True)
 
@@ -92,13 +92,13 @@ def test_ensure_auth_uses_keyring_api_key(tmp_path, monkeypatch):
         ),
         patch(
             "quiltx.quilt3_facade.login_with_api_key",
-            lambda key: logged_in.append(key),
+            lambda key, catalog_url: logged_in.append((key, catalog_url)),
         ),
     ):
         cat.ensure_auth()
 
     assert bound == ["https://test.example.com"]
-    assert logged_in == ["qk_stored"]
+    assert logged_in == [("qk_stored", "https://test.example.com")]
 
 
 # ---------------------------------------------------------------------------

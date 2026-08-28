@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-27
+
+### Changed
+
+- Replace quiltx's process-wide monkey-patch of
+  `quilt3.session.get_registry_url` with quilt3's supported context-local
+  registry resolver, and bind API keys explicitly to the registry advertised
+  by each catalog. The obsolete quiltx synchronization lock and URL
+  `ContextVar` are removed; quilt3 now owns URL isolation, key scoping, and
+  session synchronization. Require `quilt3>=8.1.0a2,<9` for these APIs.
+
 ## [0.19.0] - 2026-08-20
 
 ### Changed

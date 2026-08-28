@@ -11,39 +11,20 @@ Implementation note: every function uses a local ``import quilt3`` so that
 test monkeypatches that replace ``sys.modules["quilt3"]`` take effect
 correctly, matching the pattern used before this facade existed.
 
-Threading note: ``_QUILT3_LOCK`` serialises the registry-URL rebind +
-login_with_api_key + immediate quilt3 call sequence. This is a tripwire
-against accidental reentrancy (two Catalog admin operations interleaving
-in one call stack) — not a multi-thread feature.
+Registry selection uses quilt3's supported context-local resolver API. API
+keys are passed to quilt3 with the resolved registry URL explicitly, so no
+process-wide monkey-patch or quiltx-side synchronization is required.
 """
 
 from __future__ import annotations
 
-import threading
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Iterator, Mapping
-
-# Lock held during the bind-and-call sequence in Catalog.ensure_auth / admin.
-# See §4.4 in the spec.
-_QUILT3_LOCK = threading.Lock()
-
-# Per spec [05 §5]: rebind quilt3.session.get_registry_url to return the
-# active catalog URL without writing config.yml. The ContextVar makes this
-# task-safe; the monkey-patch is installed once at module import.
-#
-# Tracking issue for an upstream supported hook (which would let us delete
-# this monkey-patch entirely): quiltdata/quilt#4878.
-_ACTIVE_CATALOG_URL: ContextVar[str | None] = ContextVar(
-    "quiltx_active_catalog_url", default=None
-)
+from typing import Any, Mapping
 
 # Cache of catalog_url -> registry_url, populated lazily from
-# <catalog>/config.json. Quilt3 calls get_registry_url repeatedly, and we
-# don't want to refetch config.json on every call.
+# <catalog>/config.json. Catalog and registry hosts may differ, and repeated
+# auth/admin calls should not refetch config.json.
 _REGISTRY_URL_CACHE: dict[str, str] = {}
-_PATCH_INSTALLED = False
 
 
 def _resolve_registry_for_active_catalog(catalog_url: str) -> str:
@@ -67,62 +48,24 @@ def _resolve_registry_for_active_catalog(catalog_url: str) -> str:
     return resolved
 
 
-def _install_registry_url_patch() -> None:
-    global _PATCH_INSTALLED
-    if _PATCH_INSTALLED:
-        return
-    try:
-        from quilt3 import session as _session
-    except ImportError:
-        # Some tests and bootstrap paths only need quilt3.config(). Defer the
-        # session patch until a real quilt3 runtime is importable.
-        return
-
-    original = _session.get_registry_url
-
-    def get_registry_url() -> str:
-        override = _ACTIVE_CATALOG_URL.get()
-        if override is not None:
-            return _resolve_registry_for_active_catalog(override)
-        return original()
-
-    _session.get_registry_url = get_registry_url
-    _PATCH_INSTALLED = True
-
-
-_install_registry_url_patch()
-
-
 def bind_active_catalog(catalog_url: str):
-    """Set the active catalog URL for this task; return a reset token.
+    """Bind the catalog's registry URL through quilt3's supported API.
 
-    Embedders should prefer ``use_catalog()`` or ``Catalog`` as a context
-    manager so the binding is cleaned up automatically. Direct callers are
-    responsible for calling ``reset_active_catalog(token)`` when done.
+    Use ``Catalog`` as a context manager so the binding is cleaned up
+    automatically. Direct callers are responsible for calling
+    ``reset_active_catalog(token)`` when done.
     """
-    _install_registry_url_patch()
-    return _ACTIVE_CATALOG_URL.set(catalog_url)
+    from quilt3.session import set_registry_url_resolver
+
+    registry_url = _resolve_registry_for_active_catalog(catalog_url)
+    return set_registry_url_resolver(lambda: registry_url)
 
 
 def reset_active_catalog(token) -> None:
-    """Reset the ContextVar binding to its previous state."""
-    _ACTIVE_CATALOG_URL.reset(token)
+    """Restore the quilt3 registry resolver replaced by a catalog binding."""
+    from quilt3.session import reset_registry_url_resolver
 
-
-@contextmanager
-def use_catalog(catalog_url: str) -> Iterator[None]:
-    """Scope the active-catalog binding to a ``with`` block.
-
-    Embedder-friendly wrapper around bind/reset. Inside the block, any
-    quilt3 call that resolves ``session.get_registry_url`` sees
-    *catalog_url*; on exit the previous binding is restored.
-    """
-    _install_registry_url_patch()
-    token = _ACTIVE_CATALOG_URL.set(catalog_url)
-    try:
-        yield
-    finally:
-        _ACTIVE_CATALOG_URL.reset(token)
+    reset_registry_url_resolver(token)
 
 
 @dataclass
@@ -140,15 +83,16 @@ def current_global_config() -> Mapping | None:
     return quilt3.config()
 
 
-def login_with_api_key(api_key: str) -> None:
-    """Bind quilt3's in-process session to *api_key*.
+def login_with_api_key(api_key: str, catalog_url: str) -> None:
+    """Bind *api_key* to the registry advertised by *catalog_url*.
 
-    Calls ``quilt3.session.login_with_api_key(api_key)``. Writes nothing to
-    disk — the key lives in a module-level global inside quilt3.session.
+    Calls quilt3 with an explicit registry URL. Nothing is written to disk;
+    quilt3 keeps the key in its per-registry in-memory key registry.
     """
     from quilt3.session import login_with_api_key as _login_with_api_key
 
-    _login_with_api_key(api_key)
+    registry_url = _resolve_registry_for_active_catalog(catalog_url)
+    _login_with_api_key(api_key, registry_url=registry_url)
 
 
 def admin_modules() -> AdminClients:
@@ -207,9 +151,9 @@ def _mint_registry_credentials() -> dict[str, str]:
     """Fetch fresh STS credentials from the active catalog's registry.
 
     Uses quilt3's authenticated HTTP session (the API key bound by
-    ``Catalog.ensure_auth``) against ``get_registry_url()``, which quiltx
-    rebinds to the active catalog. Nothing is written to disk, and no cached
-    or ambient credential source can substitute for this call.
+    ``Catalog.ensure_auth``) against the registry selected through quilt3's
+    supported context-local resolver. Nothing is written to disk, and no
+    cached or ambient credential source can substitute for this call.
     """
     import quilt3.session
 

@@ -1393,7 +1393,7 @@ wheels = [
 
 [[package]]
 name = "quilt3"
-version = "8.0.0"
+version = "8.1.0a2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "awscrt" },
@@ -1408,14 +1408,14 @@ dependencies = [
     { name = "tenacity" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/9a/32d7769f5ea701019273d4d93ed61e09644acdb5fe1b319cc53b16877cb7/quilt3-8.0.0.tar.gz", hash = "sha256:c64fd15571c03711fc081d61dcec290a82ab97217a9f2948bc727692c8a2dab6", size = 101629, upload-time = "2026-08-04T16:36:12.884Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/1e/11cee8f2cdc71c84f50e558730501ccaa97a866c14e22e1451c3f557aa70/quilt3-8.1.0a2.tar.gz", hash = "sha256:d7f98bf4454af19b7087f32df44c64a8b82b720e3f86df5ddc8a1641f614a570", size = 103943, upload-time = "2026-08-28T04:16:35.869Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cc/32/9a0aebbb46259ddc82ee4d8949d0eb02cd4a823a948230472deffe4319c0/quilt3-8.0.0-py3-none-any.whl", hash = "sha256:7c32092091ec509cf71cabdb9c35a95bf9c8e511af04e6cc7b7ef04042a15586", size = 136428, upload-time = "2026-08-04T16:36:11.348Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/fb/a4752ce914a3865ab2cc84b4dfe9e48ce886491530fed8df96bed566118e/quilt3-8.1.0a2-py3-none-any.whl", hash = "sha256:1e71be519479a544cd188def58450a70af9ecddb0647afd72840678cb0009ee2", size = 138870, upload-time = "2026-08-28T04:16:34.633Z" },
 ]
 
 [[package]]
 name = "quiltx"
-version = "0.19.0"
+version = "0.20.0"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
@@ -1453,7 +1453,7 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pyyaml" },
-    { name = "quilt3", specifier = ">=8.0.0,<9" },
+    { name = "quilt3", specifier = ">=8.1.0a2,<9" },
     { name = "rich" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
 ]
