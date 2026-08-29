@@ -4393,7 +4393,18 @@ def test_revocation_applies_writes_after_rechecking_baselines() -> None:
         sns_client=sns_client,
     )
 
-    # Recheck immediately before each write, then the write itself.
+    # Both baselines are revalidated before the first write, then each write
+    # rechecks its own resource immediately beforehand.
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(shared_bucket_policy)},
+        {"Bucket": bucket},
+    )
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {"Policy": json.dumps(shared_sns_policy)}},
+        {"TopicArn": topic_arn},
+    )
     sns_stubber.add_response(
         "get_topic_attributes",
         {"Attributes": {"Policy": json.dumps(shared_sns_policy)}},
@@ -4442,10 +4453,16 @@ def test_revocation_rejects_drift_before_writing() -> None:
         bucket_policy=shared_bucket_policy,
         sns_policy=None,
     )
+    # A concurrent writer changed the bucket policy after planning.
     s3_stubber.add_response(
         "get_bucket_policy",
         {"Policy": json.dumps(_quilt_bucket_policy(bucket, [staging]))},
         {"Bucket": bucket},
+    )
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        expected_params={"TopicArn": topic_arn},
     )
     s3_stubber.activate()
     sns_stubber.activate()
@@ -4487,10 +4504,17 @@ def test_revocation_deletes_bucket_policy_when_nothing_would_remain() -> None:
         bucket_policy=quilt_only_policy,
         sns_policy=None,
     )
-    s3_stubber.add_response(
-        "get_bucket_policy",
-        {"Policy": json.dumps(quilt_only_policy)},
-        {"Bucket": bucket},
+    # Upfront baseline check, then the recheck immediately before the delete.
+    for _ in range(2):
+        s3_stubber.add_response(
+            "get_bucket_policy",
+            {"Policy": json.dumps(quilt_only_policy)},
+            {"Bucket": bucket},
+        )
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        expected_params={"TopicArn": topic_arn},
     )
     s3_stubber.add_response("delete_bucket_policy", {}, {"Bucket": bucket})
     s3_stubber.activate()
@@ -4759,11 +4783,90 @@ def test_prepare_accepts_account_root_principal(monkeypatch, capsys) -> None:
     assert "Error" not in capsys.readouterr().err
 
 
-def test_prepare_rejects_principal_that_is_neither_role_nor_root(capsys) -> None:
-    assert (
-        bucket_tool.main(
-            ["prepare", "bucket", "--principal", "arn:aws:iam::712023778557:user/bob"]
-        )
-        == 1
+def test_revocation_refuses_to_start_when_sns_policy_drifted() -> None:
+    """Neither policy is written once either baseline has moved."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    shared_bucket_policy = _quilt_bucket_policy(bucket, [staging, open_bio])
+    shared_sns_policy = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [staging, open_bio]
     )
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=shared_bucket_policy,
+        sns_policy=shared_sns_policy,
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(shared_bucket_policy)},
+        {"Bucket": bucket},
+    )
+    # A concurrent writer touched only the topic policy after planning.
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {
+            "Attributes": {
+                "Policy": json.dumps(
+                    bucket_lib.build_sns_topic_policy(
+                        None, bucket, topic_arn, owning_account, [staging]
+                    )
+                )
+            }
+        },
+        {"TopicArn": topic_arn},
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    with pytest.raises(bucket_lib.PreparationDriftError, match="SNS topic policy"):
+        bucket_lib.apply_bucket_revocation(
+            plan, s3_client=s3_client, sns_client=sns_client
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [
+        "not-an-arn",
+        "arn:aws:iam::abc:root",
+        "arn:aws:iam::1234:root",
+        "arn:aws:iam::712023778557",
+        "arn:aws:iam::712023778557:user/bob",
+        "arn:aws:iam::712023778557:role/",
+        "arn:aws:s3:::bucket",
+    ],
+)
+def test_prepare_rejects_malformed_principals(principal, capsys) -> None:
+    assert bucket_tool.main(["prepare", "bucket", "--principal", principal]) == 1
     assert "must be an IAM role ARN or an account root ARN" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [
+        "arn:aws:iam::712023778557:root",
+        "arn:aws:iam::712023778557:role/quilt-registry",
+        "arn:aws:iam::712023778557:role/path/to/QuiltRole",
+    ],
+)
+def test_principal_arn_validator_accepts_roles_and_roots(principal) -> None:
+    assert bucket_tool._principal_arn_error([principal]) is None

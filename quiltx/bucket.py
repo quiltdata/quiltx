@@ -1157,13 +1157,52 @@ def build_bucket_revocation_plan(
     )
 
 
+def _assert_bucket_revocation_is_current(
+    plan: BucketRevocationPlan,
+    *,
+    s3_client: Any,
+    sns_client: Any,
+) -> None:
+    """Verify both baselines before the first write.
+
+    Revocation spans two policies but AWS has no cross-service transaction, so
+    the only protection against committing half of it is to refuse to start once
+    either baseline has moved.
+    """
+    current_bucket_policy = get_bucket_policy(plan.bucket, s3_client=s3_client)
+    current_topic_exists, current_sns_policy = _sns_policy_if_topic_exists(
+        plan.sns_topic_arn, sns_client
+    )
+
+    changed: list[str] = []
+    if current_bucket_policy != plan.original_bucket_policy:
+        changed.append("bucket policy")
+    if current_topic_exists != plan.topic_exists:
+        changed.append("SNS topic existence")
+    elif current_sns_policy != plan.original_sns_policy:
+        changed.append("SNS topic policy")
+    if changed:
+        _raise_revocation_drift(*changed)
+
+
 def apply_bucket_revocation(
     plan: BucketRevocationPlan,
     *,
     s3_client: Any,
     sns_client: Any,
 ) -> None:
-    """Apply a revocation plan, re-checking each baseline immediately before writing."""
+    """Apply a revocation plan, checking every baseline before the first write.
+
+    A revocation that touches both policies can still be interrupted mid-way by
+    a failing write, but it cannot start against state that has already drifted.
+    """
+    if not plan.changed:
+        return
+
+    _assert_bucket_revocation_is_current(
+        plan, s3_client=s3_client, sns_client=sns_client
+    )
+
     if plan.sns_policy_changed and plan.sns_policy is not None:
         current_topic_exists, current_sns_policy = _sns_policy_if_topic_exists(
             plan.sns_topic_arn, sns_client

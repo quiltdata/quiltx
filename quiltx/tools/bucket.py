@@ -624,6 +624,26 @@ def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
     return response in {"y", "yes"}
 
 
+_IAM_ARN_PREFIX = "arn:aws:iam::"
+
+
+def _is_principal_arn(principal: str) -> bool:
+    """Whether *principal* is an IAM role ARN or an account root ARN.
+
+    The account ID is checked here rather than left to AWS: a malformed ARN
+    would otherwise be written into the policy document a plan prints and only
+    be rejected once the call reaches S3 or SNS.
+    """
+    if not principal.startswith(_IAM_ARN_PREFIX):
+        return False
+    account_id, separator, resource = principal[len(_IAM_ARN_PREFIX) :].partition(":")
+    if not separator or len(account_id) != 12 or not account_id.isdigit():
+        return False
+    if resource == "root":
+        return True
+    return resource.startswith("role/") and len(resource) > len("role/")
+
+
 def _principal_arn_error(principals: Sequence[str]) -> str | None:
     """Return an error message when a principal is not a role or account-root ARN.
 
@@ -632,12 +652,10 @@ def _principal_arn_error(principals: Sequence[str]) -> str | None:
     always been a root ARN.
     """
     for principal in principals:
-        if not principal.startswith("arn:aws:iam::") or (
-            ":role/" not in principal and not principal.endswith(":root")
-        ):
+        if not _is_principal_arn(principal):
             return (
                 "Error: --principal must be an IAM role ARN or an account root "
-                f"ARN, got {principal!r}"
+                f"ARN with a 12-digit account ID, got {principal!r}"
             )
     return None
 

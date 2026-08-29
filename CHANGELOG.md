@@ -45,9 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   principal-bearing Quilt statements, leaving bucket notifications and the SNS
   topic in place because other stacks may still be consuming them, and deletes
   the bucket policy outright when removing the last principal would leave an
-  invalid empty statement list. Supports `--dry-run`, `--json --yes`, and the
-  same pre-write drift checks as `prepare`; revoking a principal that holds no
-  grant reports it and changes nothing.
+  invalid empty statement list. Supports `--dry-run` and `--json --yes`, and
+  validates both the bucket policy and the topic policy against their planning
+  baselines before the first write, so a revocation that spans both cannot start
+  against drifted state. Revoking a principal that holds no grant reports it and
+  changes nothing.
+
+### Fixed
+
+- Validate the account ID in `--principal`. A malformed ARN such as
+  `arn:aws:iam::abc:root` was accepted and written into the policy document a
+  plan prints, only to be rejected once the call reached S3 or SNS. Role and
+  account-root ARNs now require a 12-digit account ID locally.
 
 ## [0.20.0] - 2026-08-27
 
