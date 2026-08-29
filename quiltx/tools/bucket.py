@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import traceback
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import boto3
 from rich.console import Console
@@ -175,6 +175,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply AWS changes without prompting for confirmation.",
     )
 
+    revoke_parser = subparsers.add_parser(
+        "revoke",
+        prog="quiltx bucket revoke",
+        help=(
+            "Withdraw cross-account Quilt principals from a bucket's S3 and SNS "
+            "policies. The deliberate counterpart to prepare, which only adds."
+        ),
+    )
+    revoke_parser.add_argument(
+        "bucket_name", help="S3 bucket name whose grants are withdrawn."
+    )
+    revoke_parser.add_argument(
+        "--profile",
+        help="AWS profile for the data account that owns the bucket.",
+    )
+    revoke_parser.add_argument(
+        "--control-account-id",
+        help=(
+            "Quilt control AWS account ID whose account-root grant is removed. "
+            "Required unless --principal is supplied."
+        ),
+    )
+    revoke_parser.add_argument(
+        "--principal",
+        metavar="ARN",
+        action="append",
+        nargs="?",
+        const="",
+        help=(
+            "Explicit IAM role ARN or account root to remove. Repeatable or "
+            "comma-separated. Principals that hold no grant are reported, not "
+            "an error."
+        ),
+    )
+    revoke_output_group = revoke_parser.add_mutually_exclusive_group()
+    revoke_output_group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the principals that would be removed and the final documents.",
+    )
+    revoke_output_group.add_argument(
+        "--json",
+        action="store_true",
+        help="Print only the minimal non-secret summary of withdrawn access as JSON.",
+    )
+    revoke_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Apply AWS changes without prompting for confirmation.",
+    )
+
     list_parser = subparsers.add_parser(
         "list",
         prog="quiltx bucket list",
@@ -281,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_add(args)
         if args.action == "prepare":
             return _cmd_prepare(args)
+        if args.action == "revoke":
+            return _cmd_revoke(args)
         if args.action == "remove":
             return _cmd_remove(args)
         if args.action == "list":
@@ -481,13 +534,40 @@ def _print_plan_documents(
     _print_json(console, plan.notification_configuration)
 
 
+def _format_principals(principals: Sequence[str]) -> str:
+    return ", ".join(principals) if principals else "(none)"
+
+
+def _print_principal_delta(
+    console: Console,
+    already_granted: Sequence[str],
+    added: Sequence[str],
+    removed: Sequence[str],
+) -> None:
+    """Report the principal changes so no grant is gained or lost silently."""
+    print(f"Principals already granted: {_format_principals(already_granted)}")
+    print(f"Principals added: {_format_principals(added)}")
+    if removed:
+        console.print(
+            "[red]WARNING:[/red] principals removed: "
+            f"{_format_principals(removed)}. Use `quiltx bucket revoke` for "
+            "deliberate removals."
+        )
+    else:
+        print("Principals removed: (none)")
+
+
 def _print_bucket_preparation_plan(plan: bucket_lib.BucketPreparationPlan) -> None:
     console = Console(width=120)
     print("Bucket prepare dry-run")
     print(f"Bucket: s3://{plan.bucket}")
     print(f"Region: {plan.region}")
     print(f"Owning account: {plan.owning_account}")
-    print(f"Effective principals: {', '.join(plan.principals)}")
+    print(f"Requested principals: {_format_principals(plan.principals)}")
+    _print_principal_delta(
+        console, plan.principals_before, plan.principals_added, plan.principals_removed
+    )
+    print(f"Effective principals: {_format_principals(plan.principals_after)}")
     print(f"SNS topic: {plan.sns_topic_arn}")
     _print_plan_documents(console, plan)
 
@@ -534,10 +614,40 @@ def _control_account_id_from_catalog(catalog_arg: str) -> str:
 
 
 def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
+    console = Console(width=120)
     print(f"Prepare s3://{plan.bucket} in {plan.region} for Quilt access.")
+    _print_principal_delta(
+        console, plan.principals_before, plan.principals_added, plan.principals_removed
+    )
     print(f"SNS topic: {plan.sns_topic_arn}")
     response = input("Apply these AWS changes? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
+
+
+def _principal_arn_error(principals: Sequence[str]) -> str | None:
+    """Return an error message when a principal is not a role or account-root ARN.
+
+    Account roots are accepted so a shared bucket can name every consuming
+    stack's control account explicitly (issue #102); the default grant has
+    always been a root ARN.
+    """
+    for principal in principals:
+        if not principal.startswith("arn:aws:iam::") or (
+            ":role/" not in principal and not principal.endswith(":root")
+        ):
+            return (
+                "Error: --principal must be an IAM role ARN or an account root "
+                f"ARN, got {principal!r}"
+            )
+    return None
+
+
+def _control_account_id_error(control_account_id: str | None) -> str | None:
+    if control_account_id and (
+        len(control_account_id) != 12 or not control_account_id.isdigit()
+    ):
+        return "Error: --control-account-id must be a 12-digit AWS account ID"
+    return None
 
 
 def _cmd_prepare(args: argparse.Namespace) -> int:
@@ -545,20 +655,13 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     if show_guidance:
         _print_principal_guidance()
         return 0
-    for principal in principals:
-        if not principal.startswith("arn:aws:iam::") or ":role/" not in principal:
-            print(
-                f"Error: --principal must be an IAM role ARN, got {principal!r}",
-                file=sys.stderr,
-            )
-            return 1
-    if args.control_account_id and (
-        len(args.control_account_id) != 12 or not args.control_account_id.isdigit()
-    ):
-        print(
-            "Error: --control-account-id must be a 12-digit AWS account ID",
-            file=sys.stderr,
-        )
+    error = _principal_arn_error(principals)
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+    error = _control_account_id_error(args.control_account_id)
+    if error:
+        print(error, file=sys.stderr)
         return 1
     control_account_id = args.control_account_id
     if not control_account_id and not principals and args.catalog:
@@ -632,6 +735,121 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _revocation_summary_lines(plan: bucket_lib.BucketRevocationPlan) -> list[str]:
+    lines = [
+        f"Principals removed: {_format_principals(plan.principals_removed)}",
+        f"Principals remaining: {_format_principals(plan.principals_after)}",
+    ]
+    if plan.principals_not_present:
+        lines.append(
+            "Requested but not granted (no change): "
+            f"{_format_principals(plan.principals_not_present)}"
+        )
+    if plan.remove_bucket_policy:
+        lines.append(
+            "The Quilt statement is the only one left, so the bucket policy "
+            "will be deleted."
+        )
+    return lines
+
+
+def _print_bucket_revocation_plan(plan: bucket_lib.BucketRevocationPlan) -> None:
+    console = Console(width=120)
+    print("Bucket revoke dry-run")
+    print(f"Bucket: s3://{plan.bucket}")
+    print(f"Region: {plan.region}")
+    print(f"Owning account: {plan.owning_account}")
+    print(f"Requested principals: {_format_principals(plan.requested_principals)}")
+    for line in _revocation_summary_lines(plan):
+        print(line)
+    print(f"SNS topic: {plan.sns_topic_arn}")
+    if not plan.changed:
+        print("\nNothing to revoke; no AWS changes required.")
+        return
+    if plan.bucket_policy_changed and not plan.remove_bucket_policy:
+        print("\nFinal bucket policy:")
+        _print_json(console, plan.bucket_policy or {})
+    if plan.sns_policy_changed:
+        print("\nFinal SNS topic policy:")
+        _print_json(console, plan.sns_policy or {})
+
+
+def _confirm_bucket_revocation(plan: bucket_lib.BucketRevocationPlan) -> bool:
+    print(f"Revoke Quilt access on s3://{plan.bucket} in {plan.region}.")
+    for line in _revocation_summary_lines(plan):
+        print(line)
+    print(f"SNS topic: {plan.sns_topic_arn}")
+    response = input("Apply these AWS changes? [y/N]: ").strip().lower()
+    return response in {"y", "yes"}
+
+
+def _cmd_revoke(args: argparse.Namespace) -> int:
+    principals, show_guidance = _resolve_principals_arg(args.principal)
+    if show_guidance:
+        _print_principal_guidance()
+        return 0
+    error = _principal_arn_error(principals)
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+    error = _control_account_id_error(args.control_account_id)
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+    if not args.control_account_id and not principals:
+        print(
+            "Error: provide --control-account-id or --principal",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json and not args.yes:
+        print("Error: --json requires --yes for non-interactive apply", file=sys.stderr)
+        return 1
+
+    session, s3_client, region, _resolved_profile = bucket_lib.resolve_bucket_session(
+        args.bucket_name,
+        args.profile,
+        assume_yes=args.yes,
+        no_prompt=bool(args.json and args.profile),
+        output=sys.stderr,
+    )
+    if session is None:
+        return 1
+    sns_client = session.client("sns", region_name=region)
+    owning_account = _get_session_account_id(session)
+    plan = bucket_lib.build_bucket_revocation_plan(
+        args.bucket_name,
+        region,
+        owning_account,
+        control_account_id=args.control_account_id,
+        principals=principals or None,
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    if args.dry_run:
+        _print_bucket_revocation_plan(plan)
+        return 0
+    if plan.changed:
+        if not args.yes and not _confirm_bucket_revocation(plan):
+            print("Aborted.")
+            return 1
+        bucket_lib.apply_bucket_revocation(
+            plan, s3_client=s3_client, sns_client=sns_client
+        )
+
+    if args.json:
+        print(json.dumps(plan.handoff(), indent=2))
+        return 0
+    if plan.changed:
+        print(f"Revoked Quilt access on s3://{plan.bucket}.")
+    else:
+        print(f"No Quilt grants to revoke on s3://{plan.bucket}.")
+    for line in _revocation_summary_lines(plan):
+        print(line)
+    return 0
+
+
 @stack_lib.catalog_command
 def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
     try:
@@ -651,13 +869,10 @@ def _cmd_add(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         if show_guidance:
             _print_principal_guidance()
             return 0
-        for principal in principals:
-            if not principal.startswith("arn:aws:iam::"):
-                print(
-                    f"Error: --principal must be an IAM role ARN, got {principal!r}",
-                    file=sys.stderr,
-                )
-                return 1
+        principal_error = _principal_arn_error(principals)
+        if principal_error:
+            print(principal_error, file=sys.stderr)
+            return 1
 
         if no_preflight:
             return _cmd_add_no_preflight(stack, args)
@@ -1325,7 +1540,14 @@ def _print_principal_guidance() -> None:
         "bucket policy; the documented principal is the control account root.\n"
         "If you choose to restrict, inspect your Quilt CloudFormation stack's\n"
         "IAM resources and select the roles appropriate for your use case.\n"
+        "Account root ARNs are accepted too, so a bucket shared by several\n"
+        "stacks can name each control account explicitly.\n"
         "See: https://docs.quilt.bio/quilt-platform-administrator/crossaccount\n"
+        "\n"
+        "Grants accumulate: preparing a bucket adds the principals you name and\n"
+        "keeps the ones already in the policy, so a bucket shared by several\n"
+        "stacks does not lose access when it is prepared again. Remove access\n"
+        "deliberately with `quiltx bucket revoke`.\n"
         "\n"
         "Example:\n"
         "  quiltx bucket add my-bucket \\\n"
@@ -1370,6 +1592,10 @@ def _confirm_bucket_add(
             f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
             f"a new topic will be created: {plan.sns_topic_arn}"
         )
+    print()
+    _print_principal_delta(
+        console, plan.principals_before, plan.principals_added, plan.principals_removed
+    )
     response = input("Continue? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
 
@@ -1407,6 +1633,10 @@ def _print_dry_run_plan(
             f"\n[yellow]WARNING:[/yellow] no existing SNS topic found; "
             f"a new topic will be created: {plan.sns_topic_arn}"
         )
+    print()
+    _print_principal_delta(
+        console, plan.principals_before, plan.principals_added, plan.principals_removed
+    )
     _print_plan_documents(console, plan)
 
 

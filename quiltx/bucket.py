@@ -167,6 +167,15 @@ SNS_PUBLISH_POLICY_SID = "QuiltBucketNotifications"
 SNS_SUBSCRIBE_POLICY_SID = "QuiltCrossAccountSNSAccess"
 SNS_TOPIC_CONFIG_ID = "QuiltBucketNotifications"
 
+# Statements whose ``Principal.AWS`` list accumulates instead of being replaced.
+# A bucket owner prepares a shared bucket for one consuming stack at a time and
+# cannot know every other stack that was granted access months earlier, so
+# preparation must be additive (issue #102). Deliberate removal is the job of
+# ``quiltx bucket revoke``. Every other Sid keeps replace-by-Sid semantics --
+# notably the SNS publish statement, which doubles as an ownership marker and is
+# compared for exact equality by ``_sns_policy_has_bucket_marker``.
+PRINCIPAL_ACCUMULATING_SIDS = frozenset({QUILT_POLICY_SID, SNS_SUBSCRIBE_POLICY_SID})
+
 QUILT_POLICY_ACTIONS = [
     "s3:GetBucketCORS",
     "s3:GetBucketLocation",
@@ -198,6 +207,11 @@ class PreparationDriftError(RuntimeError):
     """Raised when AWS state changes between preparation planning and apply."""
 
 
+def _sorted_principals(principals: Any) -> tuple[str, ...]:
+    """Return principals in a stable, comparable order for reporting."""
+    return tuple(sorted(principals))
+
+
 @dataclass(frozen=True)
 class BucketPreparationPlan:
     """Exact AWS documents and secure handoff produced by bucket preparation."""
@@ -217,6 +231,38 @@ class BucketPreparationPlan:
     bucket_policy_changed: bool
     sns_policy_changed: bool
     notification_configuration_changed: bool
+    bucket_principals_before: tuple[str, ...] = ()
+    bucket_principals_after: tuple[str, ...] = ()
+    sns_principals_before: tuple[str, ...] = ()
+    sns_principals_after: tuple[str, ...] = ()
+
+    @property
+    def principals_before(self) -> tuple[str, ...]:
+        """Principals the bucket's Quilt statements granted before this plan."""
+        return _sorted_principals(
+            {*self.bucket_principals_before, *self.sns_principals_before}
+        )
+
+    @property
+    def principals_after(self) -> tuple[str, ...]:
+        """Principals the bucket's Quilt statements grant once applied."""
+        return _sorted_principals(
+            {*self.bucket_principals_after, *self.sns_principals_after}
+        )
+
+    @property
+    def principals_added(self) -> tuple[str, ...]:
+        """Principals gaining access that no Quilt statement granted before."""
+        return _sorted_principals(
+            set(self.principals_after) - set(self.principals_before)
+        )
+
+    @property
+    def principals_removed(self) -> tuple[str, ...]:
+        """Principals losing access; empty whenever grants accumulate correctly."""
+        return _sorted_principals(
+            set(self.principals_before) - set(self.principals_after)
+        )
 
     def handoff(self) -> dict[str, Any]:
         """Return the minimal non-secret handoff for the catalog operator."""
@@ -225,6 +271,79 @@ class BucketPreparationPlan:
             "region": self.region,
             "owning_account": self.owning_account,
             "principals": list(self.principals),
+            "sns_topic_arn": self.sns_topic_arn,
+        }
+
+
+@dataclass(frozen=True)
+class BucketRevocationPlan:
+    """Exact AWS documents that withdraw cross-account Quilt grants on a bucket.
+
+    Revocation is the deliberate counterpart to accumulating preparation: it
+    touches only the two principal-bearing Quilt statements and leaves bucket
+    notifications and the SNS topic in place, since other stacks may still be
+    consuming them.
+    """
+
+    bucket: str
+    region: str
+    owning_account: str
+    requested_principals: tuple[str, ...]
+    sns_topic_arn: str
+    bucket_policy: dict[str, Any] | None
+    sns_policy: dict[str, Any] | None
+    original_bucket_policy: dict[str, Any] | None
+    original_sns_policy: dict[str, Any] | None
+    topic_exists: bool
+    bucket_policy_changed: bool
+    sns_policy_changed: bool
+    remove_bucket_policy: bool
+    bucket_principals_before: tuple[str, ...] = ()
+    bucket_principals_after: tuple[str, ...] = ()
+    sns_principals_before: tuple[str, ...] = ()
+    sns_principals_after: tuple[str, ...] = ()
+
+    @property
+    def changed(self) -> bool:
+        """Whether applying this plan would write anything."""
+        return self.bucket_policy_changed or self.sns_policy_changed
+
+    @property
+    def principals_before(self) -> tuple[str, ...]:
+        """Principals the bucket's Quilt statements grant today."""
+        return _sorted_principals(
+            {*self.bucket_principals_before, *self.sns_principals_before}
+        )
+
+    @property
+    def principals_after(self) -> tuple[str, ...]:
+        """Principals that keep access once this plan is applied."""
+        return _sorted_principals(
+            {*self.bucket_principals_after, *self.sns_principals_after}
+        )
+
+    @property
+    def principals_removed(self) -> tuple[str, ...]:
+        """Requested principals that actually hold a grant being withdrawn."""
+        return _sorted_principals(
+            set(self.principals_before) - set(self.principals_after)
+        )
+
+    @property
+    def principals_not_present(self) -> tuple[str, ...]:
+        """Requested principals that hold no Quilt grant to begin with."""
+        return _sorted_principals(
+            set(self.requested_principals) - set(self.principals_before)
+        )
+
+    def handoff(self) -> dict[str, Any]:
+        """Return the minimal non-secret summary of what access was withdrawn."""
+        return {
+            "bucket": self.bucket,
+            "region": self.region,
+            "owning_account": self.owning_account,
+            "principals_removed": list(self.principals_removed),
+            "principals_remaining": list(self.principals_after),
             "sns_topic_arn": self.sns_topic_arn,
         }
 
@@ -278,9 +397,18 @@ def build_quilt_policy_statement(
 
 
 def merge_bucket_policy(
-    existing: Mapping[str, Any] | None, statement: Mapping[str, Any]
+    existing: Mapping[str, Any] | None,
+    statement: Mapping[str, Any],
+    *,
+    accumulate_principals: bool = True,
 ) -> dict[str, Any]:
-    """Merge a single statement into a bucket policy document by replacing matching Sid."""
+    """Merge a single statement into a bucket policy document, matched by Sid.
+
+    Statements in :data:`PRINCIPAL_ACCUMULATING_SIDS` keep the principals the
+    existing statement already grants and add the requested ones; every other
+    Sid is replaced outright. Pass ``accumulate_principals=False`` to write an
+    exact principal set, which is what revocation needs.
+    """
     if existing is None:
         return {
             "Version": "2012-10-17",
@@ -289,7 +417,9 @@ def merge_bucket_policy(
 
     merged = dict(existing)
     merged["Statement"] = _merge_policy_statements(
-        existing.get("Statement"), dict(statement)
+        existing.get("Statement"),
+        dict(statement),
+        accumulate_principals=accumulate_principals,
     )
     return merged
 
@@ -304,6 +434,20 @@ def apply_bucket_policy(
         s3_client = boto3.client("s3")
 
     s3_client.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
+
+
+def remove_bucket_policy(bucket: str, s3_client: Any = None) -> None:
+    """Delete the bucket policy entirely.
+
+    Needed when revoking the last Quilt principal leaves no statements behind:
+    S3 rejects a policy document with an empty ``Statement`` list.
+    """
+    if s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
+
+    s3_client.delete_bucket_policy(Bucket=bucket)
 
 
 def get_bucket_notification_sns(bucket: str, s3_client: Any = None) -> str | None:
@@ -385,8 +529,14 @@ def build_sns_topic_policy(
     sns_topic_arn: str,
     data_account_id: str,
     control_principal_arn: str | Sequence[str],
+    *,
+    accumulate_principals: bool = True,
 ) -> dict[str, Any]:
-    """Merge owner and Quilt statements into an SNS policy document."""
+    """Merge owner and Quilt statements into an SNS policy document.
+
+    The subscribe statement accumulates principals; the publish statement is
+    replaced outright because it doubles as the bucket ownership marker.
+    """
     publish_statement = _build_sns_topic_publish_policy_statement(
         bucket, sns_topic_arn, data_account_id
     )
@@ -399,7 +549,11 @@ def build_sns_topic_policy(
         else _build_default_sns_owner_policy(sns_topic_arn, data_account_id)
     )
     statements = _merge_policy_statements(policy.get("Statement"), publish_statement)
-    policy["Statement"] = _merge_policy_statements(statements, subscribe_statement)
+    policy["Statement"] = _merge_policy_statements(
+        statements,
+        subscribe_statement,
+        accumulate_principals=accumulate_principals,
+    )
     return policy
 
 
@@ -673,6 +827,18 @@ def _validate_retained_notification_destinations(
             ) from exc
 
 
+def resolve_principal_list(
+    control_account_id: str | None, principals: Sequence[str] | None
+) -> tuple[str, ...]:
+    """Return the principals to act on, defaulting to the control account root."""
+    principal_list = tuple(principals or ())
+    if principal_list:
+        return principal_list
+    if not control_account_id:
+        raise ValueError("provide --control-account-id or at least one --principal")
+    return (f"arn:aws:iam::{control_account_id}:root",)
+
+
 def build_bucket_preparation_plan(
     bucket: str,
     region: str,
@@ -686,11 +852,7 @@ def build_bucket_preparation_plan(
     lambda_client: Any | None = None,
 ) -> BucketPreparationPlan:
     """Read AWS state and return the exact idempotent preparation plan."""
-    principal_list = tuple(principals or ())
-    if not principal_list:
-        if not control_account_id:
-            raise ValueError("provide --control-account-id or at least one --principal")
-        principal_list = (f"arn:aws:iam::{control_account_id}:root",)
+    principal_list = resolve_principal_list(control_account_id, principals)
 
     existing_bucket_policy = get_bucket_policy(bucket, s3_client=s3_client)
     bucket_statement = build_quilt_policy_statement(
@@ -771,15 +933,35 @@ def build_bucket_preparation_plan(
         notification_configuration_changed=(
             notification_configuration != existing_notifications
         ),
+        bucket_principals_before=statement_principals(
+            _find_policy_statement(existing_bucket_policy, QUILT_POLICY_SID)
+        ),
+        bucket_principals_after=statement_principals(
+            _find_policy_statement(bucket_policy, QUILT_POLICY_SID)
+        ),
+        sns_principals_before=statement_principals(
+            _find_policy_statement(existing_sns_policy, SNS_SUBSCRIBE_POLICY_SID)
+        ),
+        sns_principals_after=statement_principals(
+            _find_policy_statement(sns_policy, SNS_SUBSCRIBE_POLICY_SID)
+        ),
+    )
+
+
+def _raise_drift(command: str, *changed: str) -> None:
+    raise PreparationDriftError(
+        "AWS state changed after planning ("
+        + ", ".join(changed)
+        + f"); rerun bucket {command} to build a fresh plan"
     )
 
 
 def _raise_preparation_drift(*changed: str) -> None:
-    raise PreparationDriftError(
-        "AWS state changed after planning ("
-        + ", ".join(changed)
-        + "); rerun bucket prepare to build a fresh plan"
-    )
+    _raise_drift("prepare", *changed)
+
+
+def _raise_revocation_drift(*changed: str) -> None:
+    _raise_drift("revoke", *changed)
 
 
 def _assert_bucket_preparation_is_current(
@@ -886,6 +1068,120 @@ def apply_bucket_preparation(
             Bucket=plan.bucket,
             NotificationConfiguration=plan.notification_configuration,
         )
+
+
+def build_bucket_revocation_plan(
+    bucket: str,
+    region: str,
+    owning_account: str,
+    *,
+    control_account_id: str | None = None,
+    principals: Sequence[str] | None = None,
+    s3_client: Any,
+    sns_client: Any,
+) -> BucketRevocationPlan:
+    """Read AWS state and return the plan that withdraws *principals*' access.
+
+    Only the two principal-bearing Quilt statements are rewritten. Principals
+    that hold no grant are reported rather than treated as an error, so a repeat
+    revoke converges to a no-op.
+    """
+    principal_list = resolve_principal_list(control_account_id, principals)
+    revoked = set(principal_list)
+
+    existing_bucket_policy = get_bucket_policy(bucket, s3_client=s3_client)
+    sns_topic_arn = f"arn:aws:sns:{region}:{owning_account}:{_sns_topic_name(bucket)}"
+    topic_exists, existing_sns_policy = _sns_policy_if_topic_exists(
+        sns_topic_arn, sns_client
+    )
+
+    bucket_before = statement_principals(
+        _find_policy_statement(existing_bucket_policy, QUILT_POLICY_SID)
+    )
+    bucket_after = tuple(item for item in bucket_before if item not in revoked)
+    sns_before = statement_principals(
+        _find_policy_statement(existing_sns_policy, SNS_SUBSCRIBE_POLICY_SID)
+    )
+    sns_after = tuple(item for item in sns_before if item not in revoked)
+
+    bucket_policy: dict[str, Any] | None = None
+    remove_policy = False
+    if existing_bucket_policy is not None and bucket_after != bucket_before:
+        if bucket_after:
+            bucket_policy = merge_bucket_policy(
+                existing_bucket_policy,
+                build_quilt_policy_statement(bucket, "", principals=bucket_after),
+                accumulate_principals=False,
+            )
+        else:
+            bucket_policy = _policy_without_statement(
+                existing_bucket_policy, QUILT_POLICY_SID
+            )
+            remove_policy = bucket_policy is None
+
+    sns_policy: dict[str, Any] | None = None
+    if existing_sns_policy is not None and sns_after != sns_before:
+        if sns_after:
+            sns_policy = dict(existing_sns_policy)
+            sns_policy["Statement"] = _merge_policy_statements(
+                existing_sns_policy.get("Statement"),
+                _build_sns_topic_subscribe_policy_statement(sns_topic_arn, sns_after),
+                accumulate_principals=False,
+            )
+        else:
+            # The owner and publish statements always remain, so dropping the
+            # subscribe statement cannot empty the document in practice.
+            sns_policy = _policy_without_statement(
+                existing_sns_policy, SNS_SUBSCRIBE_POLICY_SID
+            )
+
+    return BucketRevocationPlan(
+        bucket=bucket,
+        region=region,
+        owning_account=owning_account,
+        requested_principals=principal_list,
+        sns_topic_arn=sns_topic_arn,
+        bucket_policy=bucket_policy,
+        sns_policy=sns_policy,
+        original_bucket_policy=existing_bucket_policy,
+        original_sns_policy=existing_sns_policy,
+        topic_exists=topic_exists,
+        bucket_policy_changed=remove_policy
+        or (bucket_policy is not None and bucket_policy != existing_bucket_policy),
+        sns_policy_changed=sns_policy is not None and sns_policy != existing_sns_policy,
+        remove_bucket_policy=remove_policy,
+        bucket_principals_before=bucket_before,
+        bucket_principals_after=bucket_after,
+        sns_principals_before=sns_before,
+        sns_principals_after=sns_after,
+    )
+
+
+def apply_bucket_revocation(
+    plan: BucketRevocationPlan,
+    *,
+    s3_client: Any,
+    sns_client: Any,
+) -> None:
+    """Apply a revocation plan, re-checking each baseline immediately before writing."""
+    if plan.sns_policy_changed and plan.sns_policy is not None:
+        current_topic_exists, current_sns_policy = _sns_policy_if_topic_exists(
+            plan.sns_topic_arn, sns_client
+        )
+        if not current_topic_exists or current_sns_policy != plan.original_sns_policy:
+            _raise_revocation_drift("SNS topic policy")
+        apply_sns_topic_policy(
+            plan.sns_topic_arn, plan.sns_policy, sns_client=sns_client
+        )
+
+    if plan.bucket_policy_changed:
+        current_bucket_policy = get_bucket_policy(plan.bucket, s3_client=s3_client)
+        if current_bucket_policy != plan.original_bucket_policy:
+            _raise_revocation_drift("bucket policy")
+        if plan.remove_bucket_policy:
+            remove_bucket_policy(plan.bucket, s3_client=s3_client)
+        elif plan.bucket_policy is not None:
+            apply_bucket_policy(plan.bucket, plan.bucket_policy, s3_client=s3_client)
 
 
 def configure_bucket_notifications(
@@ -1695,23 +1991,125 @@ def _bucket_add_error_message(result: Any, typename: str) -> str:
     return f"bucketAdd returned {typename or 'an unknown error'}: {result}"
 
 
+def statement_principals(statement: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Return a statement's ``Principal.AWS`` entries in document order.
+
+    AWS renders a lone principal as a bare string and several as a list, so both
+    shapes must be accepted wherever principals are compared or accumulated.
+    """
+    if not statement:
+        return ()
+    principal = statement.get("Principal")
+    if isinstance(principal, Mapping):
+        aws_principal = principal.get("AWS")
+    elif isinstance(principal, str):
+        aws_principal = principal
+    else:
+        aws_principal = None
+    if aws_principal is None:
+        return ()
+    if isinstance(aws_principal, str):
+        return (aws_principal,)
+    return tuple(str(item) for item in aws_principal)
+
+
+def _dedupe_principals(principals: Sequence[str]) -> list[str]:
+    """Drop duplicates while keeping first-seen order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for principal in principals:
+        if principal not in seen:
+            seen.add(principal)
+            ordered.append(principal)
+    return ordered
+
+
+def _principal_value(principals: Sequence[str]) -> str | list[str]:
+    """Render principals the way AWS does: a bare string for one, else a list."""
+    values = list(principals)
+    return values[0] if len(values) == 1 else values
+
+
+def _statement_with_accumulated_principals(
+    existing: Mapping[str, Any], statement: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return *statement* with the principals *existing* already grants preserved.
+
+    Existing principals keep their document order and newly requested ones are
+    appended, so re-running preparation with the same inputs rewrites nothing.
+    """
+    accumulated = dict(statement)
+    principals = _dedupe_principals(
+        [*statement_principals(existing), *statement_principals(statement)]
+    )
+    principal = statement.get("Principal")
+    updated_principal = dict(principal) if isinstance(principal, Mapping) else {}
+    updated_principal["AWS"] = _principal_value(principals)
+    accumulated["Principal"] = updated_principal
+    return accumulated
+
+
+def _normalize_policy_statements(existing_statements: Any) -> list[dict[str, Any]]:
+    """Coerce a policy ``Statement`` value into a list of statement mappings."""
+    if existing_statements is None:
+        return []
+    if isinstance(existing_statements, Mapping):
+        return [dict(existing_statements)]
+    return [dict(item) for item in existing_statements if isinstance(item, Mapping)]
+
+
+def _find_policy_statement(
+    policy: Mapping[str, Any] | None, sid: str
+) -> dict[str, Any] | None:
+    """Return the statement in *policy* carrying *sid*, if any."""
+    if not policy:
+        return None
+    for statement in _normalize_policy_statements(policy.get("Statement")):
+        if statement.get("Sid") == sid:
+            return statement
+    return None
+
+
+def _policy_without_statement(
+    policy: Mapping[str, Any], sid: str
+) -> dict[str, Any] | None:
+    """Drop the statement carrying *sid*; return None when nothing would remain.
+
+    AWS rejects a policy document with an empty ``Statement`` list, so callers
+    must delete the policy outright rather than write an empty one.
+    """
+    remaining = [
+        statement
+        for statement in _normalize_policy_statements(policy.get("Statement"))
+        if statement.get("Sid") != sid
+    ]
+    if not remaining:
+        return None
+    updated = dict(policy)
+    updated["Statement"] = remaining
+    return updated
+
+
 def _merge_policy_statements(
-    existing_statements: Any, statement: dict[str, Any]
+    existing_statements: Any,
+    statement: dict[str, Any],
+    *,
+    accumulate_principals: bool = True,
 ) -> list[dict[str, Any]]:
     if existing_statements is None:
         return [statement]
-    if isinstance(existing_statements, Mapping):
-        statements = [dict(existing_statements)]
-    else:
-        statements = [
-            dict(item) for item in existing_statements if isinstance(item, Mapping)
-        ]
+    statements = _normalize_policy_statements(existing_statements)
 
     sid = statement.get("Sid")
+    accumulate = accumulate_principals and sid in PRINCIPAL_ACCUMULATING_SIDS
     replaced = False
     for idx, existing in enumerate(statements):
         if existing.get("Sid") == sid:
-            statements[idx] = statement
+            statements[idx] = (
+                _statement_with_accumulated_principals(existing, statement)
+                if accumulate
+                else statement
+            )
             replaced = True
             break
     if not replaced:

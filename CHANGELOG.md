@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-29
+
+### Changed
+
+- Accumulate cross-account grants instead of replacing them
+  ([#102](https://github.com/quiltdata/quiltx/issues/102)). `bucket prepare`
+  rewrote its `QuiltCrossAccountAccess` and `QuiltCrossAccountSNSAccess`
+  statements to exactly the principals passed in, which silently dropped
+  whatever a previous run had granted. That asked the bucket owner to declare
+  every consuming stack on every run, but the owner is typically asked for one
+  stack at a time, months apart, with no shared record of prior consumers —
+  `s3://protology` was registered in both `quilt-staging` and `open-quilt-bio`,
+  and preparing for either evicted the other. Both statements now union the
+  principals already present with the requested ones, deduped and in document
+  order, so re-running is still a no-op and a shared bucket keeps working. Every
+  other Sid keeps replace-by-Sid semantics, including the SNS publish statement
+  that doubles as the topic ownership marker. The same fix applies to ACL
+  reconciliation, where two stacks listing the same bucket previously raced with
+  last-writer-wins.
+- Report principal changes wherever grants are shown. `bucket prepare --dry-run`
+  and `bucket add --dry-run`, plus both confirmation prompts, now list the
+  principals already granted, added, and removed; a removal is flagged in red
+  and points at `bucket revoke`. ACL reconciliation names the grants it keeps on
+  stderr. An eviction can no longer happen without being printed.
+- Accept account root ARNs in `--principal`. The flag previously required
+  `:role/`, so a bucket shared by several stacks could not name each control
+  account explicitly even though the default grant has always been a root ARN.
+  `bucket add` and `bucket prepare` now share one validator that accepts role
+  and account-root ARNs.
+
+### Added
+
+- `quiltx bucket revoke BUCKET --control-account-id X` (or `--principal ARN`) as
+  the deliberate removal path for cross-account access. It rewrites only the two
+  principal-bearing Quilt statements, leaving bucket notifications and the SNS
+  topic in place because other stacks may still be consuming them, and deletes
+  the bucket policy outright when removing the last principal would leave an
+  invalid empty statement list. Supports `--dry-run`, `--json --yes`, and the
+  same pre-write drift checks as `prepare`; revoking a principal that holds no
+  grant reports it and changes nothing.
+
 ## [0.20.0] - 2026-08-27
 
 ### Changed

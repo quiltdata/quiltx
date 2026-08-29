@@ -76,7 +76,8 @@ def test_merge_bucket_policy_appends() -> None:
     ]
 
 
-def test_merge_bucket_policy_replaces_duplicate_sid() -> None:
+def test_merge_bucket_policy_rewrites_quilt_statement_without_principals() -> None:
+    """A malformed Quilt statement is corrected, not left in place."""
     existing = {
         "Version": "2012-10-17",
         "Statement": [
@@ -89,6 +90,152 @@ def test_merge_bucket_policy_replaces_duplicate_sid() -> None:
     statement = bucket_lib.build_quilt_policy_statement("bucket", "123456789012")
     policy = bucket_lib.merge_bucket_policy(existing, statement)
     assert policy["Statement"] == [statement]
+
+
+def test_merge_bucket_policy_replaces_unrelated_duplicate_sid() -> None:
+    """Only the Quilt principal statements accumulate; other Sids are replaced."""
+    existing = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "Other",
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::999988887777:root"},
+            }
+        ],
+    }
+    statement = {
+        "Sid": "Other",
+        "Effect": "Allow",
+        "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+    }
+    policy = bucket_lib.merge_bucket_policy(existing, statement)
+    assert policy["Statement"] == [statement]
+
+
+def test_merge_bucket_policy_accumulates_quilt_principals() -> None:
+    """Preparing for a second stack keeps the first stack's grant (issue #102)."""
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    existing = bucket_lib.merge_bucket_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [{"Sid": "Existing", "Effect": "Allow"}],
+        },
+        bucket_lib.build_quilt_policy_statement(
+            "protology", "712023778557", principals=[staging]
+        ),
+    )
+
+    policy = bucket_lib.merge_bucket_policy(
+        existing,
+        bucket_lib.build_quilt_policy_statement(
+            "protology", "867344438354", principals=[open_bio]
+        ),
+    )
+
+    assert policy["Statement"][0] == {"Sid": "Existing", "Effect": "Allow"}
+    quilt_statement = policy["Statement"][1]
+    assert quilt_statement["Sid"] == "QuiltCrossAccountAccess"
+    assert quilt_statement["Principal"] == {"AWS": [staging, open_bio]}
+    assert quilt_statement["Action"] == bucket_lib.QUILT_POLICY_ACTIONS
+
+
+def test_merge_bucket_policy_accumulation_is_idempotent() -> None:
+    """Re-running the same grant rewrites nothing, so plans converge."""
+    principals = [
+        "arn:aws:iam::712023778557:root",
+        "arn:aws:iam::867344438354:root",
+    ]
+    statement = bucket_lib.build_quilt_policy_statement(
+        "protology", "712023778557", principals=principals
+    )
+    first = bucket_lib.merge_bucket_policy(None, statement)
+
+    second = bucket_lib.merge_bucket_policy(first, statement)
+    third = bucket_lib.merge_bucket_policy(
+        second,
+        bucket_lib.build_quilt_policy_statement(
+            "protology", "712023778557", principals=[principals[0]]
+        ),
+    )
+
+    assert second == first
+    assert third == first
+
+
+def test_merge_bucket_policy_accumulates_onto_string_principal() -> None:
+    """AWS renders a lone principal as a bare string; both shapes must merge."""
+    existing = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "QuiltCrossAccountAccess",
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::712023778557:root"},
+                "Action": list(bucket_lib.QUILT_POLICY_ACTIONS),
+                "Resource": ["arn:aws:s3:::bucket", "arn:aws:s3:::bucket/*"],
+            }
+        ],
+    }
+    policy = bucket_lib.merge_bucket_policy(
+        existing,
+        bucket_lib.build_quilt_policy_statement(
+            "bucket",
+            "867344438354",
+            principals=["arn:aws:iam::867344438354:role/quilt-registry"],
+        ),
+    )
+    assert policy["Statement"][0]["Principal"] == {
+        "AWS": [
+            "arn:aws:iam::712023778557:root",
+            "arn:aws:iam::867344438354:role/quilt-registry",
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "statement, expected",
+    [
+        (None, ()),
+        ({}, ()),
+        ({"Sid": "X"}, ()),
+        ({"Principal": {"Service": "s3.amazonaws.com"}}, ()),
+        ({"Principal": {"AWS": "arn:a"}}, ("arn:a",)),
+        ({"Principal": {"AWS": ["arn:a", "arn:b"]}}, ("arn:a", "arn:b")),
+        ({"Principal": "*"}, ("*",)),
+    ],
+)
+def test_statement_principals_normalizes_shapes(statement, expected) -> None:
+    assert bucket_lib.statement_principals(statement) == expected
+
+
+def test_build_sns_topic_policy_accumulates_subscribe_principals() -> None:
+    """The subscribe statement accumulates; the publish marker is replaced."""
+    topic_arn = "arn:aws:sns:us-east-2:573011045968:quilt-protology-notifications"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    first = bucket_lib.build_sns_topic_policy(
+        None, "protology", topic_arn, "573011045968", [staging]
+    )
+
+    second = bucket_lib.build_sns_topic_policy(
+        first, "protology", topic_arn, "573011045968", [open_bio]
+    )
+
+    assert [statement["Sid"] for statement in second["Statement"]] == [
+        "__default_statement_ID",
+        "QuiltBucketNotifications",
+        "QuiltCrossAccountSNSAccess",
+    ]
+    assert second["Statement"][2]["Principal"] == {"AWS": [staging, open_bio]}
+    assert second["Statement"][1] == first["Statement"][1]
+    assert (
+        bucket_lib.build_sns_topic_policy(
+            second, "protology", topic_arn, "573011045968", [staging, open_bio]
+        )
+        == second
+    )
 
 
 def test_get_bucket_policy_empty() -> None:
@@ -951,6 +1098,16 @@ def _fake_bucket_preparation_plan() -> bucket_lib.BucketPreparationPlan:
         bucket_policy_changed=True,
         sns_policy_changed=True,
         notification_configuration_changed=True,
+        bucket_principals_before=("arn:aws:iam::867344438354:root",),
+        bucket_principals_after=(
+            "arn:aws:iam::867344438354:root",
+            "arn:aws:iam::123456789012:root",
+        ),
+        sns_principals_before=("arn:aws:iam::867344438354:root",),
+        sns_principals_after=(
+            "arn:aws:iam::867344438354:root",
+            "arn:aws:iam::123456789012:root",
+        ),
     )
 
 
@@ -3952,3 +4109,661 @@ def test_test_pre_registration_reports_failed_checks(monkeypatch, capsys) -> Non
     assert "FAILED: control account match" in captured.out
     assert "probing principal: arn:aws:iam::999988887777:role/operator" in captured.err
     assert "Quilt control account: 123456789012" in captured.err
+
+
+# --- Accumulating grants and revocation (issue #102) ------------------------
+
+
+def _quilt_bucket_policy(bucket: str, principals: list[str]) -> dict[str, Any]:
+    return bucket_lib.merge_bucket_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [{"Sid": "Existing", "Effect": "Allow"}],
+        },
+        bucket_lib.build_quilt_policy_statement(bucket, "", principals=principals),
+    )
+
+
+def _stub_prepare_reads(
+    s3_stubber: Stubber,
+    sns_stubber: Stubber,
+    *,
+    bucket: str,
+    topic_arn: str,
+    bucket_policy: dict[str, Any],
+    sns_policy: dict[str, Any] | None,
+) -> None:
+    """Queue the three reads a preparation plan performs, in call order."""
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(bucket_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration", {}, {"Bucket": bucket}
+    )
+    if sns_policy is None:
+        sns_stubber.add_client_error(
+            "get_topic_attributes",
+            service_error_code="NotFound",
+            expected_params={"TopicArn": topic_arn},
+        )
+    else:
+        sns_stubber.add_response(
+            "get_topic_attributes",
+            {"Attributes": {"Policy": json.dumps(sns_policy)}},
+            {"TopicArn": topic_arn},
+        )
+
+
+def test_preparation_plan_accumulates_second_stack_and_reports_delta() -> None:
+    """The issue's real case: preparing for Open must not evict quilt-staging."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    staging_bucket_policy = _quilt_bucket_policy(bucket, [staging])
+    staging_sns_policy = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [staging]
+    )
+
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    _stub_prepare_reads(
+        s3_stubber,
+        sns_stubber,
+        bucket=bucket,
+        topic_arn=topic_arn,
+        bucket_policy=staging_bucket_policy,
+        sns_policy=staging_sns_policy,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="867344438354",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    quilt_statement = bucket_lib._find_policy_statement(
+        plan.bucket_policy, bucket_lib.QUILT_POLICY_SID
+    )
+    assert quilt_statement is not None
+    assert quilt_statement["Principal"] == {"AWS": [staging, open_bio]}
+    subscribe_statement = bucket_lib._find_policy_statement(
+        plan.sns_policy, bucket_lib.SNS_SUBSCRIBE_POLICY_SID
+    )
+    assert subscribe_statement is not None
+    assert subscribe_statement["Principal"] == {"AWS": [staging, open_bio]}
+    assert plan.principals == (open_bio,)
+    assert plan.principals_before == (staging,)
+    assert plan.principals_added == (open_bio,)
+    assert plan.principals_removed == ()
+    assert plan.principals_after == tuple(sorted([staging, open_bio]))
+    assert plan.bucket_policy_changed is True
+    assert plan.sns_policy_changed is True
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_preparation_plan_is_noop_when_principal_already_granted() -> None:
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    shared_bucket_policy = _quilt_bucket_policy(bucket, [staging, open_bio])
+    shared_sns_policy = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [staging, open_bio]
+    )
+
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    _stub_prepare_reads(
+        s3_stubber,
+        sns_stubber,
+        bucket=bucket,
+        topic_arn=topic_arn,
+        bucket_policy=shared_bucket_policy,
+        sns_policy=shared_sns_policy,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="867344438354",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.bucket_policy_changed is False
+    assert plan.sns_policy_changed is False
+    assert plan.principals_added == ()
+    assert plan.principals_removed == ()
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def _revocation_stubbers(
+    *,
+    bucket: str,
+    region: str,
+    topic_arn: str,
+    bucket_policy: dict[str, Any] | None,
+    sns_policy: dict[str, Any] | None,
+) -> tuple[Any, Stubber, Any, Stubber]:
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    if bucket_policy is None:
+        s3_stubber.add_client_error(
+            "get_bucket_policy",
+            service_error_code="NoSuchBucketPolicy",
+            expected_params={"Bucket": bucket},
+        )
+    else:
+        s3_stubber.add_response(
+            "get_bucket_policy",
+            {"Policy": json.dumps(bucket_policy)},
+            {"Bucket": bucket},
+        )
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    if sns_policy is None:
+        sns_stubber.add_client_error(
+            "get_topic_attributes",
+            service_error_code="NotFound",
+            expected_params={"TopicArn": topic_arn},
+        )
+    else:
+        sns_stubber.add_response(
+            "get_topic_attributes",
+            {"Attributes": {"Policy": json.dumps(sns_policy)}},
+            {"TopicArn": topic_arn},
+        )
+    return s3_client, s3_stubber, sns_client, sns_stubber
+
+
+def test_revocation_removes_one_principal_and_keeps_the_other() -> None:
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    shared_bucket_policy = _quilt_bucket_policy(bucket, [staging, open_bio])
+    shared_sns_policy = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [staging, open_bio]
+    )
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=shared_bucket_policy,
+        sns_policy=shared_sns_policy,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.changed is True
+    assert plan.remove_bucket_policy is False
+    assert plan.principals_removed == (staging,)
+    assert plan.principals_after == (open_bio,)
+    assert plan.principals_not_present == ()
+    quilt_statement = bucket_lib._find_policy_statement(
+        plan.bucket_policy, bucket_lib.QUILT_POLICY_SID
+    )
+    assert quilt_statement is not None
+    assert quilt_statement["Principal"] == {"AWS": open_bio}
+    assert bucket_lib._find_policy_statement(plan.bucket_policy, "Existing") is not None
+    subscribe_statement = bucket_lib._find_policy_statement(
+        plan.sns_policy, bucket_lib.SNS_SUBSCRIBE_POLICY_SID
+    )
+    assert subscribe_statement is not None
+    assert subscribe_statement["Principal"] == {"AWS": open_bio}
+    # Notifications and the publish marker are untouched: other stacks use them.
+    assert (
+        bucket_lib._find_policy_statement(
+            plan.sns_policy, bucket_lib.SNS_PUBLISH_POLICY_SID
+        )
+        == shared_sns_policy["Statement"][1]
+    )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_revocation_applies_writes_after_rechecking_baselines() -> None:
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    shared_bucket_policy = _quilt_bucket_policy(bucket, [staging, open_bio])
+    shared_sns_policy = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [staging, open_bio]
+    )
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=shared_bucket_policy,
+        sns_policy=shared_sns_policy,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    # Recheck immediately before each write, then the write itself.
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {"Policy": json.dumps(shared_sns_policy)}},
+        {"TopicArn": topic_arn},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(plan.sns_policy),
+        },
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(shared_bucket_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {"Bucket": bucket, "Policy": json.dumps(plan.bucket_policy)},
+    )
+
+    bucket_lib.apply_bucket_revocation(plan, s3_client=s3_client, sns_client=sns_client)
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_revocation_rejects_drift_before_writing() -> None:
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    shared_bucket_policy = _quilt_bucket_policy(bucket, [staging, open_bio])
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=shared_bucket_policy,
+        sns_policy=None,
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(_quilt_bucket_policy(bucket, [staging]))},
+        {"Bucket": bucket},
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    with pytest.raises(bucket_lib.PreparationDriftError, match="bucket policy"):
+        bucket_lib.apply_bucket_revocation(
+            plan, s3_client=s3_client, sns_client=sns_client
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_revocation_deletes_bucket_policy_when_nothing_would_remain() -> None:
+    """An empty Statement list is invalid, so the policy is deleted instead."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    quilt_only_policy = bucket_lib.merge_bucket_policy(
+        None,
+        bucket_lib.build_quilt_policy_statement(bucket, "", principals=[staging]),
+    )
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=quilt_only_policy,
+        sns_policy=None,
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {"Policy": json.dumps(quilt_only_policy)},
+        {"Bucket": bucket},
+    )
+    s3_stubber.add_response("delete_bucket_policy", {}, {"Bucket": bucket})
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        principals=[staging],
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    assert plan.remove_bucket_policy is True
+    assert plan.bucket_policy_changed is True
+    assert plan.bucket_policy is None
+    bucket_lib.apply_bucket_revocation(plan, s3_client=s3_client, sns_client=sns_client)
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_revocation_is_a_noop_for_an_ungranted_principal() -> None:
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    staging_policy = _quilt_bucket_policy(bucket, [staging])
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=staging_policy,
+        sns_policy=None,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="867344438354",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.changed is False
+    assert plan.principals_removed == ()
+    assert plan.principals_not_present == ("arn:aws:iam::867344438354:root",)
+    assert plan.principals_after == (staging,)
+    # No writes are attempted, so no further stub responses are consumed.
+    bucket_lib.apply_bucket_revocation(plan, s3_client=s3_client, sns_client=sns_client)
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def _fake_bucket_revocation_plan(
+    *,
+    changed: bool = True,
+    remove_bucket_policy: bool = False,
+) -> bucket_lib.BucketRevocationPlan:
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    return bucket_lib.BucketRevocationPlan(
+        bucket="bucket",
+        region="us-west-2",
+        owning_account="111122223333",
+        requested_principals=(staging,),
+        sns_topic_arn="arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications",
+        bucket_policy={"Version": "2012-10-17", "Statement": [{"Sid": "bucket"}]},
+        sns_policy={"Version": "2012-10-17", "Statement": [{"Sid": "sns"}]},
+        original_bucket_policy={"Version": "2012-10-17", "Statement": []},
+        original_sns_policy={"Version": "2012-10-17", "Statement": []},
+        topic_exists=True,
+        bucket_policy_changed=changed,
+        sns_policy_changed=changed,
+        remove_bucket_policy=remove_bucket_policy,
+        bucket_principals_before=(staging, open_bio) if changed else (open_bio,),
+        bucket_principals_after=(open_bio,),
+        sns_principals_before=(staging, open_bio) if changed else (open_bio,),
+        sns_principals_after=(open_bio,),
+    )
+
+
+def _install_revoke_fakes(
+    monkeypatch, plan: bucket_lib.BucketRevocationPlan
+) -> list[bucket_lib.BucketRevocationPlan]:
+    session = SimpleNamespace(client=lambda service_name, region_name=None: object())
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "resolve_bucket_session",
+        lambda *args, **kwargs: (session, object(), "us-west-2", None),
+    )
+    monkeypatch.setattr(
+        bucket_tool, "_get_session_account_id", lambda _session: "111122223333"
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "build_bucket_revocation_plan",
+        lambda *args, **kwargs: plan,
+    )
+    applied: list[bucket_lib.BucketRevocationPlan] = []
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_revocation",
+        lambda candidate, **kwargs: applied.append(candidate),
+    )
+    monkeypatch.setattr(
+        bucket_tool.stack_lib,
+        "resolve_catalog_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("revoke must not resolve or authenticate a catalog")
+        ),
+    )
+    return applied
+
+
+def test_revoke_dry_run_reports_removals_without_writes(monkeypatch, capsys) -> None:
+    plan = _fake_bucket_revocation_plan()
+    applied = _install_revoke_fakes(monkeypatch, plan)
+    monkeypatch.setattr(bucket_tool, "_print_json", lambda _console, _document: None)
+
+    result = bucket_tool.main(
+        ["revoke", "bucket", "--control-account-id", "712023778557", "--dry-run"]
+    )
+
+    assert result == 0
+    assert applied == []
+    output = capsys.readouterr().out
+    assert "Bucket revoke dry-run" in output
+    assert "Principals removed: arn:aws:iam::712023778557:root" in output
+    assert "Principals remaining: arn:aws:iam::867344438354:root" in output
+
+
+def test_revoke_json_summary_reports_removed_and_remaining(monkeypatch, capsys) -> None:
+    plan = _fake_bucket_revocation_plan()
+    applied = _install_revoke_fakes(monkeypatch, plan)
+
+    result = bucket_tool.main(
+        [
+            "revoke",
+            "bucket",
+            "--principal",
+            "arn:aws:iam::712023778557:root",
+            "--json",
+            "--yes",
+        ]
+    )
+
+    assert result == 0
+    assert applied == [plan]
+    assert json.loads(capsys.readouterr().out) == {
+        "bucket": "bucket",
+        "region": "us-west-2",
+        "owning_account": "111122223333",
+        "principals_removed": ["arn:aws:iam::712023778557:root"],
+        "principals_remaining": ["arn:aws:iam::867344438354:root"],
+        "sns_topic_arn": (
+            "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+        ),
+    }
+
+
+def test_revoke_noop_plan_applies_nothing(monkeypatch, capsys) -> None:
+    plan = _fake_bucket_revocation_plan(changed=False)
+    applied = _install_revoke_fakes(monkeypatch, plan)
+
+    result = bucket_tool.main(
+        ["revoke", "bucket", "--control-account-id", "712023778557", "--yes"]
+    )
+
+    assert result == 0
+    assert applied == []
+    output = capsys.readouterr().out
+    assert "No Quilt grants to revoke on s3://bucket." in output
+    assert "Requested but not granted (no change)" in output
+
+
+def test_revoke_requires_control_account_or_principal(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "resolve_bucket_session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("revoke must validate inputs before touching AWS")
+        ),
+    )
+
+    assert bucket_tool.main(["revoke", "bucket"]) == 1
+    assert "--control-account-id" in capsys.readouterr().err
+
+
+def test_revoke_rejects_non_arn_principal(capsys) -> None:
+    assert bucket_tool.main(["revoke", "bucket", "--principal", "not-an-arn"]) == 1
+    assert "must be an IAM role ARN" in capsys.readouterr().err
+
+
+def test_revoke_json_requires_yes(capsys) -> None:
+    assert (
+        bucket_tool.main(
+            ["revoke", "bucket", "--control-account-id", "712023778557", "--json"]
+        )
+        == 1
+    )
+    assert "--json requires --yes" in capsys.readouterr().err
+
+
+def test_prepare_dry_run_reports_principal_delta(monkeypatch, capsys) -> None:
+    plan = _fake_bucket_preparation_plan()
+    _install_prepare_fakes(monkeypatch, plan)
+    monkeypatch.setattr(bucket_tool, "_print_json", lambda _console, _document: None)
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--control-account-id", "123456789012", "--dry-run"]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "Principals already granted: arn:aws:iam::867344438354:root" in output
+    assert "Principals added: arn:aws:iam::123456789012:root" in output
+    assert "Principals removed: (none)" in output
+    assert (
+        "Effective principals: arn:aws:iam::123456789012:root, "
+        "arn:aws:iam::867344438354:root" in output
+    )
+
+
+def test_prepare_accepts_account_root_principal(monkeypatch, capsys) -> None:
+    """A shared bucket must be able to name each stack's control account root."""
+    plan = _fake_bucket_preparation_plan()
+    seen: dict[str, Any] = {}
+    _install_prepare_fakes(monkeypatch, plan)
+
+    def _record_plan(*_args: Any, **kwargs: Any) -> bucket_lib.BucketPreparationPlan:
+        seen["kwargs"] = kwargs
+        return plan
+
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib, "build_bucket_preparation_plan", _record_plan
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda *args, **kwargs: None,
+    )
+
+    result = bucket_tool.main(
+        [
+            "prepare",
+            "bucket",
+            "--principal",
+            "arn:aws:iam::712023778557:root",
+            "--json",
+            "--yes",
+        ]
+    )
+
+    assert result == 0
+    assert seen["kwargs"]["principals"] == ["arn:aws:iam::712023778557:root"]
+    assert "Error" not in capsys.readouterr().err
+
+
+def test_prepare_rejects_principal_that_is_neither_role_nor_root(capsys) -> None:
+    assert (
+        bucket_tool.main(
+            ["prepare", "bucket", "--principal", "arn:aws:iam::712023778557:user/bob"]
+        )
+        == 1
+    )
+    assert "must be an IAM role ARN or an account root ARN" in capsys.readouterr().err

@@ -1632,7 +1632,9 @@ def test_register_bucket_with_retry_uses_shared_preparation(monkeypatch) -> None
     sqs_client = object()
     lambda_client = object()
     plan = SimpleNamespace(
-        sns_topic_arn="arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
+        sns_topic_arn="arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications",
+        principals_before=(),
+        principals_removed=(),
     )
     calls: list[tuple[Any, ...]] = []
 
@@ -3723,3 +3725,40 @@ def test_acl_yaml_with_warnings_reuses_neutral_general_risk(
     assert "found 1 downgrade-risk item(s)" in stderr
     assert "1 existing user" not in stderr
     assert general_risk in stderr
+
+
+def test_register_bucket_reports_grants_it_keeps(monkeypatch, capsys) -> None:
+    """Two stacks sharing a bucket must not evict each other silently (issue #102)."""
+    from quiltx import bucket as bucket_lib
+
+    plan = SimpleNamespace(
+        sns_topic_arn="arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications",
+        principals_before=("arn:aws:iam::712023778557:root",),
+        principals_removed=(),
+    )
+
+    class Session:
+        def client(self, service: str, region_name: str | None = None):
+            if service == "sts":
+                return SimpleNamespace(
+                    get_caller_identity=lambda: {"Account": "111122223333"}
+                )
+            return object()
+
+    monkeypatch.setattr(
+        bucket_lib,
+        "resolve_bucket_session",
+        lambda *args, **kwargs: (Session(), object(), "us-west-2", "prod"),
+    )
+    monkeypatch.setattr(
+        bucket_lib, "build_bucket_preparation_plan", lambda *args, **kwargs: plan
+    )
+    monkeypatch.setattr(
+        bucket_lib, "apply_bucket_preparation", lambda candidate, **kwargs: None
+    )
+    stack = _fake_stack(buckets=SimpleNamespace(add=lambda **kwargs: None))
+
+    acl._register_bucket_with_retry(stack, "bucket-a", "867344438354", assume_yes=True)
+
+    err = capsys.readouterr().err
+    assert "keeping existing grants for arn:aws:iam::712023778557:root" in err

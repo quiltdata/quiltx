@@ -77,9 +77,26 @@ uvx quiltx bucket prepare my-bucket \
   --json --yes > bucket-handoff.json
 ```
 
+Grants accumulate. Preparing a bucket adds the principals you name and keeps the
+ones already in the policy, so a bucket registered in two catalogs does not lose
+one stack's access when it is prepared for the other. `--dry-run` and the
+confirmation prompt list the principals already granted, added, and removed, so
+nothing changes silently. Withdraw access deliberately:
+
+```bash
+uvx quiltx bucket revoke my-bucket --control-account-id 123456789012 --dry-run
+```
+
+`revoke` rewrites only the two cross-account Quilt statements; bucket
+notifications and the SNS topic stay in place because other stacks may still
+consume them. Removing the last principal deletes the bucket policy rather than
+writing an invalid empty one.
+
 Use repeatable `--principal arn:aws:iam::123456789012:role/...` options to grant
-specific Quilt roles instead of the control-account root. If you don't know the
-control account ID, pass `--catalog example.quiltdata.com` instead: any
+specific Quilt roles instead of the control-account root. Account root ARNs are
+accepted too, so a shared bucket can name each consuming stack's control
+account. If you don't know the control account ID, pass
+`--catalog example.quiltdata.com` instead: any
 logged-in catalog user (no admin role needed) can derive it from cached stack
 metadata or from credentials the catalog's own registry mints. If the catalog
 will not mint credentials, the command fails and asks for an explicit
