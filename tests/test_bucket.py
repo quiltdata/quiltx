@@ -4870,3 +4870,224 @@ def test_prepare_rejects_malformed_principals(principal, capsys) -> None:
 )
 def test_principal_arn_validator_accepts_roles_and_roots(principal) -> None:
     assert bucket_tool._principal_arn_error([principal]) is None
+
+
+def test_shared_bucket_lifecycle_prepare_prepare_revoke() -> None:
+    """The issue's full lifecycle, with writes: prepare A, prepare B, revoke A.
+
+    Walks the real AWS call sequence so the accumulate/revoke contract is
+    verified end to end rather than only at the planning layer.
+    """
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    unrelated = {
+        "Sid": "DataScienceTeam",
+        "Effect": "Allow",
+        "Principal": {"AWS": "arn:aws:iam::999988887777:role/analyst"},
+        "Action": ["s3:GetObject"],
+        "Resource": ["arn:aws:s3:::protology/*"],
+    }
+    policy_0 = {"Version": "2012-10-17", "Statement": [unrelated]}
+    policy_1 = bucket_lib.merge_bucket_policy(
+        policy_0,
+        bucket_lib.build_quilt_policy_statement(bucket, "", principals=[staging]),
+    )
+    policy_2 = bucket_lib.merge_bucket_policy(
+        policy_1,
+        bucket_lib.build_quilt_policy_statement(bucket, "", principals=[open_bio]),
+    )
+    sns_1 = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [staging]
+    )
+    sns_2 = bucket_lib.build_sns_topic_policy(
+        sns_1, bucket, topic_arn, owning_account, [open_bio]
+    )
+    notifications = bucket_lib.build_bucket_notification_configuration({}, topic_arn)
+
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+
+    def queue_policy(policy: dict[str, Any]) -> None:
+        s3_stubber.add_response(
+            "get_bucket_policy", {"Policy": json.dumps(policy)}, {"Bucket": bucket}
+        )
+
+    def queue_notifications(config: dict[str, Any]) -> None:
+        s3_stubber.add_response(
+            "get_bucket_notification_configuration", config, {"Bucket": bucket}
+        )
+
+    def queue_topic_policy(policy: dict[str, Any]) -> None:
+        sns_stubber.add_response(
+            "get_topic_attributes",
+            {"Attributes": {"Policy": json.dumps(policy)}},
+            {"TopicArn": topic_arn},
+        )
+
+    def queue_topic_missing() -> None:
+        sns_stubber.add_client_error(
+            "get_topic_attributes",
+            service_error_code="NotFound",
+            expected_params={"TopicArn": topic_arn},
+        )
+
+    # Step 1: prepare for quilt-staging on a bucket with no topic yet.
+    queue_policy(policy_0)
+    queue_notifications({})
+    queue_topic_missing()
+    queue_policy(policy_0)
+    queue_notifications({})
+    queue_topic_missing()
+    sns_stubber.add_response(
+        "create_topic",
+        {"TopicArn": topic_arn},
+        {"Name": "quilt-protology-notifications"},
+    )
+    queue_topic_policy(
+        bucket_lib._build_default_sns_owner_policy(topic_arn, owning_account)
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(sns_1),
+        },
+    )
+    queue_policy(policy_0)
+    s3_stubber.add_response(
+        "put_bucket_policy", {}, {"Bucket": bucket, "Policy": json.dumps(policy_1)}
+    )
+    queue_notifications({})
+    s3_stubber.add_response(
+        "put_bucket_notification_configuration",
+        {},
+        {"Bucket": bucket, "NotificationConfiguration": notifications},
+    )
+
+    # Step 2: prepare for open-quilt-bio; only the two policies change.
+    queue_policy(policy_1)
+    queue_notifications(notifications)
+    queue_topic_policy(sns_1)
+    queue_policy(policy_1)
+    queue_notifications(notifications)
+    queue_topic_policy(sns_1)
+    queue_topic_policy(sns_1)
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(sns_2),
+        },
+    )
+    queue_policy(policy_1)
+    s3_stubber.add_response(
+        "put_bucket_policy", {}, {"Bucket": bucket, "Policy": json.dumps(policy_2)}
+    )
+
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    first = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    assert first.principals_before == ()
+    assert first.principals_added == (staging,)
+    bucket_lib.apply_bucket_preparation(
+        first, s3_client=s3_client, sns_client=sns_client
+    )
+
+    second = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="867344438354",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    assert second.principals_before == (staging,)
+    assert second.principals_added == (open_bio,)
+    assert second.principals_removed == ()
+    assert second.notification_configuration_changed is False
+    bucket_lib.apply_bucket_preparation(
+        second, s3_client=s3_client, sns_client=sns_client
+    )
+    assert second.bucket_policy == policy_2
+    assert second.sns_policy == sns_2
+
+    # Step 3: revoke quilt-staging; open-quilt-bio keeps working.
+    queue_policy(policy_2)
+    queue_topic_policy(sns_2)
+    revocation = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    assert revocation.principals_removed == (staging,)
+    assert revocation.principals_after == (open_bio,)
+    assert revocation.remove_bucket_policy is False
+
+    queue_policy(policy_2)
+    queue_topic_policy(sns_2)
+    queue_topic_policy(sns_2)
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": topic_arn,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(revocation.sns_policy),
+        },
+    )
+    queue_policy(policy_2)
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {"Bucket": bucket, "Policy": json.dumps(revocation.bucket_policy)},
+    )
+    bucket_lib.apply_bucket_revocation(
+        revocation, s3_client=s3_client, sns_client=sns_client
+    )
+
+    final_quilt = bucket_lib._find_policy_statement(
+        revocation.bucket_policy, bucket_lib.QUILT_POLICY_SID
+    )
+    assert final_quilt is not None
+    assert final_quilt["Principal"] == {"AWS": open_bio}
+    assert (
+        bucket_lib._find_policy_statement(revocation.bucket_policy, "DataScienceTeam")
+        == unrelated
+    )
+    final_subscribe = bucket_lib._find_policy_statement(
+        revocation.sns_policy, bucket_lib.SNS_SUBSCRIBE_POLICY_SID
+    )
+    assert final_subscribe is not None
+    assert final_subscribe["Principal"] == {"AWS": open_bio}
+    assert (
+        bucket_lib._find_policy_statement(
+            revocation.sns_policy, bucket_lib.SNS_PUBLISH_POLICY_SID
+        )
+        == sns_2["Statement"][1]
+    )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
