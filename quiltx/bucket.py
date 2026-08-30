@@ -264,6 +264,16 @@ class BucketPreparationPlan:
             set(self.principals_before) - set(self.principals_after)
         )
 
+    @property
+    def principals_kept(self) -> tuple[str, ...]:
+        """Granted principals this run did not request, which accumulation keeps.
+
+        Reporting these keeps an attempted narrowing from looking like a
+        success: naming a subset of the current principals does not withdraw the
+        rest, because only ``quiltx bucket revoke`` removes access.
+        """
+        return _sorted_principals(set(self.principals_before) - set(self.principals))
+
     def handoff(self) -> dict[str, Any]:
         """Return the minimal non-secret handoff for the catalog operator."""
         return {
@@ -1068,6 +1078,21 @@ def apply_bucket_preparation(
         )
 
 
+def _planned_principals(
+    planned_policy: Mapping[str, Any] | None,
+    sid: str,
+    unchanged: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return the principals *planned_policy* will grant under *sid*.
+
+    ``None`` means no write is planned for that document, so the principals it
+    already grants stay in force.
+    """
+    if planned_policy is None:
+        return unchanged
+    return statement_principals(_find_policy_statement(planned_policy, sid))
+
+
 def build_bucket_revocation_plan(
     bucket: str,
     region: str,
@@ -1146,6 +1171,11 @@ def build_bucket_revocation_plan(
                 existing_sns_policy, SNS_SUBSCRIBE_POLICY_SID
             )
 
+    bucket_policy_changed = remove_policy or (
+        bucket_policy is not None and bucket_policy != existing_bucket_policy
+    )
+    sns_policy_changed = sns_policy is not None and sns_policy != existing_sns_policy
+
     return BucketRevocationPlan(
         bucket=bucket,
         region=region,
@@ -1157,14 +1187,23 @@ def build_bucket_revocation_plan(
         original_bucket_policy=existing_bucket_policy,
         original_sns_policy=existing_sns_policy,
         topic_exists=topic_exists,
-        bucket_policy_changed=remove_policy
-        or (bucket_policy is not None and bucket_policy != existing_bucket_policy),
-        sns_policy_changed=sns_policy is not None and sns_policy != existing_sns_policy,
+        bucket_policy_changed=bucket_policy_changed,
+        sns_policy_changed=sns_policy_changed,
         remove_bucket_policy=remove_policy,
         bucket_principals_before=bucket_before,
-        bucket_principals_after=bucket_after,
+        # Report what the resulting documents will actually grant, not what was
+        # requested. A statement that is planned but never written would
+        # otherwise be reported as removed, and the JSON handoff would record a
+        # withdrawal that never happened.
+        bucket_principals_after=(
+            ()
+            if remove_policy
+            else _planned_principals(bucket_policy, QUILT_POLICY_SID, bucket_before)
+        ),
         sns_principals_before=sns_before,
-        sns_principals_after=sns_after,
+        sns_principals_after=_planned_principals(
+            sns_policy, SNS_SUBSCRIBE_POLICY_SID, sns_before
+        ),
     )
 
 
@@ -1206,6 +1245,15 @@ def apply_bucket_revocation(
 
     A revocation that touches both policies can still be interrupted mid-way by
     a failing write, but it cannot start against state that has already drifted.
+
+    The bucket policy is written first, which is the opposite of
+    :func:`apply_bucket_preparation`. The order is not arbitrary: it decides
+    which half survives an interruption. The S3 statement is the data grant, so
+    revoking it first means a failed second write leaves access withdrawn and
+    notifications still flowing -- recoverable and visible. Writing SNS first
+    would leave the data grant standing, which is the wrong half to keep.
+    Preparation has the opposite priority: it grants the topic policy before
+    pointing notifications at the topic.
     """
     if not plan.changed:
         return
@@ -1213,6 +1261,15 @@ def apply_bucket_revocation(
     _assert_bucket_revocation_is_current(
         plan, s3_client=s3_client, sns_client=sns_client
     )
+
+    if plan.bucket_policy_changed:
+        current_bucket_policy = get_bucket_policy(plan.bucket, s3_client=s3_client)
+        if current_bucket_policy != plan.original_bucket_policy:
+            _raise_revocation_drift("bucket policy")
+        if plan.remove_bucket_policy:
+            remove_bucket_policy(plan.bucket, s3_client=s3_client)
+        elif plan.bucket_policy is not None:
+            apply_bucket_policy(plan.bucket, plan.bucket_policy, s3_client=s3_client)
 
     if plan.sns_policy_changed and plan.sns_policy is not None:
         current_topic_exists, current_sns_policy = _sns_policy_if_topic_exists(
@@ -1223,15 +1280,6 @@ def apply_bucket_revocation(
         apply_sns_topic_policy(
             plan.sns_topic_arn, plan.sns_policy, sns_client=sns_client
         )
-
-    if plan.bucket_policy_changed:
-        current_bucket_policy = get_bucket_policy(plan.bucket, s3_client=s3_client)
-        if current_bucket_policy != plan.original_bucket_policy:
-            _raise_revocation_drift("bucket policy")
-        if plan.remove_bucket_policy:
-            remove_bucket_policy(plan.bucket, s3_client=s3_client)
-        elif plan.bucket_policy is not None:
-            apply_bucket_policy(plan.bucket, plan.bucket_policy, s3_client=s3_client)
 
 
 def configure_bucket_notifications(

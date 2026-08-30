@@ -4850,14 +4850,16 @@ def test_revocation_refuses_to_start_when_sns_policy_drifted() -> None:
         "arn:aws:iam::abc:root",
         "arn:aws:iam::1234:root",
         "arn:aws:iam::712023778557",
-        "arn:aws:iam::712023778557:user/bob",
+        "arn:aws:iam::712023778557:group/admins",
         "arn:aws:iam::712023778557:role/",
         "arn:aws:s3:::bucket",
     ],
 )
 def test_prepare_rejects_malformed_principals(principal, capsys) -> None:
     assert bucket_tool.main(["prepare", "bucket", "--principal", principal]) == 1
-    assert "must be an IAM role ARN or an account root ARN" in capsys.readouterr().err
+    assert (
+        "must be an IAM role ARN, user ARN, or account root" in capsys.readouterr().err
+    )
 
 
 @pytest.mark.parametrize(
@@ -5252,3 +5254,247 @@ def test_principal_arn_validator_rejects_malformed_arns(principal) -> None:
 )
 def test_principal_arn_validator_accepts_valid_iam_grammar(principal) -> None:
     assert bucket_tool._principal_arn_error([principal]) is None
+
+
+def test_preparation_plan_reports_kept_principals_when_narrowing() -> None:
+    """Naming a narrower set does not withdraw the wider grant; say so."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    root = "arn:aws:iam::712023778557:root"
+    role = "arn:aws:iam::712023778557:role/QuiltRegistry"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    _stub_prepare_reads(
+        s3_stubber,
+        sns_stubber,
+        bucket=bucket,
+        topic_arn=topic_arn,
+        bucket_policy=_quilt_bucket_policy(bucket, [root]),
+        sns_policy=bucket_lib.build_sns_topic_policy(
+            None, bucket, topic_arn, owning_account, [root]
+        ),
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        principals=[role],
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.principals_added == (role,)
+    assert plan.principals_removed == ()
+    # The root grant survives, so the narrowing did not take effect.
+    assert plan.principals_kept == (root,)
+    assert plan.principals_after == tuple(sorted([root, role]))
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_prepare_dry_run_warns_that_narrowing_kept_the_wider_grant(
+    monkeypatch, capsys
+) -> None:
+    plan = _fake_bucket_preparation_plan()
+    _install_prepare_fakes(monkeypatch, plan)
+    monkeypatch.setattr(bucket_tool, "_print_json", lambda _console, _document: None)
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--control-account-id", "123456789012", "--dry-run"]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "Kept:" in output
+    assert "arn:aws:iam::867344438354:root" in output
+    assert "quiltx bucket revoke bucket --principal" in output
+
+
+def test_preparation_plan_reports_nothing_kept_when_request_covers_everything() -> None:
+    """Re-preparing the full principal set must not emit a spurious Kept line."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    _stub_prepare_reads(
+        s3_stubber,
+        sns_stubber,
+        bucket=bucket,
+        topic_arn=topic_arn,
+        bucket_policy=_quilt_bucket_policy(bucket, [staging, open_bio]),
+        sns_policy=bucket_lib.build_sns_topic_policy(
+            None, bucket, topic_arn, owning_account, [staging, open_bio]
+        ),
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        principals=[staging, open_bio],
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.principals_kept == ()
+    assert plan.bucket_policy_changed is False
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_revocation_never_reports_a_removal_it_will_not_write() -> None:
+    """Reported principals come from the planned documents, not from intent."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    # Topic policy carrying the marker but no subscribe statement at all, so the
+    # SNS half of the revoke is a no-op while the S3 half proceeds.
+    marker_only = {
+        "Version": "2008-10-17",
+        "Statement": [
+            bucket_lib._build_sns_topic_publish_policy_statement(
+                bucket, topic_arn, owning_account
+            )
+        ],
+    }
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=_quilt_bucket_policy(bucket, [staging]),
+        sns_policy=marker_only,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.sns_policy_changed is False
+    assert plan.sns_principals_after == plan.sns_principals_before
+    # The S3 grant is genuinely withdrawn, so the removal is real.
+    assert plan.principals_removed == (staging,)
+    assert plan.handoff()["principals_removed"] == [staging]
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_revocation_writes_the_data_grant_before_notifications(monkeypatch) -> None:
+    """An interrupted revoke must fail closed: S3 access goes first."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    open_bio = "arn:aws:iam::867344438354:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    shared_bucket_policy = _quilt_bucket_policy(bucket, [staging, open_bio])
+    shared_sns_policy = bucket_lib.build_sns_topic_policy(
+        None, bucket, topic_arn, owning_account, [staging, open_bio]
+    )
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=shared_bucket_policy,
+        sns_policy=shared_sns_policy,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    calls: list[str] = []
+
+    def record(name: str, result: Any = None):
+        def _hook(*_args: Any, **_kwargs: Any):
+            calls.append(name)
+            return result
+
+        return _hook
+
+    s3_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.assert_no_pending_responses()
+    sns_stubber.deactivate()
+    monkeypatch.setattr(
+        bucket_lib, "_assert_bucket_revocation_is_current", record("assert")
+    )
+    monkeypatch.setattr(
+        bucket_lib,
+        "get_bucket_policy",
+        record("get_bucket_policy", shared_bucket_policy),
+    )
+    monkeypatch.setattr(bucket_lib, "apply_bucket_policy", record("put_bucket_policy"))
+    monkeypatch.setattr(
+        bucket_lib,
+        "_sns_policy_if_topic_exists",
+        record("get_topic_policy", (True, shared_sns_policy)),
+    )
+    monkeypatch.setattr(
+        bucket_lib, "apply_sns_topic_policy", record("set_topic_policy")
+    )
+
+    bucket_lib.apply_bucket_revocation(plan, s3_client=object(), sns_client=object())
+
+    assert calls == [
+        "assert",
+        "get_bucket_policy",
+        "put_bucket_policy",
+        "get_topic_policy",
+        "set_topic_policy",
+    ]
+    assert calls.index("put_bucket_policy") < calls.index("set_topic_policy")
+
+
+def test_add_still_accepts_iam_user_principals() -> None:
+    """Sharing the validator with prepare must not break `add`'s accepted input."""
+    assert (
+        bucket_tool._principal_arn_error(["arn:aws:iam::123456789012:user/svc"]) is None
+    )
+    assert (
+        bucket_tool._principal_arn_error(["arn:aws:iam::123456789012:user/team/svc"])
+        is None
+    )
+    # Groups are not valid resource-policy principals, so they stay rejected.
+    assert (
+        bucket_tool._principal_arn_error(["arn:aws:iam::123456789012:group/admins"])
+        is not None
+    )

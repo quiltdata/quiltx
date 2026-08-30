@@ -540,19 +540,26 @@ def _format_principals(principals: Sequence[str]) -> str:
 
 
 def _print_principal_delta(
-    console: Console,
-    already_granted: Sequence[str],
-    added: Sequence[str],
-    removed: Sequence[str],
+    console: Console, plan: bucket_lib.BucketPreparationPlan
 ) -> None:
     """Report the principal changes so no grant is gained or lost silently."""
-    print(f"Principals already granted: {_format_principals(already_granted)}")
-    print(f"Principals added: {_format_principals(added)}")
-    if removed:
+    print(f"Principals already granted: {_format_principals(plan.principals_before)}")
+    print(f"Principals added: {_format_principals(plan.principals_added)}")
+    if plan.principals_kept:
+        console.print(
+            "[yellow]Kept:[/yellow] "
+            f"{_format_principals(plan.principals_kept)} "
+            "(already granted, not requested)"
+        )
+        print(
+            "Grants accumulate, so naming a narrower set does not withdraw these. "
+            f"To remove one: quiltx bucket revoke {plan.bucket} --principal <ARN>"
+        )
+    if plan.principals_removed:
         console.print(
             "[red]WARNING:[/red] principals removed: "
-            f"{_format_principals(removed)}. Use `quiltx bucket revoke` for "
-            "deliberate removals."
+            f"{_format_principals(plan.principals_removed)}. Use "
+            "`quiltx bucket revoke` for deliberate removals."
         )
     else:
         print("Principals removed: (none)")
@@ -565,9 +572,7 @@ def _print_bucket_preparation_plan(plan: bucket_lib.BucketPreparationPlan) -> No
     print(f"Region: {plan.region}")
     print(f"Owning account: {plan.owning_account}")
     print(f"Requested principals: {_format_principals(plan.principals)}")
-    _print_principal_delta(
-        console, plan.principals_before, plan.principals_added, plan.principals_removed
-    )
+    _print_principal_delta(console, plan)
     print(f"Effective principals: {_format_principals(plan.principals_after)}")
     print(f"SNS topic: {plan.sns_topic_arn}")
     _print_plan_documents(console, plan)
@@ -617,9 +622,7 @@ def _control_account_id_from_catalog(catalog_arg: str) -> str:
 def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
     console = Console(width=120)
     print(f"Prepare s3://{plan.bucket} in {plan.region} for Quilt access.")
-    _print_principal_delta(
-        console, plan.principals_before, plan.principals_added, plan.principals_removed
-    )
+    _print_principal_delta(console, plan)
     print(f"SNS topic: {plan.sns_topic_arn}")
     response = input("Apply these AWS changes? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
@@ -629,11 +632,14 @@ _IAM_ARN_PREFIX = "arn:aws:iam::"
 # Explicit [0-9] rather than \d or str.isdigit(): both accept non-ASCII numerals
 # such as Arabic-Indic digits, which AWS rejects.
 _ACCOUNT_ID_RE = re.compile(r"[0-9]{12}\Z")
-# IAM role names are 1-64 characters of [\w+=,.@-]; re.ASCII keeps \w from
-# matching Unicode letters.
-_ROLE_NAME_RE = re.compile(r"[\w+=,.@-]{1,64}\Z", re.ASCII)
+# IAM role and user names are 1-64 characters of [\w+=,.@-]; re.ASCII keeps \w
+# from matching Unicode letters.
+_IAM_NAME_RE = re.compile(r"[\w+=,.@-]{1,64}\Z", re.ASCII)
 # IAM path segments are printable ASCII excluding space and the '/' delimiter.
-_ROLE_PATH_SEGMENT_RE = re.compile(r"[!-.0-~]+\Z")
+_IAM_PATH_SEGMENT_RE = re.compile(r"[!-.0-~]+\Z")
+# Resource types AWS accepts as an `AWS` principal in a resource policy. Groups
+# and instance profiles are excluded because AWS rejects them there.
+_IAM_PRINCIPAL_TYPES = ("role/", "user/")
 
 
 def _is_account_id(value: str) -> bool:
@@ -641,29 +647,34 @@ def _is_account_id(value: str) -> bool:
     return bool(_ACCOUNT_ID_RE.match(value))
 
 
-def _is_role_resource(resource: str) -> bool:
-    """Whether *resource* is a valid IAM ``role/[path/]name`` ARN resource."""
-    if not resource.startswith("role/"):
+def _is_iam_principal_resource(resource: str) -> bool:
+    """Whether *resource* is a valid ``role/`` or ``user/`` ARN resource."""
+    prefix = next(
+        (item for item in _IAM_PRINCIPAL_TYPES if resource.startswith(item)), None
+    )
+    if prefix is None:
         return False
-    segments = resource[len("role/") :].split("/")
-    if not _ROLE_NAME_RE.match(segments[-1]):
+    segments = resource[len(prefix) :].split("/")
+    if not _IAM_NAME_RE.match(segments[-1]):
         return False
-    return all(_ROLE_PATH_SEGMENT_RE.match(segment) for segment in segments[:-1])
+    return all(_IAM_PATH_SEGMENT_RE.match(segment) for segment in segments[:-1])
 
 
 def _is_principal_arn(principal: str) -> bool:
-    """Whether *principal* is an IAM role ARN or an account root ARN.
+    """Whether *principal* is an account root, IAM role, or IAM user ARN.
 
     Validated here rather than left to AWS: a malformed ARN would otherwise be
     written into the policy document a plan prints and only be rejected once the
-    call reaches S3 or SNS.
+    call reaches S3 or SNS. IAM users are accepted because they are valid bucket
+    policy principals and ``bucket add`` accepted them before this validator was
+    shared with ``bucket prepare``.
     """
     if not principal.startswith(_IAM_ARN_PREFIX):
         return False
     account_id, separator, resource = principal[len(_IAM_ARN_PREFIX) :].partition(":")
     if not separator or not _is_account_id(account_id):
         return False
-    return resource == "root" or _is_role_resource(resource)
+    return resource == "root" or _is_iam_principal_resource(resource)
 
 
 def _principal_arn_error(principals: Sequence[str]) -> str | None:
@@ -676,8 +687,8 @@ def _principal_arn_error(principals: Sequence[str]) -> str | None:
     for principal in principals:
         if not _is_principal_arn(principal):
             return (
-                "Error: --principal must be an IAM role ARN or an account root "
-                f"ARN with a 12-digit account ID, got {principal!r}"
+                "Error: --principal must be an IAM role ARN, user ARN, or account "
+                f"root ARN with a 12-digit account ID, got {principal!r}"
             )
     return None
 
@@ -1573,19 +1584,25 @@ def _print_principal_guidance() -> None:
         "Default (flag omitted): the entire control account root\n"
         "  arn:aws:iam::<CONTROL-ACCOUNT-ID>:root\n"
         "\n"
-        "To narrow access, pass one or more role ARNs (repeatable, or comma-\n"
-        "separated). Quilt does not publish an official list of roles for the\n"
-        "bucket policy; the documented principal is the control account root.\n"
-        "If you choose to restrict, inspect your Quilt CloudFormation stack's\n"
-        "IAM resources and select the roles appropriate for your use case.\n"
-        "Account root ARNs are accepted too, so a bucket shared by several\n"
-        "stacks can name each control account explicitly.\n"
+        "To name specific roles, pass one or more role ARNs (repeatable, or\n"
+        "comma-separated). Quilt does not publish an official list of roles for\n"
+        "the bucket policy; the documented principal is the control account\n"
+        "root. Inspect your Quilt CloudFormation stack's IAM resources and\n"
+        "select the roles appropriate for your use case. Account root and IAM\n"
+        "user ARNs are accepted too, so a bucket shared by several stacks can\n"
+        "name each control account explicitly.\n"
         "See: https://docs.quilt.bio/quilt-platform-administrator/crossaccount\n"
         "\n"
         "Grants accumulate: preparing a bucket adds the principals you name and\n"
         "keeps the ones already in the policy, so a bucket shared by several\n"
-        "stacks does not lose access when it is prepared again. Remove access\n"
-        "deliberately with `quiltx bucket revoke`.\n"
+        "stacks does not lose access when it is prepared again.\n"
+        "\n"
+        "This means naming a narrower set does NOT withdraw a wider one. To\n"
+        "replace the account-root grant with specific roles, prepare with the\n"
+        "roles and then drop the root explicitly:\n"
+        "  quiltx bucket prepare BUCKET --principal arn:aws:iam::123:role/Some\n"
+        "  quiltx bucket revoke BUCKET --control-account-id 123\n"
+        "Principals kept this way are listed under 'Kept' in the output.\n"
         "\n"
         "Example:\n"
         "  quiltx bucket add my-bucket \\\n"
@@ -1631,9 +1648,7 @@ def _confirm_bucket_add(
             f"a new topic will be created: {plan.sns_topic_arn}"
         )
     print()
-    _print_principal_delta(
-        console, plan.principals_before, plan.principals_added, plan.principals_removed
-    )
+    _print_principal_delta(console, plan)
     response = input("Continue? [y/N]: ").strip().lower()
     return response in {"y", "yes"}
 
@@ -1672,9 +1687,7 @@ def _print_dry_run_plan(
             f"a new topic will be created: {plan.sns_topic_arn}"
         )
     print()
-    _print_principal_delta(
-        console, plan.principals_before, plan.principals_added, plan.principals_removed
-    )
+    _print_principal_delta(console, plan)
     _print_plan_documents(console, plan)
 
 

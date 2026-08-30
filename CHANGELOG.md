@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   principals already granted, added, and removed; a removal is flagged in red
   and points at `bucket revoke`. ACL reconciliation names the grants it keeps on
   stderr. An eviction can no longer happen without being printed.
+- Narrowing access is now two explicit steps. Because grants accumulate,
+  `prepare --principal <role>` on a bucket that already grants the control
+  account root keeps that root grant instead of replacing it, so the account
+  retains access. Principals that were already granted but not requested are
+  reported under `Kept`, with the `bucket revoke` command that drops them, so an
+  attempted narrowing cannot be mistaken for a success. The `--principal`
+  guidance and README describe the two-step workflow.
+- `bucket revoke` writes the bucket policy before the topic policy, the reverse
+  of `bucket prepare`. The order decides which half survives an interrupted run:
+  withdrawing the S3 data grant first fails closed, leaving access removed and
+  notifications still flowing, whereas writing SNS first would leave the data
+  grant standing. Preparation keeps the opposite order because it must grant
+  topic access before pointing notifications at the topic.
 - Accept account root ARNs in `--principal`. The flag previously required
   `:role/`, so a bucket shared by several stacks could not name each control
   account explicitly even though the default grant has always been a root ARN.
@@ -58,8 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   space was accepted and written into the policy document a plan prints, only to
   fail once the call reached S3 or SNS. Account IDs now require twelve ASCII
   digits — `str.isdigit()` accepts non-ASCII numerals such as Arabic-Indic
-  digits, which AWS rejects — and role ARNs must match IAM's `role/[path/]name`
-  grammar. The same ASCII check applies to `--control-account-id`.
+  digits, which AWS rejects — and role and user ARNs must match IAM's
+  `<type>/[path/]name` grammar. The same ASCII check applies to
+  `--control-account-id`. `bucket add` and `bucket prepare` share the validator;
+  IAM user ARNs stay accepted because they are valid bucket policy principals
+  and `add` accepted them before, while IAM groups remain rejected because AWS
+  does not accept them in a resource policy.
+- Report only the principal changes `bucket revoke` will actually write. The
+  planned removal was derived from the requested principals, so a statement that
+  was planned but never written — because dropping it would have left an invalid
+  empty policy — was still reported as removed, including in the `--json`
+  handoff an operator keeps as the record.
 - Deduplicate principals when a statement is first written, not only when an
   existing one is merged. A repeated `--principal` was previously stored
   verbatim and collapsed on the next run, so an unchanged request produced a
