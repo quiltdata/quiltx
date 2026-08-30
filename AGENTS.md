@@ -29,6 +29,17 @@ registration, live access, and index wiring separately:
   cross-account grant before registration using control-account credentials and
   reports the probing principal.
 
+Cross-account grants accumulate. `quiltx.bucket.PRINCIPAL_ACCUMULATING_SIDS`
+lists the two statements whose `Principal.AWS` entries are unioned instead of
+replaced (`QuiltCrossAccountAccess` on the bucket policy and
+`QuiltCrossAccountSNSAccess` on the topic policy). Everything else, including
+the `QuiltBucketNotifications` publish statement that doubles as the topic
+ownership marker, keeps replace-by-Sid semantics. Existing principals retain
+their document order and requested ones are appended, so a repeat run is a
+no-op. `quiltx bucket revoke` is the only path that removes a principal; it
+rewrites just those two statements, deletes the bucket policy when no statement
+would remain, and leaves notifications and the SNS topic alone.
+
 ### ECS Tool (`quiltx ecs`)
 
 Provides catalog ECS operations:

@@ -8,6 +8,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-29
+
+### Changed
+
+- Accumulate cross-account grants instead of replacing them
+  ([#102](https://github.com/quiltdata/quiltx/issues/102)). `bucket prepare`
+  rewrote its `QuiltCrossAccountAccess` and `QuiltCrossAccountSNSAccess`
+  statements to exactly the principals passed in, which silently dropped
+  whatever a previous run had granted. That asked the bucket owner to declare
+  every consuming stack on every run, but the owner is typically asked for one
+  stack at a time, months apart, with no shared record of prior consumers —
+  `s3://protology` was registered in both `quilt-staging` and `open-quilt-bio`,
+  and preparing for either evicted the other. Both statements now union the
+  principals already present with the requested ones, deduped and in document
+  order, so re-running is still a no-op and a shared bucket keeps working. Every
+  other Sid keeps replace-by-Sid semantics, including the SNS publish statement
+  that doubles as the topic ownership marker. The same fix applies to ACL
+  reconciliation, where two stacks listing the same bucket previously raced with
+  last-writer-wins.
+- Report principal changes wherever grants are shown. `bucket prepare --dry-run`
+  and `bucket add --dry-run`, plus both confirmation prompts, now list the
+  principals already granted, added, and removed; a removal is flagged in red
+  and points at `bucket revoke`. ACL reconciliation names the grants it keeps on
+  stderr. An eviction can no longer happen without being printed.
+- Narrowing access is now two explicit steps. Because grants accumulate,
+  `prepare --principal <role>` on a bucket that already grants the control
+  account root keeps that root grant instead of replacing it, so the account
+  retains access. Principals that were already granted but not requested are
+  reported under `Kept`, with the `bucket revoke` command that drops them, so an
+  attempted narrowing cannot be mistaken for a success. The `--principal`
+  guidance and README describe the two-step workflow.
+- `bucket revoke` writes the bucket policy before the topic policy, the reverse
+  of `bucket prepare`. The order decides which half survives an interrupted run:
+  withdrawing the S3 data grant first fails closed, leaving access removed and
+  notifications still flowing, whereas writing SNS first would leave the data
+  grant standing. Preparation keeps the opposite order because it must grant
+  topic access before pointing notifications at the topic.
+- Accept account root ARNs in `--principal`. The flag previously required
+  `:role/`, so a bucket shared by several stacks could not name each control
+  account explicitly even though the default grant has always been a root ARN.
+  `bucket add` and `bucket prepare` now share one validator that accepts role
+  and account-root ARNs.
+
+### Added
+
+- `quiltx bucket revoke BUCKET --control-account-id X` (or `--principal ARN`) as
+  the deliberate removal path for cross-account access. It rewrites only the two
+  principal-bearing Quilt statements, leaving bucket notifications and the SNS
+  topic in place because other stacks may still be consuming them, and deletes
+  the bucket policy outright when removing the last principal would leave an
+  invalid empty statement list. Supports `--dry-run` and `--json --yes`, and
+  validates both the bucket policy and the topic policy against their planning
+  baselines before the first write, so a revocation that spans both cannot start
+  against drifted state. Revoking a principal that holds no grant reports it and
+  changes nothing.
+
+### Fixed
+
+- Validate principal ARNs locally instead of letting AWS reject them. A
+  malformed ARN such as `arn:aws:iam::abc:root` or a role name containing a
+  space was accepted and written into the policy document a plan prints, only to
+  fail once the call reached S3 or SNS. Account IDs now require twelve ASCII
+  digits — `str.isdigit()` accepts non-ASCII numerals such as Arabic-Indic
+  digits, which AWS rejects — and role and user ARNs must match IAM's
+  `<type>/[path/]name` grammar. The same ASCII check applies to
+  `--control-account-id`. `bucket add` and `bucket prepare` share the validator;
+  IAM user ARNs stay accepted because they are valid bucket policy principals
+  and `add` accepted them before, while IAM groups remain rejected because AWS
+  does not accept them in a resource policy.
+- Refuse to accumulate onto a Quilt statement that would change meaning. Because
+  accumulation keeps the existing principals but takes every other field from the
+  freshly built statement, a hand-written `QuiltCrossAccountAccess` carrying
+  `Effect: Deny` silently became `Allow`, and a `*` principal was carried
+  forward — turning a deliberate lockdown into world **write** access, since
+  Quilt's actions include `s3:PutObject` and `s3:DeleteObject`. Neither was
+  recoverable with `bucket revoke`, which only removes named IAM ARNs. Both cases
+  now raise `PolicyConflictError` during planning, before any write, telling the
+  operator to remove or rename the statement by hand. SNS's own
+  `__default_statement_ID`, which legitimately uses `*`, is unaffected because
+  only the two accumulating Sids are checked.
+- Report the effective principal set in the `--json` handoff. It listed only the
+  principals the run requested, so the record an operator keeps understated who
+  could reach the bucket whenever grants accumulated. `effective_principals` is
+  now included alongside the requested `principals`.
+- Use complete account IDs in `--principal` guidance. The printed examples used a
+  three-digit account, so copying one failed the new validator.
+- Report only the principal changes `bucket revoke` will actually write. The
+  planned removal was derived from the requested principals, so a statement that
+  was planned but never written — because dropping it would have left an invalid
+  empty policy — was still reported as removed, including in the `--json`
+  handoff an operator keeps as the record.
+- Deduplicate principals when a statement is first written, not only when an
+  existing one is merged. A repeated `--principal` was previously stored
+  verbatim and collapsed on the next run, so an unchanged request produced a
+  second write instead of the documented no-op.
+- Require the bucket-specific Quilt ownership marker before `bucket revoke`
+  rewrites a topic policy. Preparation already demands that marker before
+  adopting a topic it did not create, but revocation trusted anything at the
+  canonical ARN. Only the SNS mutation is gated, so an unrelated topic that
+  happens to share the canonical name cannot block withdrawing the S3 grant.
+
 ## [0.20.0] - 2026-08-27
 
 ### Changed

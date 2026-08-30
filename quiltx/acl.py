@@ -1709,6 +1709,20 @@ def _register_bucket_with_retry(
         sqs_client=sqs_client,
         lambda_client=lambda_client,
     )
+    if plan.principals_before:
+        # Two stacks can each list the same bucket in their ACL. Grants
+        # accumulate (issue #102), so say which ones were kept.
+        print(
+            f"  bucket {bucket}: keeping existing grants for "
+            f"{', '.join(plan.principals_before)}",
+            file=sys.stderr,
+        )
+    if plan.principals_removed:
+        print(
+            f"  ! bucket {bucket}: removing grants for "
+            f"{', '.join(plan.principals_removed)}",
+            file=sys.stderr,
+        )
     bucket_lib.apply_bucket_preparation(
         plan,
         s3_client=s3_client,
