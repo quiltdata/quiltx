@@ -207,6 +207,10 @@ class PreparationDriftError(RuntimeError):
     """Raised when AWS state changes between preparation planning and apply."""
 
 
+class PolicyConflictError(ValueError):
+    """Raised when an existing Quilt statement cannot be safely accumulated onto."""
+
+
 def _sorted_principals(principals: Any) -> tuple[str, ...]:
     """Return principals in a stable, comparable order for reporting."""
     return tuple(sorted(principals))
@@ -275,12 +279,19 @@ class BucketPreparationPlan:
         return _sorted_principals(set(self.principals_before) - set(self.principals))
 
     def handoff(self) -> dict[str, Any]:
-        """Return the minimal non-secret handoff for the catalog operator."""
+        """Return the minimal non-secret handoff for the catalog operator.
+
+        ``principals`` is what this run asked for; ``effective_principals`` is
+        what the bucket actually grants once applied. They differ whenever grants
+        accumulate, and the operator's record needs the effective set to be
+        accurate about who can reach the bucket.
+        """
         return {
             "bucket": self.bucket,
             "region": self.region,
             "owning_account": self.owning_account,
             "principals": list(self.principals),
+            "effective_principals": list(self.principals_after),
             "sns_topic_arn": self.sns_topic_arn,
         }
 
@@ -2133,6 +2144,40 @@ def _principal_value(principals: Sequence[str]) -> str | list[str]:
     return values[0] if len(values) == 1 else values
 
 
+def _assert_statement_is_accumulable(existing: Mapping[str, Any], sid: Any) -> None:
+    """Refuse to accumulate onto a statement whose meaning that would change.
+
+    Accumulation keeps the existing principals but takes every other field from
+    the freshly built statement. Two existing statements make that unsafe:
+
+    * ``Effect: Deny`` would silently become ``Allow``, inverting a deliberate
+      lockdown into a grant.
+    * a ``*`` principal would be carried into the new statement, so a bucket
+      exposed under this Sid stays exposed -- and because Quilt's actions include
+      ``s3:PutObject`` and ``s3:DeleteObject``, ``Allow *`` is world-writable.
+
+    Neither is recoverable with ``bucket revoke``, which only removes named IAM
+    ARNs, so this fails loudly and leaves the decision to the operator.
+    """
+    effect = existing.get("Effect")
+    if effect is not None and effect != "Allow":
+        raise PolicyConflictError(
+            f"existing statement {sid!r} has Effect {effect!r}, not 'Allow'; "
+            "accumulating Quilt principals onto it would flip its meaning. "
+            "Remove or rename that statement by hand before preparing"
+        )
+    wildcards = [
+        principal for principal in statement_principals(existing) if "*" in principal
+    ]
+    if wildcards:
+        raise PolicyConflictError(
+            f"existing statement {sid!r} grants wildcard principal "
+            f"{', '.join(wildcards)}; accumulating would preserve public access "
+            "to Quilt's read/write actions. Remove or rename that statement by "
+            "hand before preparing"
+        )
+
+
 def _statement_with_accumulated_principals(
     existing: Mapping[str, Any], statement: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -2207,11 +2252,13 @@ def _merge_policy_statements(
     replaced = False
     for idx, existing in enumerate(statements):
         if existing.get("Sid") == sid:
-            statements[idx] = (
-                _statement_with_accumulated_principals(existing, statement)
-                if accumulate
-                else statement
-            )
+            if accumulate:
+                _assert_statement_is_accumulable(existing, sid)
+                statements[idx] = _statement_with_accumulated_principals(
+                    existing, statement
+                )
+            else:
+                statements[idx] = statement
             replaced = True
             break
     if not replaced:

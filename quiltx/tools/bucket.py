@@ -1600,13 +1600,14 @@ def _print_principal_guidance() -> None:
         "This means naming a narrower set does NOT withdraw a wider one. To\n"
         "replace the account-root grant with specific roles, prepare with the\n"
         "roles and then drop the root explicitly:\n"
-        "  quiltx bucket prepare BUCKET --principal arn:aws:iam::123:role/Some\n"
-        "  quiltx bucket revoke BUCKET --control-account-id 123\n"
+        "  quiltx bucket prepare BUCKET \\\n"
+        "      --principal arn:aws:iam::123456789012:role/SomeRole\n"
+        "  quiltx bucket revoke BUCKET --control-account-id 123456789012\n"
         "Principals kept this way are listed under 'Kept' in the output.\n"
         "\n"
         "Example:\n"
         "  quiltx bucket add my-bucket \\\n"
-        "      --principal arn:aws:iam::123:role/<stack>-SomeRole-XXXX"
+        "      --principal arn:aws:iam::123456789012:role/<stack>-SomeRole-XXXX"
     )
 
 

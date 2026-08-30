@@ -77,6 +77,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IAM user ARNs stay accepted because they are valid bucket policy principals
   and `add` accepted them before, while IAM groups remain rejected because AWS
   does not accept them in a resource policy.
+- Refuse to accumulate onto a Quilt statement that would change meaning. Because
+  accumulation keeps the existing principals but takes every other field from the
+  freshly built statement, a hand-written `QuiltCrossAccountAccess` carrying
+  `Effect: Deny` silently became `Allow`, and a `*` principal was carried
+  forward — turning a deliberate lockdown into world **write** access, since
+  Quilt's actions include `s3:PutObject` and `s3:DeleteObject`. Neither was
+  recoverable with `bucket revoke`, which only removes named IAM ARNs. Both cases
+  now raise `PolicyConflictError` during planning, before any write, telling the
+  operator to remove or rename the statement by hand. SNS's own
+  `__default_statement_ID`, which legitimately uses `*`, is unaffected because
+  only the two accumulating Sids are checked.
+- Report the effective principal set in the `--json` handoff. It listed only the
+  principals the run requested, so the record an operator keeps understated who
+  could reach the bucket whenever grants accumulated. `effective_principals` is
+  now included alongside the requested `principals`.
+- Use complete account IDs in `--principal` guidance. The printed examples used a
+  three-digit account, so copying one failed the new validator.
 - Report only the principal changes `bucket revoke` will actually write. The
   planned removal was derived from the requested principals, so a statement that
   was planned but never written — because dropping it would have left an invalid

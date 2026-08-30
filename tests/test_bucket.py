@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
+import re
 import sys
 from dataclasses import dataclass, replace
 from types import ModuleType, SimpleNamespace
@@ -76,8 +78,8 @@ def test_merge_bucket_policy_appends() -> None:
     ]
 
 
-def test_merge_bucket_policy_rewrites_quilt_statement_without_principals() -> None:
-    """A malformed Quilt statement is corrected, not left in place."""
+def test_merge_bucket_policy_refuses_to_flip_a_deny_statement() -> None:
+    """Accumulating onto Deny would invert a lockdown into a grant."""
     existing = {
         "Version": "2012-10-17",
         "Statement": [
@@ -86,6 +88,17 @@ def test_merge_bucket_policy_rewrites_quilt_statement_without_principals() -> No
                 "Effect": "Deny",
             }
         ],
+    }
+    statement = bucket_lib.build_quilt_policy_statement("bucket", "123456789012")
+    with pytest.raises(bucket_lib.PolicyConflictError, match="not 'Allow'"):
+        bucket_lib.merge_bucket_policy(existing, statement)
+
+
+def test_merge_bucket_policy_repairs_a_statement_with_no_effect() -> None:
+    """A statement without an Effect is not a grant, so rewriting it is safe."""
+    existing = {
+        "Version": "2012-10-17",
+        "Statement": [{"Sid": "QuiltCrossAccountAccess"}],
     }
     statement = bucket_lib.build_quilt_policy_statement("bucket", "123456789012")
     policy = bucket_lib.merge_bucket_policy(existing, statement)
@@ -1190,6 +1203,12 @@ def test_prepare_json_is_minimal_and_uses_no_catalog(monkeypatch, capsys) -> Non
         "region": "us-west-2",
         "owning_account": "111122223333",
         "principals": ["arn:aws:iam::123456789012:root"],
+        # The requested principal plus the one accumulation kept, so the
+        # operator's record states who can actually reach the bucket.
+        "effective_principals": [
+            "arn:aws:iam::123456789012:root",
+            "arn:aws:iam::867344438354:root",
+        ],
         "sns_topic_arn": (
             "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
         ),
@@ -5498,3 +5517,195 @@ def test_add_still_accepts_iam_user_principals() -> None:
         bucket_tool._principal_arn_error(["arn:aws:iam::123456789012:group/admins"])
         is not None
     )
+
+
+def _quilt_statement_shaped(**overrides: Any) -> dict[str, Any]:
+    statement = {
+        "Sid": bucket_lib.QUILT_POLICY_SID,
+        "Effect": "Allow",
+        "Principal": {"AWS": "arn:aws:iam::712023778557:root"},
+        "Action": list(bucket_lib.QUILT_POLICY_ACTIONS),
+        "Resource": ["arn:aws:s3:::protology", "arn:aws:s3:::protology/*"],
+    }
+    statement.update(overrides)
+    return statement
+
+
+def test_accumulation_refuses_a_wildcard_principal() -> None:
+    """A `*` grant must not be carried into Quilt's read/write statement."""
+    existing = {
+        "Version": "2012-10-17",
+        "Statement": [_quilt_statement_shaped(Principal={"AWS": "*"})],
+    }
+    with pytest.raises(bucket_lib.PolicyConflictError, match="wildcard principal"):
+        bucket_lib.merge_bucket_policy(
+            existing,
+            bucket_lib.build_quilt_policy_statement("protology", "867344438354"),
+        )
+
+
+def test_accumulation_refuses_a_wildcard_among_several_principals() -> None:
+    existing = {
+        "Version": "2012-10-17",
+        "Statement": [
+            _quilt_statement_shaped(
+                Principal={"AWS": ["arn:aws:iam::712023778557:root", "*"]}
+            )
+        ],
+    }
+    with pytest.raises(bucket_lib.PolicyConflictError, match=r"wildcard principal \*"):
+        bucket_lib.merge_bucket_policy(
+            existing,
+            bucket_lib.build_quilt_policy_statement("protology", "867344438354"),
+        )
+
+
+def test_accumulation_refuses_a_deny_lockdown_with_a_wildcard() -> None:
+    """The dangerous case: Deny * would become Allow * on Quilt's actions."""
+    existing = {
+        "Version": "2012-10-17",
+        "Statement": [_quilt_statement_shaped(Effect="Deny", Principal={"AWS": "*"})],
+    }
+    with pytest.raises(bucket_lib.PolicyConflictError, match="not 'Allow'"):
+        bucket_lib.merge_bucket_policy(
+            existing,
+            bucket_lib.build_quilt_policy_statement("protology", "867344438354"),
+        )
+
+
+def test_accumulation_refuses_a_wildcard_on_the_sns_subscribe_statement() -> None:
+    topic_arn = "arn:aws:sns:us-east-2:573011045968:quilt-protology-notifications"
+    existing = {
+        "Version": "2008-10-17",
+        "Statement": [
+            bucket_lib._build_sns_topic_publish_policy_statement(
+                "protology", topic_arn, "573011045968"
+            ),
+            {
+                "Sid": bucket_lib.SNS_SUBSCRIBE_POLICY_SID,
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Action": ["sns:GetTopicAttributes", "sns:Subscribe"],
+                "Resource": topic_arn,
+            },
+        ],
+    }
+    with pytest.raises(bucket_lib.PolicyConflictError, match="wildcard principal"):
+        bucket_lib.build_sns_topic_policy(
+            existing,
+            "protology",
+            topic_arn,
+            "573011045968",
+            ["arn:aws:iam::867344438354:root"],
+        )
+
+
+def test_sns_owner_statement_wildcard_is_not_treated_as_accumulable() -> None:
+    """SNS's own `__default_statement_ID` legitimately uses `*`; leave it alone."""
+    topic_arn = "arn:aws:sns:us-east-2:573011045968:quilt-protology-notifications"
+    policy = bucket_lib.build_sns_topic_policy(
+        None, "protology", topic_arn, "573011045968", ["arn:aws:iam::867344438354:root"]
+    )
+    owner = policy["Statement"][0]
+    assert owner["Sid"] == "__default_statement_ID"
+    assert owner["Principal"] == {"AWS": "*"}
+    # Re-running must still converge rather than trip the wildcard guard.
+    assert (
+        bucket_lib.build_sns_topic_policy(
+            policy,
+            "protology",
+            topic_arn,
+            "573011045968",
+            ["arn:aws:iam::867344438354:root"],
+        )
+        == policy
+    )
+
+
+def test_prepare_reports_a_policy_conflict_and_writes_nothing(
+    monkeypatch, capsys
+) -> None:
+    """The guard surfaces as a clean CLI error before any AWS write."""
+    _install_prepare_fakes(monkeypatch, _fake_bucket_preparation_plan())
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "build_bucket_preparation_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            bucket_lib.PolicyConflictError(
+                "existing statement 'QuiltCrossAccountAccess' grants wildcard "
+                "principal *; accumulating would preserve public access"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        bucket_tool.bucket_lib,
+        "apply_bucket_preparation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not write after a policy conflict")
+        ),
+    )
+
+    result = bucket_tool.main(
+        ["prepare", "bucket", "--control-account-id", "123456789012", "--yes"]
+    )
+
+    assert result == 1
+    assert "PolicyConflictError" in capsys.readouterr().err
+
+
+def test_preparation_plan_rejects_a_wildcard_bucket_policy_before_writing() -> None:
+    """End to end through the planner: the read happens, the plan does not."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_response(
+        "get_bucket_policy",
+        {
+            "Policy": json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [_quilt_statement_shaped(Principal={"AWS": "*"})],
+                }
+            )
+        },
+        {"Bucket": bucket},
+    )
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.PolicyConflictError, match="wildcard principal"):
+        bucket_lib.build_bucket_preparation_plan(
+            bucket,
+            region,
+            owning_account,
+            control_account_id="867344438354",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_principal_guidance_examples_pass_the_validator() -> None:
+    """Every ARN the guidance prints must be copy-pasteable."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        bucket_tool._print_principal_guidance()
+    text = buffer.getvalue()
+
+    arns = re.findall(r"arn:aws:iam::[^\s\\]+", text)
+    assert arns, "guidance should show at least one example ARN"
+    for arn in arns:
+        # Neutralize <PLACEHOLDER> tokens so the literal parts -- above all the
+        # account ID -- are what actually gets validated.
+        candidate = arn.replace("<CONTROL-ACCOUNT-ID>", "123456789012")
+        candidate = re.sub(r"<[^>]*>", "Placeholder", candidate)
+        assert bucket_tool._principal_arn_error([candidate]) is None, arn
