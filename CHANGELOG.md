@@ -53,10 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Validate the account ID in `--principal`. A malformed ARN such as
-  `arn:aws:iam::abc:root` was accepted and written into the policy document a
-  plan prints, only to be rejected once the call reached S3 or SNS. Role and
-  account-root ARNs now require a 12-digit account ID locally.
+- Validate principal ARNs locally instead of letting AWS reject them. A
+  malformed ARN such as `arn:aws:iam::abc:root` or a role name containing a
+  space was accepted and written into the policy document a plan prints, only to
+  fail once the call reached S3 or SNS. Account IDs now require twelve ASCII
+  digits — `str.isdigit()` accepts non-ASCII numerals such as Arabic-Indic
+  digits, which AWS rejects — and role ARNs must match IAM's `role/[path/]name`
+  grammar. The same ASCII check applies to `--control-account-id`.
+- Deduplicate principals when a statement is first written, not only when an
+  existing one is merged. A repeated `--principal` was previously stored
+  verbatim and collapsed on the next run, so an unchanged request produced a
+  second write instead of the documented no-op.
+- Require the bucket-specific Quilt ownership marker before `bucket revoke`
+  rewrites a topic policy. Preparation already demands that marker before
+  adopting a topic it did not create, but revocation trusted anything at the
+  canonical ARN. Only the SNS mutation is gated, so an unrelated topic that
+  happens to share the canonical name cannot block withdrawing the S3 grant.
 
 ## [0.20.0] - 2026-08-27
 

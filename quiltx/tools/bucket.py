@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
 from typing import Any, Mapping, Sequence
@@ -625,23 +626,44 @@ def _confirm_bucket_preparation(plan: bucket_lib.BucketPreparationPlan) -> bool:
 
 
 _IAM_ARN_PREFIX = "arn:aws:iam::"
+# Explicit [0-9] rather than \d or str.isdigit(): both accept non-ASCII numerals
+# such as Arabic-Indic digits, which AWS rejects.
+_ACCOUNT_ID_RE = re.compile(r"[0-9]{12}\Z")
+# IAM role names are 1-64 characters of [\w+=,.@-]; re.ASCII keeps \w from
+# matching Unicode letters.
+_ROLE_NAME_RE = re.compile(r"[\w+=,.@-]{1,64}\Z", re.ASCII)
+# IAM path segments are printable ASCII excluding space and the '/' delimiter.
+_ROLE_PATH_SEGMENT_RE = re.compile(r"[!-.0-~]+\Z")
+
+
+def _is_account_id(value: str) -> bool:
+    """Whether *value* is a 12-digit ASCII AWS account ID."""
+    return bool(_ACCOUNT_ID_RE.match(value))
+
+
+def _is_role_resource(resource: str) -> bool:
+    """Whether *resource* is a valid IAM ``role/[path/]name`` ARN resource."""
+    if not resource.startswith("role/"):
+        return False
+    segments = resource[len("role/") :].split("/")
+    if not _ROLE_NAME_RE.match(segments[-1]):
+        return False
+    return all(_ROLE_PATH_SEGMENT_RE.match(segment) for segment in segments[:-1])
 
 
 def _is_principal_arn(principal: str) -> bool:
     """Whether *principal* is an IAM role ARN or an account root ARN.
 
-    The account ID is checked here rather than left to AWS: a malformed ARN
-    would otherwise be written into the policy document a plan prints and only
-    be rejected once the call reaches S3 or SNS.
+    Validated here rather than left to AWS: a malformed ARN would otherwise be
+    written into the policy document a plan prints and only be rejected once the
+    call reaches S3 or SNS.
     """
     if not principal.startswith(_IAM_ARN_PREFIX):
         return False
     account_id, separator, resource = principal[len(_IAM_ARN_PREFIX) :].partition(":")
-    if not separator or len(account_id) != 12 or not account_id.isdigit():
+    if not separator or not _is_account_id(account_id):
         return False
-    if resource == "root":
-        return True
-    return resource.startswith("role/") and len(resource) > len("role/")
+    return resource == "root" or _is_role_resource(resource)
 
 
 def _principal_arn_error(principals: Sequence[str]) -> str | None:
@@ -661,9 +683,7 @@ def _principal_arn_error(principals: Sequence[str]) -> str | None:
 
 
 def _control_account_id_error(control_account_id: str | None) -> str | None:
-    if control_account_id and (
-        len(control_account_id) != 12 or not control_account_id.isdigit()
-    ):
+    if control_account_id and not _is_account_id(control_account_id):
         return "Error: --control-account-id must be a 12-digit AWS account ID"
     return None
 

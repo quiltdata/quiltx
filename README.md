@@ -89,8 +89,10 @@ uvx quiltx bucket revoke my-bucket --control-account-id 123456789012 --dry-run
 
 `revoke` rewrites only the two cross-account Quilt statements; bucket
 notifications and the SNS topic stay in place because other stacks may still
-consume them. Removing the last principal deletes the bucket policy rather than
-writing an invalid empty one.
+consume them. Removing the last Quilt principal drops the Quilt statement and
+keeps the rest of the bucket policy; only when that statement was the sole one
+in the document is the policy deleted, since S3 rejects an empty statement list.
+`--dry-run` says so explicitly when it applies.
 
 Use repeatable `--principal arn:aws:iam::123456789012:role/...` options to grant
 specific Quilt roles instead of the control-account root. Account root ARNs are

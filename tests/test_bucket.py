@@ -5091,3 +5091,164 @@ def test_shared_bucket_lifecycle_prepare_prepare_revoke() -> None:
     sns_stubber.assert_no_pending_responses()
     s3_stubber.deactivate()
     sns_stubber.deactivate()
+
+
+def test_repeated_principal_is_normalized_on_first_insert() -> None:
+    """A duplicated --principal must not cost a second, cosmetic write."""
+    statement = bucket_lib.build_quilt_policy_statement(
+        "bucket", "", principals=["arn:aws:iam::712023778557:root"] * 2
+    )
+    assert statement["Principal"] == {"AWS": "arn:aws:iam::712023778557:root"}
+
+    first = bucket_lib.merge_bucket_policy(None, statement)
+    assert bucket_lib.merge_bucket_policy(first, statement) == first
+
+
+def test_repeated_principal_is_normalized_in_sns_subscribe_statement() -> None:
+    topic_arn = "arn:aws:sns:us-east-2:573011045968:quilt-protology-notifications"
+    duplicated = ["arn:aws:iam::712023778557:root"] * 2
+    policy = bucket_lib.build_sns_topic_policy(
+        None, "protology", topic_arn, "573011045968", duplicated
+    )
+    subscribe = bucket_lib._find_policy_statement(
+        policy, bucket_lib.SNS_SUBSCRIBE_POLICY_SID
+    )
+    assert subscribe is not None
+    assert subscribe["Principal"] == {"AWS": "arn:aws:iam::712023778557:root"}
+    assert (
+        bucket_lib.build_sns_topic_policy(
+            policy, "protology", topic_arn, "573011045968", duplicated
+        )
+        == policy
+    )
+
+
+def test_resolve_principal_list_dedupes_requested_principals() -> None:
+    assert bucket_lib.resolve_principal_list(
+        None,
+        [
+            "arn:aws:iam::712023778557:root",
+            "arn:aws:iam::867344438354:root",
+            "arn:aws:iam::712023778557:root",
+        ],
+    ) == (
+        "arn:aws:iam::712023778557:root",
+        "arn:aws:iam::867344438354:root",
+    )
+
+
+def test_revocation_refuses_to_rewrite_a_topic_without_the_bucket_marker() -> None:
+    """A same-named topic quiltx did not prepare must not be rewritten."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    # Someone else's topic that happens to carry the Quilt subscribe Sid but not
+    # the bucket-specific publish marker.
+    foreign_sns_policy = {
+        "Version": "2008-10-17",
+        "Statement": [
+            bucket_lib._build_sns_topic_subscribe_policy_statement(topic_arn, [staging])
+        ],
+    }
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=_quilt_bucket_policy(bucket, [staging]),
+        sns_policy=foreign_sns_policy,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.NotificationConflictError, match="ownership marker"):
+        bucket_lib.build_bucket_revocation_plan(
+            bucket,
+            region,
+            owning_account,
+            control_account_id="712023778557",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_revocation_ignores_an_unmarked_topic_it_would_not_touch() -> None:
+    """An unrelated same-named topic must not block withdrawing the S3 grant."""
+    bucket = "protology"
+    region = "us-east-2"
+    owning_account = "573011045968"
+    staging = "arn:aws:iam::712023778557:root"
+    topic_arn = f"arn:aws:sns:{region}:{owning_account}:quilt-protology-notifications"
+    unrelated_sns_policy = {
+        "Version": "2008-10-17",
+        "Statement": [{"Sid": "SomeoneElse", "Effect": "Allow"}],
+    }
+    s3_client, s3_stubber, sns_client, sns_stubber = _revocation_stubbers(
+        bucket=bucket,
+        region=region,
+        topic_arn=topic_arn,
+        bucket_policy=_quilt_bucket_policy(bucket, [staging]),
+        sns_policy=unrelated_sns_policy,
+    )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_revocation_plan(
+        bucket,
+        region,
+        owning_account,
+        control_account_id="712023778557",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.sns_policy is None
+    assert plan.sns_policy_changed is False
+    assert plan.bucket_policy_changed is True
+    assert plan.principals_removed == (staging,)
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+@pytest.mark.parametrize(
+    "account_id",
+    ["1234567890", "1234567890123", "abcdefghijkl", "\u0661" * 12, "12345678901a"],
+)
+def test_control_account_id_must_be_twelve_ascii_digits(account_id) -> None:
+    assert bucket_tool._control_account_id_error(account_id) is not None
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [
+        "arn:aws:iam::123456789012:role/bad role",
+        "arn:aws:iam::123456789012:role//nested",
+        "arn:aws:iam::123456789012:role/" + "x" * 65,
+        "arn:aws:iam::\u0661\u0661\u0661\u0661\u0661\u0661\u0661\u0661\u0661\u0661"
+        "\u0661\u0661:root",
+    ],
+)
+def test_principal_arn_validator_rejects_malformed_arns(principal) -> None:
+    assert bucket_tool._principal_arn_error([principal]) is not None
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [
+        "arn:aws:iam::123456789012:root",
+        "arn:aws:iam::123456789012:role/quilt-registry",
+        "arn:aws:iam::123456789012:role/service-role/QuiltRole",
+        "arn:aws:iam::123456789012:role/Quilt_Role+1=a,b.c@d-e",
+    ],
+)
+def test_principal_arn_validator_accepts_valid_iam_grammar(principal) -> None:
+    assert bucket_tool._principal_arn_error([principal]) is None

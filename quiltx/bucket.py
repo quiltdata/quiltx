@@ -379,9 +379,7 @@ def build_quilt_policy_statement(
     is used.
     """
     if principals:
-        principal_value: str | list[str] = (
-            list(principals) if len(principals) > 1 else principals[0]
-        )
+        principal_value: str | list[str] = _principal_value(principals)
     else:
         principal_value = f"arn:aws:iam::{control_account_id}:root"
     return {
@@ -831,7 +829,7 @@ def resolve_principal_list(
     control_account_id: str | None, principals: Sequence[str] | None
 ) -> tuple[str, ...]:
     """Return the principals to act on, defaulting to the control account root."""
-    principal_list = tuple(principals or ())
+    principal_list = tuple(_dedupe_principals(principals or ()))
     if principal_list:
         return principal_list
     if not control_account_id:
@@ -1121,6 +1119,19 @@ def build_bucket_revocation_plan(
 
     sns_policy: dict[str, Any] | None = None
     if existing_sns_policy is not None and sns_after != sns_before:
+        if not _sns_policy_has_bucket_marker(
+            existing_sns_policy, bucket, sns_topic_arn, owning_account
+        ):
+            # Preparation demands this marker before adopting a topic it did not
+            # create; revocation must not rewrite an unverified topic policy
+            # either. Only a mutation is blocked, so an unrelated topic that
+            # happens to share the canonical name cannot stop the S3 grant from
+            # being withdrawn.
+            raise NotificationConflictError(
+                f"topic {sns_topic_arn} lacks a bucket-specific Quilt ownership "
+                f"marker for {bucket}, so its policy will not be rewritten; "
+                "rename or remove the colliding topic before revoking"
+            )
         if sns_after:
             sns_policy = dict(existing_sns_policy)
             sns_policy["Statement"] = _merge_policy_statements(
@@ -2064,8 +2075,13 @@ def _dedupe_principals(principals: Sequence[str]) -> list[str]:
 
 
 def _principal_value(principals: Sequence[str]) -> str | list[str]:
-    """Render principals the way AWS does: a bare string for one, else a list."""
-    values = list(principals)
+    """Render principals the way AWS does: a bare string for one, else a list.
+
+    Deduplicates first. A repeated ``--principal`` would otherwise be written
+    verbatim on the first insert and collapsed on the next run, so an unchanged
+    request would produce a second write instead of the documented no-op.
+    """
+    values = _dedupe_principals(principals)
     return values[0] if len(values) == 1 else values
 
 
@@ -2078,12 +2094,11 @@ def _statement_with_accumulated_principals(
     appended, so re-running preparation with the same inputs rewrites nothing.
     """
     accumulated = dict(statement)
-    principals = _dedupe_principals(
-        [*statement_principals(existing), *statement_principals(statement)]
-    )
     principal = statement.get("Principal")
     updated_principal = dict(principal) if isinstance(principal, Mapping) else {}
-    updated_principal["AWS"] = _principal_value(principals)
+    updated_principal["AWS"] = _principal_value(
+        [*statement_principals(existing), *statement_principals(statement)]
+    )
     accumulated["Principal"] = updated_principal
     return accumulated
 
@@ -2206,8 +2221,7 @@ def _build_sns_topic_subscribe_policy_statement(
     if isinstance(control_principals, str):
         principal_value: str | list[str] = control_principals
     else:
-        principals = list(control_principals)
-        principal_value = principals[0] if len(principals) == 1 else principals
+        principal_value = _principal_value(control_principals)
     return {
         "Sid": SNS_SUBSCRIBE_POLICY_SID,
         "Effect": "Allow",
