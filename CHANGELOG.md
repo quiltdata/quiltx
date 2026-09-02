@@ -73,8 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an email (no ambiguity to resolve) and the role is implied by nesting, so the
   role assigned at creation and the role the SSO mapping grants are the same
   declaration and cannot drift — a `users:`-assigned role would be overwritten
-  on first SSO login anyway. Usernames are derived as `email[:64]`, matching the
-  registry's own self-registration naming. There is deliberately no config key:
+  on first SSO login anyway. **The flag creates nobody yet**: an account created
+  through the admin API carries a username quiltx chose, the registry validates a
+  supplied username against `^[a-z][a-z0-9_]*$`, and it derives `email[:64]`
+  itself only when the name is omitted — which `quilt3.admin.users.create` does
+  not allow, since `name` is required. Every address therefore derives a username
+  the registry rejects, and picking a handle instead would decide something this
+  repo cannot verify: whether a later SSO login reconciles against a pre-created
+  account by email or opens a second one under its own derived name. Guess wrong
+  and the mail is already sent and the roles sit on an orphaned account. So each
+  address is refused before the registry is contacted, named with the username it
+  would have needed, and the run exits non-zero rather than issuing N doomed
+  creations. There is deliberately no config key:
   the registry mails a welcome and password-reset link as part of creating an
   account, with no suppress flag, so the first apply would be the irreversible
   one. The flag is named for that side effect, prints every address before
@@ -86,14 +96,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A default policy that fails to create now names itself as the cause. Composing
-  into every managed role makes one policy a dependency of all of them, so a
-  failed create turned into one `unknown policy` line per role — including roles
-  that never named it — and the run diagnosed the symptom. Apply now prints a
-  `!! DEFAULT POLICY MISSING` block naming the policy and the roles it blocked,
-  and carries the same sentence into the warning list. The roles are still left
-  unchanged rather than created without the floor, which would grant less than
-  the file asks for.
+- A default policy the server does not hold now stops the apply and names itself
+  as the cause ([#110](https://github.com/quiltdata/quiltx/issues/110)).
+  Composing into every managed role makes one policy a dependency of all of them,
+  so a failed create turned into one `unknown policy` line per role — including
+  roles that never named it — and the run diagnosed the symptom. Worse, it kept
+  going: role deletes and policy deletes run after the role loops, so a run that
+  could create no role still deleted the roles and policies the file drops,
+  tearing down working access with the replacement provably unreachable. Apply now
+  checks the floor between the policy phase and the role phase and returns there:
+  nothing is created, updated or deleted below that point, the policy changes that
+  did land stay, and a `!! DEFAULT POLICY MISSING` block names the policy and the
+  roles it blocked, with the same sentence in the warning list. The roles are left
+  unchanged rather than created without the floor, which would grant less than the
+  file asks for. An ordinary missing policy still costs only the roles that named
+  it.
+- The note that default policies do not reach unmanaged roles is a notice, not a
+  warning. The CLI exits 1 on any warning, so a config of the shape
+  `stack-acl.example.yaml` documents — a default policy beside a
+  `config.unmanaged: true` role — reported failure on every `--yes` run that had
+  work to do, with the note as the only "warning" and every call successful. It
+  prints as `NONFATAL:` and no longer affects the exit code. Same for a roster
+  address two accounts already answer for: it needs nothing done and is already
+  counted as onboarded, so it was also being counted a second time as
+  uncreatable.
 - The GraphQL-only bucket list is printed on a real apply, not only under
   `--dry-run`, so a `--yes` CI log records which buckets skipped local AWS
   bucket-owner setup and which flag or file entry put them in that mode.

@@ -39,8 +39,12 @@ policies:
   # hand its buckets to those broader audiences while leaving their synthesized
   # role names unchanged. Unmanaged roles are out of reach because quiltx never
   # edits their IAM, so a user whose only role is unmanaged must also match a
-  # managed role's selector. Captures never re-emit the flag; each role's
-  # composed config.policies already lists the policy.
+  # managed role's selector; that combination is reported as a nonfatal notice,
+  # not a warning, so it never fails an apply. A default policy the server does
+  # not hold blocks every managed role, and the apply stops right there: no role
+  # is created, updated or deleted and no policy is deleted, rather than tearing
+  # down the old state with the new state unreachable. Captures never re-emit the
+  # flag; each role's composed config.policies already lists the policy.
   #
   # general:
   #   config.synthesize:     false
@@ -114,10 +118,16 @@ roles:
 # each account's username and email.
 #
 # Onboarding has no config key. `quiltx catalog acl --create-and-email-users`
-# creates an account for every sso.email address above with no existing user,
-# naming it email[:64] like an SSO self-registration and giving it the role its
-# nesting implies. It is CLI-only because creation mails a welcome and
-# password-reset link that cannot be recalled, so no config file should be able
+# plans an account for every sso.email address above with no existing user,
+# giving it the role its nesting implies. It creates none of them yet: the
+# registry holds an admin-supplied username to `^[a-z][a-z0-9_]*$` and only
+# derives email[:64] itself when the name is omitted, which the admin API does
+# not permit, so every address derives a name the registry would reject. quiltx
+# has no decided mapping from an address to a handle, so it names each address
+# and the username it would have needed, exits non-zero, and creates nobody —
+# create these accounts by hand for now. It is CLI-only because creation mails a
+# welcome and password-reset link that cannot be recalled, so no config file
+# should be able
 # to send it; the addresses are printed before the prompt, --dry-run mails
 # nobody, and a run creating more than ten accounts is refused without
 # --max-created-users. sso.hd and sso.groups name no individual, so only

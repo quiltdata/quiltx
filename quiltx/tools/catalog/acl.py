@@ -304,10 +304,27 @@ def _confirm_create_and_email(count: int) -> bool:
 
 
 def _unmakeable_accounts(plan: acl_lib.UserCreationPlan) -> str:
-    """Keep a plan of nothing-but-warnings from reading as a fully-onboarded one."""
+    """Keep a plan of nothing-but-warnings from reading as a fully-onboarded one.
+
+    Only ``warnings`` count. A ``notices`` entry is an address that needs nothing
+    done and is therefore already in ``existing``; counting it here would both
+    report one address twice and label a held address uncreatable.
+    """
     if not plan.warnings:
         return ""
     return f" and {len(plan.warnings)} cannot be created"
+
+
+def _print_user_creation_notices(plan: acl_lib.UserCreationPlan) -> None:
+    """Report the addresses that need nothing done but are worth knowing about.
+
+    Printed here rather than returned, because only ``warnings`` travel back to
+    ``_run`` and everything that reaches it decides the exit code. Same ``!``
+    prefix as a warning: the operator reads one list of remarks about the roster,
+    and the split is about the exit code, not about how loud each entry is.
+    """
+    for notice in plan.notices:
+        print(f"! {notice}")
 
 
 def _print_user_creation_dry_run(
@@ -323,6 +340,8 @@ def _print_user_creation_dry_run(
             f"No accounts would be created: {len(plan.existing)} roster "
             f"address(es) already have one{_unmakeable_accounts(plan)}."
         )
+    _print_user_creation_notices(plan)
+    # A dry run returns nothing, so its warnings are printed here too or lost.
     for warning in plan.warnings:
         print(f"! {warning}")
 
@@ -349,6 +368,7 @@ def _create_and_email_users(
     """
     plan = acl_lib.plan_user_creations(desired, current)
     warnings = list(plan.warnings)
+    _print_user_creation_notices(plan)
     if not plan.creations:
         print(
             f"No accounts to create: {len(plan.existing)} roster address(es) "

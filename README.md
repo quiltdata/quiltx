@@ -299,17 +299,22 @@ leaving their synthesized role names unchanged, so the combination is rejected.
 Unmanaged roles never receive a default policy, because their permissions live
 in IAM and quiltx does not modify them. A user whose only role is unmanaged must
 also match a managed role's selector to stand on the floor; a config that
-declares both a default policy and an unmanaged role reports this as a warning.
+declares both a default policy and an unmanaged role reports this as a nonfatal
+notice (`NONFATAL:` in the plan). It is what the two flags together mean, not
+something that went wrong, so it does not fail an apply.
 
 Composing into every role makes one policy a dependency of all of them, so a
-default policy that fails to create costs every role, not just the roles that
-named it. The roles are left alone rather than created without the floor, which
-would grant less than the file asks for, and the run names the policy once as the
-cause instead of leaving one `unknown policy` line per role to explain it:
+default policy the server does not hold blocks every role, not just the roles
+that named it. Since no role could be reconciled, the apply stops there — after
+the policy phase, before any role is created, updated or deleted and before any
+policy is deleted. Continuing would have deleted the roles and policies the file
+drops while provably unable to create the ones it adds, leaving working access
+torn down with nothing to replace it. The policy changes that did land stay, the
+run names the policy once as the cause, and it exits non-zero:
 
 ```text
 !! DEFAULT POLICY MISSING: 1 default policy blocked every managed role in this apply:
-  - Policy 'general' is declared config.default_policy: true, so every managed role composes it; it does not exist, so 3 role(s) were skipped: public, internal_public, exec.
+  - Policy 'general' is declared config.default_policy: true, so every managed role composes it; it does not exist, so this apply stopped before touching 3 role(s) and deleted nothing: public, internal_public, exec.
 ```
 
 `--yaml` does not re-emit the flag. The server has no notion of a default
@@ -419,11 +424,26 @@ is no identifier ambiguity, because unlike a `users:` key an `sso.email` value i
 never a handle. There is no drift, because the role is implied by the nesting, so
 the role assigned at creation and the role the SSO mapping grants are the same
 declaration; a `users:`-assigned role would be overwritten anyway, since every
-SSO login recomputes roles from the SSO config and replaces the set. And the
-derived username is `email[:64]`, the registry's own SSO self-registration
-naming, so a pre-created account is indistinguishable from one that signed itself
-up. `sso.hd` and `sso.groups` contribute nobody: a domain or a group names no
-individual, so there is nobody to create.
+SSO login recomputes roles from the SSO config and replaces the set. `sso.hd` and
+`sso.groups` contribute nobody: a domain or a group names no individual, so there
+is nobody to create.
+
+**Current limitation: the flag plans and reports, but creates nobody.** An
+account created through the admin API carries a username quiltx chose, and the
+registry validates a supplied username against `^[a-z][a-z0-9_]*$`. Only the
+registry may produce the email-shaped names an SSO self-registration gets, and
+only by deriving `email[:64]` itself when no name is given — which
+`quilt3.admin.users.create` does not allow, since the field is required. Every
+address therefore derives a username the registry rejects, and quiltx has no
+decided mapping from an address to a handle: whether a later SSO login would
+reconcile against a handle-named account by email, or create a second account
+under its own derived name, is registry behaviour and not quiltx's to guess. Get
+it wrong and the mail is already sent and the roles sit on an orphaned account.
+So each address is refused before the registry is contacted, named in the output
+with the username it would have needed, and the run exits non-zero. Create those
+accounts by hand for now. Everything else below — the roster, the roles, the
+prompt, the cap, the reporting — works as described and is what a decided mapping
+would plug into.
 
 An address any account already answers for is never created again, decided by
 the same resolution `users:` keys get. Email is checked first, because the
@@ -432,9 +452,10 @@ account's name. When several roles name the same person, the last declaration
 becomes the active role and the earlier ones become extra roles, matching
 `union_roles: true` and the last-matching first-login pick. If truncation lands a
 derived username on a different account, that one address is reported and
-skipped rather than failing the run. So is an address two accounts already answer
-for: nothing needs creating, but two accounts sharing one address is worth
-knowing about.
+skipped rather than failing the run. An address two accounts already answer for
+is reported too, but as a nonfatal notice: nothing needs creating, so it is
+counted once as already onboarded and does not fail the run, while two accounts
+sharing one address is still worth knowing about.
 
 An address is only created when every role it names will exist. Roles this file
 declares are fine, including ones the same run creates. A `config.unmanaged: true`
@@ -457,10 +478,18 @@ confirmed or passed `--yes`:
 
 ```text
 !! CREATE AND EMAIL: 2 account(s) will be created and sent a welcome and password-reset email:
-  - alice@example.com -> user alice@example.com, roles internal_public
-  - bob@example.com -> user bob@example.com, roles exec, internal_public
+  - alice@example.com -> user alice, roles internal_public
+  - bob@example.com -> user bob, roles exec, internal_public
 The registry sends this mail as part of creation; it cannot be recalled.
 Create and email 2 account(s)? [y/N]:
+```
+
+Until an address-to-handle mapping is decided, what you will actually see is the
+refusal — no prompt, no mail, no registry call, and a non-zero exit:
+
+```text
+No accounts to create: 0 roster address(es) already have one and 2 cannot be created.
+Warning: Roster address 'alice@example.com' derives username 'alice@example.com', which the registry rejects: an admin-supplied username must match ^[a-z][a-z0-9_]*$. quiltx has no mapping from an email address to a conforming handle, so no account was created; create this account by hand.
 ```
 
 `--dry-run` creates nobody and mails nobody, and still names every address. A

@@ -78,21 +78,38 @@ therefore every `_synthesized_role_name` — is untouched; `_SynthesizedRole` an
 what gets applied, while `source_policies` stays the ladder. The flag requires
 `config.synthesize: false`, because a rung's `sso.<claim>` selector names an
 audience that a floor contradicts. Unmanaged roles get no default policy (quiltx
-never edits their IAM) and that combination appends a warning naming both.
-`--yaml` never re-emits the flag: each captured role already lists the policy in
-its composed `config.policies`, which replays to the same state.
+never edits their IAM) and that combination appends a **notice** naming both, on
+`_DesiredAclState.notices` -> `diff.notices`, never `warnings`. The note says what
+the two flags together mean; nothing failed. `_run` returns 1 on a non-empty
+`diff.warnings`, and this is the shape `stack-acl.example.yaml` documents, so
+routing it as a warning failed every `--yes` apply of a valid file that had work
+to do (a no-op re-run escaped through the `not diff.has_changes()` early return).
+`_DesiredAclState.notices` mirrors `warnings` and `compute_diff` extends the
+matching `AclDiff` channel from each. The `_resolve_policy_admin_vote` warning is
+the same routing class but stays a warning on purpose: an explicit
+`config.is_admin: false` vetoing a `true` is two contradictory statements in the
+file, not a note about what one statement means. `--yaml` never re-emits the
+default-policy flag: each captured role already lists the policy in its composed
+`config.policies`, which replays to the same state.
 
 Because a default policy is a dependency of *every* managed role,
 `AclDiff.default_policy_titles` (a `frozenset[str]`, threaded from `compute_diff`
 like `no_preflight_buckets` and excluded from `has_changes()`) lets `apply_acl`
-tell a skipped role apart from the reason for it. `_resolve_policy_ids` is an
-unguarded lookup, so a default policy that fails to create raises `KeyError` for
-every role, including roles that never named it; the roles are still left alone
-rather than created without the floor (that would grant less than the file asks
-for), but `print_default_policy_failures` names the policy once in a
-`!! DEFAULT POLICY MISSING` block and `default_policy_failure_message` adds the
-same sentence to `warnings`, so the cause is not buried under one
-`unknown policy` line per role.
+tell that case apart from an ordinary missing policy. `apply_acl` checks it
+between the policy phase and the role phase and `return warnings` there if any
+title is absent from `known_policies`: no role create, update or delete, no
+default-role update, no user role assignment, no SSO update, no policy delete.
+The check has to precede the role loops rather than diagnose them afterwards,
+because the delete phases run *after* the role loops — so the old behaviour
+skipped every role create and then deleted the roles and policies the file drops,
+removing working access with nothing able to replace it (#110). What is left is a
+clean partial apply: the policies that landed, and nothing else.
+`print_default_policy_failures` names the policy in a `!! DEFAULT POLICY MISSING`
+block and `default_policy_failure_message` adds the same sentence to `warnings`.
+The `default_policy_titles` branches inside the two `KeyError` handlers are gone:
+after the gate a `KeyError` can only name a non-default policy, so they were dead
+code whose presence implied the cascade still happened. Ordinary missing policies
+keep the per-role `unknown policy` skip.
 
 Each `users:` key is resolved against the server by exact `user.name` first,
 then by a unique case-insensitive `user.email` match. `user.name` is
@@ -113,6 +130,14 @@ key matching nothing stays a `diff.notices` entry. Everything downstream — the
 SDK call, downgrade analysis, verbose output — uses the resolved server username,
 and `AclDiff.resolved_user_names` maps key -> username for reporting.
 
+Both `ValueError` cases abort with nothing written, because `_run` calls
+`compute_diff` before `apply_acl` and does only read-only work in between. That
+ordering is the contract, so it is pinned at the CLI level and not only around
+`compute_diff` (#112): the tests run `--yes --no-preflight
+--create-and-email-users` against a config with a bucket to register and a role to
+create, and assert exit 1 with an empty recorder wired to every admin mutation. A
+reconciled fixture would pass whether the abort came before or after `apply_acl`.
+
 `--create-and-email-users` is the only path that creates accounts, and it is
 CLI-only by design: `Users.Create` mails a welcome plus password-reset link with
 no suppress flag, so a config key would make the first apply the irreversible
@@ -123,20 +148,48 @@ implied by the nesting, so creation and the SSO mapping cannot diverge (a
 recomputes the set). `sso.hd`/`sso.groups` name no individual and contribute
 nobody.
 
+**It creates nobody today, by design, and the refusal is the feature.**
+`USERNAME_PATTERN` (`^[a-z][a-z0-9_]*$`) is the registry's grammar for an
+*admin-supplied* username; the registry derives `email[:USERNAME_MAX_LENGTH]`
+itself only when `name` is omitted, and holds that derivation to no pattern —
+which is why one catalog carries both shapes (the same two-shape fact `users:`
+key resolution is built on). quiltx cannot take the deriving path:
+`UserInput.name` is `str`, not `Optional[str]`, and `quilt3.admin.users.create`
+requires it, so every account quiltx creates carries a name quiltx chose.
+`plan_user_creations` validates the derived name and routes a non-conforming one
+to `warnings` with no `creations` entry, so `_create_and_email_users` reports
+"N cannot be created" and exits 1 without contacting the registry or sending
+mail. In practice that is every address, since the grammar forbids `@`. Do not
+invent a handle derivation to close this: mapping `alice@example.com` to `alice`
+decides whether a later SSO login reconciles against the pre-created account by
+email or opens a second one under its own `email[:64]` name, which is registry
+behaviour this repo cannot verify. If it is the latter, pre-creating sends
+irrecoverable mail and parks the roles on an orphan — strictly worse than not
+pre-creating. The only derived name that currently conforms comes from truncation
+cutting the `@` off, i.e. a local part at least `USERNAME_MAX_LENGTH` long, which
+is what the plan-level tests use to reach the creation paths at all; the CLI tests
+supply `UserCreation` objects directly for the same reason.
+
 `sso_email_roster` walks `_DesiredAclState.sso_mappings`, so ladder rungs and
 static roles (including unmanaged ones) are covered under the role names that
 will exist; addresses fold case-insensitively under their first spelling.
 `plan_user_creations` subtracts existing accounts via `_roster_address_is_held`,
-which returns `(held, warning)`: it calls `_resolve_configured_user` and treats an
+which returns `(held, notice)`: it calls `_resolve_configured_user` and treats an
 ambiguous address as held — a roster cannot be rekeyed by username, so raising
-would abort an apply over an address needing no action — but reports it as a
-`UserCreationPlan.warnings` entry instead of folding it into the "already have
-one" count. Email matches before username because `USERNAME_MAX_LENGTH` (64, the
-registry's own `email[:64]`) truncation means a long address is not its own
-account's name. Multi-role: last declaration is active, earlier ones are extra
-roles, matching `union_roles: true` and the last-matching first-login pick. A
-truncated username colliding with a *different* account yields a
-`UserCreationPlan.warnings` entry, not a creation.
+would abort an apply over an address needing no action — but reports it instead of
+folding it silently into the "already have one" count. `UserCreationPlan` carries
+two per-address channels because it reports two different outcomes: `warnings`
+means "cannot be created and needs a human" (a missing role, a non-conforming
+derived username, a truncation collision) and `notices` means "needs nothing done,
+worth reporting". Only `warnings` reach `_unmakeable_accounts` and the exit-1 path;
+an ambiguous held address is already in `existing`, so counting it as uncreatable
+both named one address twice and failed a run in which nothing went wrong.
+`_print_user_creation_notices` prints the notices in both readers, since only
+`warnings` travel back to `_run`. Email matches before username because
+`USERNAME_MAX_LENGTH` (64, the registry's own `email[:64]`) truncation means a
+long address is not its own account's name. Multi-role: last declaration is
+active, earlier ones are extra roles, matching `union_roles: true` and the
+last-matching first-login pick.
 
 An address is only created when every role it names will exist. The available set
 is the one `compute_diff` uses for `users:` entries — managed roles the file

@@ -3120,8 +3120,7 @@ roles:
     ]
 
 
-def test_default_policy_skips_unmanaged_roles_and_warns() -> None:
-    config = acl.parse_acl_config_text("""
+_DEFAULT_POLICY_UNMANAGED_CONFIG = """
 policies:
   general:
     config.synthesize: false
@@ -3131,7 +3130,18 @@ roles:
   Analysts: {}
   ReadQuiltBucket:
     config.unmanaged: true
-""")
+"""
+
+
+def test_default_policy_skips_unmanaged_roles_with_a_notice() -> None:
+    """The floor not reaching unmanaged roles is what the flags mean, not a fault.
+
+    It lands in `notices`, never `warnings`: the CLI exits 1 on a non-empty
+    `diff.warnings`, and this shape — a default policy beside an unmanaged role —
+    is the one the example file documents, so a warning failed every `--yes` run
+    of a valid file that had any work to do.
+    """
+    config = acl.parse_acl_config_text(_DEFAULT_POLICY_UNMANAGED_CONFIG)
     desired = acl._build_desired_acl_state(config)
 
     diff = acl.compute_diff(config, _current_state_for_config(config))
@@ -3142,14 +3152,69 @@ roles:
         role for role in desired.static_roles if role.name == "ReadQuiltBucket"
     )
     assert unmanaged.policy_titles == []
+    assert diff.warnings == []
     assert any(
-        "general" in warning and "ReadQuiltBucket" in warning
-        for warning in diff.warnings
+        "general" in notice and "ReadQuiltBucket" in notice for notice in diff.notices
     )
     assert any(
-        "must also match a managed role's selector" in warning
-        for warning in diff.warnings
+        "must also match a managed role's selector" in notice for notice in diff.notices
     )
+
+
+def test_acl_tool_default_policy_unmanaged_notice_exits_zero(
+    monkeypatch, capsys
+) -> None:
+    """A successful apply of the documented shape is a success, not one warning.
+
+    Every admin call here succeeds and nothing is left undone, so the run must
+    exit 0 and report the unmanaged-role note as NONFATAL. Before the note moved
+    to `notices` this exited 1 on every apply that had work to do.
+    """
+    config = acl.parse_acl_config_text(_DEFAULT_POLICY_UNMANAGED_CONFIG)
+    reconciled = _current_state_for_config(config)
+    pending = replace(
+        reconciled,
+        managed_policies={},
+        all_policies={},
+        managed_roles={},
+        all_roles=dict(reconciled.unmanaged_roles),
+    )
+    states = [pending, reconciled]
+    created_roles: list[str] = []
+    stack = _fake_stack(
+        policies=SimpleNamespace(
+            create_managed=lambda title, *, permissions: FakePolicy(
+                id=f"id-{title}",
+                title=title,
+                managed=True,
+                permissions=permissions,
+                roles=[],
+            ),
+            list=lambda: [],
+        ),
+        roles=SimpleNamespace(
+            create_managed=lambda name, policies: created_roles.append(name),
+            list=lambda: [],
+        ),
+    )
+    _install_acl_tool_stack(monkeypatch, stack)
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: config)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "fetch_current_state",
+        lambda _stack: states.pop(0) if len(states) > 1 else states[0],
+    )
+
+    result = acl_tool.main(["config.yml", "--yes"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert created_roles == ["Analysts"]
+    assert "NONFATAL: Default policies general do not reach unmanaged roles" in (
+        captured.out
+    )
+    assert "Done." in captured.out
+    assert "Warning:" not in captured.err
 
 
 def test_default_policy_diff_is_idempotent_against_matching_state(
@@ -3386,12 +3451,13 @@ def test_compute_diff_records_default_policy_titles_without_a_change() -> None:
 
 
 def test_apply_acl_names_a_failed_default_policy_as_the_cause(capsys) -> None:
-    """One failed default policy skips every managed role; say so once, up front.
+    """One failed default policy stops the apply; say so once, up front.
 
-    #105 makes the floor a dependency of roles that never named it, so the
-    per-role `unknown policy` lines name the symptom. The roles are left alone
-    rather than created without the floor, which would grant less than the file
-    asks for.
+    #105 makes the floor a dependency of roles that never named it, so no role
+    could be reconciled. #110 turns that from a per-role `unknown policy` cascade
+    into an early return: the roles are left alone rather than created without the
+    floor, which would grant less than the file asks for, and the apply never
+    reaches the phases that would delete the old ones.
     """
     created_policies: list[FakePolicy] = []
     created_roles: list[str] = []
@@ -3434,18 +3500,116 @@ def test_apply_acl_names_a_failed_default_policy_as_the_cause(capsys) -> None:
     )
     assert (
         "  - Policy 'general' is declared config.default_policy: true, so every "
-        "managed role composes it; it does not exist, so 2 role(s) were skipped: "
-        "public, Analysts." in err
+        "managed role composes it; it does not exist, so this apply stopped "
+        "before touching 2 role(s) and deleted nothing: public, Analysts." in err
     )
-    assert "root cause of the per-role 'unknown policy' errors" in err
+    assert "before any policy was deleted" in err
     assert (
         "Policy 'general' is declared config.default_policy: true, so every "
-        "managed role composes it; it does not exist, so 2 role(s) were skipped: "
-        "public, Analysts." in warnings
+        "managed role composes it; it does not exist, so this apply stopped "
+        "before touching 2 role(s) and deleted nothing: public, Analysts." in warnings
     )
-    # The per-role symptom is still reported; it is no longer the only diagnosis.
-    assert "Role 'public' skipped: unknown policy 'general'" in warnings
-    assert "Role 'Analysts' skipped: unknown policy 'general'" in warnings
+    # The policy that did land still landed: stopping is not a rollback.
+    assert [policy.title for policy in created_policies] == ["public"]
+    # No per-role diagnosis to add: the role phase never ran.
+    assert not any("unknown policy" in warning for warning in warnings)
+
+
+def test_apply_acl_deletes_nothing_when_a_default_policy_is_missing(capsys) -> None:
+    """The part that matters: the old state survives an unbuildable new one.
+
+    Role deletes and policy deletes run after the role loops, so before #110 a
+    missing floor skipped every role create and then deleted the roles and
+    policies the file drops — the old access gone, the new access impossible.
+    """
+    calls: list[str] = []
+    stack = _fake_stack(
+        policies=SimpleNamespace(
+            create_managed=lambda title, *, permissions: (_ for _ in ()).throw(
+                RuntimeError("NoSuchBucket: open-bucket")
+            ),
+            update_managed=lambda *args, **kwargs: calls.append("policy update"),
+            delete=lambda ref: calls.append(f"policy delete {ref}"),
+            list=lambda: [],
+        ),
+        roles=SimpleNamespace(
+            create_managed=lambda name, policies: calls.append(f"role create {name}"),
+            update_managed=lambda *args, **kwargs: calls.append("role update"),
+            delete=lambda ref: calls.append(f"role delete {ref}"),
+            set_default=lambda ref: calls.append("set default"),
+            list=lambda: [],
+        ),
+        sso_config=SimpleNamespace(set=lambda _text: calls.append("sso set")),
+        users=SimpleNamespace(
+            list=lambda: [],
+            set_role=lambda *args, **kwargs: calls.append("set role"),
+            set_admin=lambda *args, **kwargs: calls.append("set admin"),
+        ),
+    )
+    current = _empty_current_state()
+    current.managed_roles["Legacy"] = FakeRole(
+        id="id-Legacy", name="Legacy", policies=[], permissions=[]
+    )
+    current.all_roles["Legacy"] = current.managed_roles["Legacy"]
+    legacy_policy = FakePolicy(
+        id="id-LegacyPolicy",
+        title="LegacyPolicy",
+        managed=True,
+        permissions=[],
+        roles=[],
+    )
+    current.managed_policies["LegacyPolicy"] = legacy_policy
+    current.all_policies["LegacyPolicy"] = legacy_policy
+    diff = acl.AclDiff(
+        policies_to_create=[acl.PolicyUpdate(title="general", permissions=[])],
+        roles_to_create=[acl.RoleUpdate(name="Analysts", policy_titles=["general"])],
+        roles_to_delete=["Legacy"],
+        policies_to_delete=["LegacyPolicy"],
+        default_policy_titles=frozenset({"general"}),
+    )
+
+    warnings = acl.apply_acl(stack, diff, current)
+
+    err = capsys.readouterr().err
+    assert calls == []
+    assert "!! DEFAULT POLICY MISSING" in err
+    assert any("deleted nothing: Analysts" in warning for warning in warnings)
+
+
+def test_apply_acl_default_policy_gate_ignores_a_run_with_no_role_changes(
+    capsys,
+) -> None:
+    """Nothing composes the floor, so its absence blocks nothing and stops nothing."""
+    calls: list[str] = []
+    stack = _fake_stack(
+        policies=SimpleNamespace(
+            create_managed=lambda title, *, permissions: (_ for _ in ()).throw(
+                RuntimeError("NoSuchBucket: open-bucket")
+            ),
+            delete=lambda ref: calls.append(f"policy delete {ref}"),
+            list=lambda: [],
+        ),
+    )
+    current = _empty_current_state()
+    legacy_policy = FakePolicy(
+        id="id-LegacyPolicy",
+        title="LegacyPolicy",
+        managed=True,
+        permissions=[],
+        roles=[],
+    )
+    current.managed_policies["LegacyPolicy"] = legacy_policy
+    current.all_policies["LegacyPolicy"] = legacy_policy
+    diff = acl.AclDiff(
+        policies_to_create=[acl.PolicyUpdate(title="general", permissions=[])],
+        policies_to_delete=["LegacyPolicy"],
+        default_policy_titles=frozenset({"general"}),
+    )
+
+    acl.apply_acl(stack, diff, current)
+
+    assert calls == ["policy delete id-LegacyPolicy"]
+    assert "DEFAULT POLICY MISSING" not in capsys.readouterr().err
 
 
 def test_apply_acl_stays_quiet_about_an_ordinary_missing_policy(capsys) -> None:
@@ -4478,6 +4642,134 @@ def test_user_block_rejects_key_matching_two_emails() -> None:
     assert "email of 'alice', 'alice_two'" in str(excinfo.value)
 
 
+def _install_unresolvable_users_run(
+    monkeypatch,
+    users: dict[str, acl.AclUserConfig],
+    *,
+    server_emails: tuple[str, str],
+) -> list[str]:
+    """Wire the CLI against a `users:` block no resolution can honour.
+
+    The config deliberately has work to do — a bucket to register and a role to
+    create — because the contract under test is that the abort happens *before*
+    any of it. Against a reconciled fixture the assertion would hold whether the
+    run aborted first or applied everything and then failed, so a later refactor
+    that turned the abort into a partial apply would still pass.
+
+    Returns the recorder every admin mutation appends to.
+    """
+    recorder: list[str] = []
+
+    def _record(label: str) -> Any:
+        def _call(*_args: Any, **_kwargs: Any) -> None:
+            recorder.append(label)
+
+        return _call
+
+    stack = _fake_stack(
+        payload={"account_id": "111"},
+        buckets=SimpleNamespace(add=_record("buckets.add")),
+        policies=SimpleNamespace(
+            create_managed=_record("policies.create_managed"),
+            update_managed=_record("policies.update_managed"),
+            delete=_record("policies.delete"),
+            list=lambda: [],
+        ),
+        roles=SimpleNamespace(
+            create_managed=_record("roles.create_managed"),
+            update_managed=_record("roles.update_managed"),
+            delete=_record("roles.delete"),
+            set_default=_record("roles.set_default"),
+            list=lambda: [],
+        ),
+        sso_config=SimpleNamespace(set=_record("sso_config.set")),
+        users=SimpleNamespace(
+            create=_record("users.create"),
+            set_role=_record("users.set_role"),
+            set_admin=_record("users.set_admin"),
+            list=lambda: [],
+        ),
+    )
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight",
+        lambda *_args, **_kwargs: recorder.append("buckets.add"),
+    )
+    _install_acl_tool_stack(monkeypatch, stack)
+
+    # The server holds only 'Old', so 'New' and its bucket are pending work.
+    current = _current_state_for_config(
+        acl.AclConfig(policies=[], roles={"Old": acl.AclStaticRole(name="Old")})
+    )
+    _add_user(current, "alice", "Old", email=server_emails[0])
+    _add_user(current, "alice_two", "Old", email=server_emails[1])
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            "Old": acl.AclStaticRole(name="Old"),
+            "New": acl.AclStaticRole(name="New", read=["pending-bucket"]),
+        },
+        users=users,
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: desired)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    return recorder
+
+
+def test_acl_tool_ambiguous_user_key_exits_one_without_mutating(
+    monkeypatch, capsys
+) -> None:
+    """One key, two accounts: nothing there decides, so nothing is written (#112)."""
+    recorder = _install_unresolvable_users_run(
+        monkeypatch,
+        {"shared@example.com": acl.AclUserConfig(role="New")},
+        server_emails=("shared@example.com", "shared@example.com"),
+    )
+
+    result = acl_tool.main(
+        [
+            "config.yml",
+            "--yes",
+            "--no-preflight",
+            "--create-and-email-users",
+        ]
+    )
+
+    err = capsys.readouterr().err
+    assert result == 1
+    assert recorder == []
+    assert "'shared@example.com' is ambiguous" in err
+    assert "email of 'alice', 'alice_two'" in err
+
+
+def test_acl_tool_two_keys_for_one_account_exit_one_without_mutating(
+    monkeypatch, capsys
+) -> None:
+    """A handle key and an email key for one person would silently overwrite (#112)."""
+    recorder = _install_unresolvable_users_run(
+        monkeypatch,
+        {
+            "alice": acl.AclUserConfig(role="New"),
+            "alice@example.com": acl.AclUserConfig(role="Old"),
+        },
+        server_emails=("alice@example.com", "other@example.com"),
+    )
+
+    result = acl_tool.main(
+        [
+            "config.yml",
+            "--yes",
+            "--no-preflight",
+            "--create-and-email-users",
+        ]
+    )
+
+    err = capsys.readouterr().err
+    assert result == 1
+    assert recorder == []
+    assert "'alice' and 'alice@example.com'" in err
+    assert "both address the server account 'alice'" in err
+
+
 def test_user_block_matches_email_case_insensitively() -> None:
     roles = _roles_for_user_tests()
     current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
@@ -4974,6 +5266,29 @@ def _roster_config() -> acl.AclConfig:
     return acl.parse_acl_config_text(_ROSTER_CONFIG)
 
 
+def _handle_address(handle: str) -> str:
+    """An address whose derived username the registry would actually accept.
+
+    `plan_user_creations` derives `address[:USERNAME_MAX_LENGTH]`, and the
+    registry holds an admin-supplied username to `USERNAME_PATTERN`, which
+    forbids '@'. The only address that survives is one whose local part alone
+    fills the limit, so truncation cuts the '@' and the domain off. Padding
+    *handle* to the limit produces exactly that, with the derived username equal
+    to the padded local part.
+    """
+    local = f"{handle}{'_' * acl.USERNAME_MAX_LENGTH}"[: acl.USERNAME_MAX_LENGTH]
+    return f"{local}@example.com"
+
+
+def _handle_roster_config() -> acl.AclConfig:
+    """`_ROSTER_CONFIG`, addressed so the plan can actually create the accounts."""
+    return acl.parse_acl_config_text(
+        _ROSTER_CONFIG.replace("lead@example.com", _handle_address("lead"))
+        .replace("alice@example.com", _handle_address("alice"))
+        .replace("bob@example.com", _handle_address("bob"))
+    )
+
+
 def test_sso_email_roster_reads_static_and_synthesized_roles() -> None:
     """Only sso.email names individuals, and the role comes from the nesting."""
     roster = acl.sso_email_roster(_roster_config())
@@ -5017,8 +5332,35 @@ roles:
     assert acl.sso_email_roster(config) == {"Alice@Example.com": ["public", "Leads"]}
 
 
-def test_plan_user_creations_derives_username_and_role() -> None:
+def test_plan_user_creations_refuses_an_email_shaped_username() -> None:
+    """The ordinary case: no address can be named, so nothing is attempted.
+
+    The registry validates an admin-supplied username against `USERNAME_PATTERN`
+    and only derives `email[:64]` itself when the name is omitted, which
+    `quilt3.admin.users.create` does not allow. Every address is therefore
+    refused before the registry is contacted, rather than turned into a round
+    trip whose only outcome is InvalidUserNameError.
+    """
     config = _roster_config()
+
+    plan = acl.plan_user_creations(config, _current_state_for_config(config))
+
+    assert plan.creations == ()
+    assert plan.existing == ()
+    assert plan.notices == ()
+    assert len(plan.warnings) == 3
+    warning = plan.warnings[1]
+    assert "Roster address 'alice@example.com'" in warning
+    assert "derives username 'alice@example.com'" in warning
+    assert "the registry rejects" in warning
+    assert "^[a-z][a-z0-9_]*$" in warning
+    assert "no mapping from an email address to a conforming handle" in warning
+    assert "create this account by hand" in warning
+
+
+def test_plan_user_creations_derives_username_and_role() -> None:
+    """A conforming derived username is planned, with the role from the nesting."""
+    config = _handle_roster_config()
 
     plan = acl.plan_user_creations(config, _current_state_for_config(config))
 
@@ -5026,43 +5368,49 @@ def test_plan_user_creations_derives_username_and_role() -> None:
     assert plan.warnings == ()
     assert plan.creations == (
         acl.UserCreation(
-            name="lead@example.com", email="lead@example.com", role="leads_public"
+            name=_handle_address("lead").split("@")[0],
+            email=_handle_address("lead"),
+            role="leads_public",
         ),
         acl.UserCreation(
-            name="alice@example.com", email="alice@example.com", role="Analysts"
+            name=_handle_address("alice").split("@")[0],
+            email=_handle_address("alice"),
+            role="Analysts",
         ),
         acl.UserCreation(
-            name="bob@example.com", email="bob@example.com", role="Analysts"
+            name=_handle_address("bob").split("@")[0],
+            email=_handle_address("bob"),
+            role="Analysts",
         ),
     )
 
 
 def test_plan_user_creations_skips_address_held_as_an_email() -> None:
     """A handle-named account owning the address is still that address's account."""
-    config = _roster_config()
+    config = _handle_roster_config()
     current = _current_state_for_config(config)
-    _add_user(current, "alice", "Analysts", email="alice@example.com")
+    _add_user(current, "alice", "Analysts", email=_handle_address("alice"))
 
     plan = acl.plan_user_creations(config, current)
 
-    assert plan.existing == ("alice@example.com",)
+    assert plan.existing == (_handle_address("alice"),)
     assert [creation.email for creation in plan.creations] == [
-        "lead@example.com",
-        "bob@example.com",
+        _handle_address("lead"),
+        _handle_address("bob"),
     ]
 
 
 def test_plan_user_creations_skips_address_held_as_a_username() -> None:
-    config = _roster_config()
+    config = _handle_roster_config()
     current = _current_state_for_config(config)
-    _add_user(current, "alice@example.com", "Analysts")
+    _add_user(current, _handle_address("alice"), "Analysts")
 
     plan = acl.plan_user_creations(config, current)
 
-    assert plan.existing == ("alice@example.com",)
+    assert plan.existing == (_handle_address("alice"),)
     assert [creation.email for creation in plan.creations] == [
-        "lead@example.com",
-        "bob@example.com",
+        _handle_address("lead"),
+        _handle_address("bob"),
     ]
 
 
@@ -5071,26 +5419,29 @@ def test_plan_user_creations_reports_an_ambiguous_address_as_held() -> None:
 
     Not a raise: a roster is keyed by email and cannot be rekeyed, so aborting
     the apply over an address needing no action would be wrong. Not silence
-    either, or the address reads as ordinarily onboarded.
+    either, or the address reads as ordinarily onboarded. A notice and not a
+    warning, because the address is already counted in `existing`: reporting it
+    as uncreatable would name it twice and fail a run with nothing to do.
     """
-    config = _roster_config()
+    config = _handle_roster_config()
     current = _current_state_for_config(config)
-    _add_user(current, "alice", "Analysts", email="alice@example.com")
-    _add_user(current, "alice_two", "Analysts", email="alice@example.com")
+    _add_user(current, "alice", "Analysts", email=_handle_address("alice"))
+    _add_user(current, "alice_two", "Analysts", email=_handle_address("alice"))
 
     plan = acl.plan_user_creations(config, current)
 
-    assert plan.existing == ("alice@example.com",)
+    assert plan.existing == (_handle_address("alice"),)
     assert [creation.email for creation in plan.creations] == [
-        "lead@example.com",
-        "bob@example.com",
+        _handle_address("lead"),
+        _handle_address("bob"),
     ]
-    assert len(plan.warnings) == 1
-    warning = plan.warnings[0]
-    assert "Roster address 'alice@example.com'" in warning
-    assert "the email of 'alice', 'alice_two'" in warning
-    assert "no account was created for it" in warning
-    assert "cannot be rekeyed by username" in warning
+    assert plan.warnings == ()
+    assert len(plan.notices) == 1
+    notice = plan.notices[0]
+    assert f"Roster address '{_handle_address('alice')}'" in notice
+    assert "the email of 'alice', 'alice_two'" in notice
+    assert "no account was created for it" in notice
+    assert "cannot be rekeyed by username" in notice
 
 
 def test_plan_user_creations_skips_an_address_whose_role_is_not_on_the_server() -> None:
@@ -5128,7 +5479,7 @@ def test_plan_user_creations_creates_into_an_existing_unmanaged_role() -> None:
     The permissions it confers are IAM-backed, which the downgrade analysis
     reports as undetermined; that is a property of the role, not of the creation.
     """
-    config = acl.parse_acl_config_text("""
+    config = acl.parse_acl_config_text(f"""
 policies:
   public:
     sso.groups: [Everyone]
@@ -5137,7 +5488,7 @@ policies:
 roles:
   LegacyIam:
     config.unmanaged: true
-    sso.email: [legacy@example.com]
+    sso.email: [{_handle_address("legacy")}]
 """)
     current = _current_state_for_config(config)
 
@@ -5147,14 +5498,16 @@ roles:
     assert plan.warnings == ()
     assert plan.creations == (
         acl.UserCreation(
-            name="legacy@example.com", email="legacy@example.com", role="LegacyIam"
+            name=_handle_address("legacy").split("@")[0],
+            email=_handle_address("legacy"),
+            role="LegacyIam",
         ),
     )
 
 
 def test_plan_user_creations_allows_a_managed_role_this_run_creates() -> None:
     """A dry run must not report a missing role that the same apply creates."""
-    config = _roster_config()
+    config = _handle_roster_config()
 
     plan = acl.plan_user_creations(config, _empty_current_state())
 
@@ -5167,7 +5520,13 @@ def test_plan_user_creations_allows_a_managed_role_this_run_creates() -> None:
 
 
 def test_plan_user_creations_truncates_derived_username_to_64_characters() -> None:
-    long_address = ("l" * 60) + "@example.com"
+    """Truncation is also the only thing that can make a derived name legal.
+
+    A local part long enough to fill the limit loses the '@' and the domain, so
+    what is left matches `USERNAME_PATTERN`; anything shorter keeps the '@' and is
+    refused.
+    """
+    long_address = ("l" * 70) + "@example.com"
     config = acl.parse_acl_config_text(f"""
 policies:
   public:
@@ -5179,16 +5538,17 @@ roles: {{}}
 
     plan = acl.plan_user_creations(config, _current_state_for_config(config))
 
-    assert len(long_address) == 72
+    assert len(long_address) == 82
+    assert plan.warnings == ()
     assert plan.creations == (
-        acl.UserCreation(name=long_address[:64], email=long_address, role="public"),
+        acl.UserCreation(name="l" * 64, email=long_address, role="public"),
     )
     assert len(plan.creations[0].name) == 64
 
 
 def test_plan_user_creations_refuses_truncated_username_collision() -> None:
     """Truncation can land on somebody else's username; that address is skipped."""
-    long_address = ("l" * 60) + "@example.com"
+    long_address = ("l" * 70) + "@example.com"
     config = acl.parse_acl_config_text(f"""
 policies:
   public:
@@ -5213,18 +5573,19 @@ roles: {{}}
 
 def test_plan_user_creations_makes_last_matching_role_active() -> None:
     """One person on several rungs starts where their first login would leave them."""
-    config = acl.parse_acl_config_text("""
+    address = _handle_address("alice")
+    config = acl.parse_acl_config_text(f"""
 policies:
   public:
-    sso.email: [alice@example.com]
+    sso.email: [{address}]
     buckets.read: [bucket-a]
     config.default_role: true
 roles:
   Leads:
-    sso.email: [alice@example.com]
+    sso.email: [{address}]
     config.policies: [public]
   Execs:
-    sso.email: [alice@example.com]
+    sso.email: [{address}]
     config.policies: [public]
 """)
 
@@ -5232,15 +5593,21 @@ roles:
 
     assert plan.creations == (
         acl.UserCreation(
-            name="alice@example.com",
-            email="alice@example.com",
+            name=address.split("@")[0],
+            email=address,
             role="Execs",
             extra_roles=("public", "Leads"),
         ),
     )
 
 
-def test_create_roster_users_sends_derived_name_email_and_role() -> None:
+def test_create_roster_users_sends_name_email_and_role() -> None:
+    """The creation machinery, given the conforming handles the registry wants.
+
+    Built by hand rather than planned: `plan_user_creations` cannot derive a
+    conforming handle from an ordinary address, and what is under test here is
+    the call, not the derivation.
+    """
     create_calls: list[Any] = []
     stack = _fake_stack(
         users=SimpleNamespace(
@@ -5252,28 +5619,50 @@ def test_create_roster_users_sends_derived_name_email_and_role() -> None:
         stack,
         (
             acl.UserCreation(
-                name="alice@example.com",
+                name="alice",
                 email="alice@example.com",
                 role="Analysts",
                 extra_roles=("public",),
             ),
-            acl.UserCreation(
-                name="bob@example.com", email="bob@example.com", role="Analysts"
-            ),
+            acl.UserCreation(name="bob", email="bob@example.com", role="Analysts"),
         ),
     )
 
     assert warnings == []
     assert create_calls == [
         (
-            ("alice@example.com", "alice@example.com", "Analysts"),
+            ("alice", "alice@example.com", "Analysts"),
             {"extra_roles": ["public"]},
         ),
         (
-            ("bob@example.com", "bob@example.com", "Analysts"),
+            ("bob", "bob@example.com", "Analysts"),
             {"extra_roles": None},
         ),
     ]
+
+
+_ROSTER_CREATIONS = (
+    acl.UserCreation(name="lead", email="lead@example.com", role="leads_public"),
+    acl.UserCreation(name="alice", email="alice@example.com", role="Analysts"),
+    acl.UserCreation(name="bob", email="bob@example.com", role="Analysts"),
+)
+
+
+def _stub_creation_plan(
+    monkeypatch, creations: tuple[acl.UserCreation, ...] = _ROSTER_CREATIONS
+) -> None:
+    """Hand the CLI a plan whose accounts can actually be created.
+
+    Planning cannot produce one from an ordinary address: the registry rejects an
+    email-shaped username (`USERNAME_PATTERN`) and quiltx has no mapping to a
+    handle, so `plan_user_creations` refuses every roster entry. These tests are
+    about the seam after the plan — the prompt, the cap, the phase ordering and
+    the per-address failure path — so the handles are supplied directly.
+    """
+    plan = acl.UserCreationPlan(creations=creations)
+    monkeypatch.setattr(
+        acl_tool.acl_lib, "plan_user_creations", lambda *_args, **_kwargs: plan
+    )
 
 
 def _install_roster_run(
@@ -5359,6 +5748,7 @@ def test_acl_tool_prompts_for_the_apply_and_the_creations_separately(
     create_calls: list[Any] = []
     prompts: list[str] = []
     _install_pending_roster_run(monkeypatch, applied=applied, create_calls=create_calls)
+    _stub_creation_plan(monkeypatch)
 
     def _accept(prompt: str) -> str:
         prompts.append(prompt)
@@ -5407,6 +5797,7 @@ def test_acl_tool_declining_the_apply_prompt_creates_nobody(
 
 def test_acl_tool_dry_run_names_addresses_without_creating(monkeypatch, capsys) -> None:
     _, create_calls = _install_roster_run(monkeypatch)
+    _stub_creation_plan(monkeypatch)
 
     result = acl_tool.main(["config.yml", "--dry-run", "--create-and-email-users"])
 
@@ -5414,14 +5805,32 @@ def test_acl_tool_dry_run_names_addresses_without_creating(monkeypatch, capsys) 
     assert result == 0
     assert create_calls == []
     assert "!! CREATE AND EMAIL: 3 account(s) would be created" in out
-    assert "- lead@example.com -> user lead@example.com, roles leads_public" in out
-    assert "- alice@example.com -> user alice@example.com, roles Analysts" in out
-    assert "- bob@example.com -> user bob@example.com, roles Analysts" in out
+    assert "- lead@example.com -> user lead, roles leads_public" in out
+    assert "- alice@example.com -> user alice, roles Analysts" in out
+    assert "- bob@example.com -> user bob, roles Analysts" in out
     assert "cannot be recalled" in out
+
+
+def test_acl_tool_dry_run_refuses_email_shaped_addresses(monkeypatch, capsys) -> None:
+    """The real dry run of an ordinary roster: named, refused, nothing planned."""
+    _, create_calls = _install_roster_run(monkeypatch)
+
+    result = acl_tool.main(["config.yml", "--dry-run", "--create-and-email-users"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert create_calls == []
+    assert "CREATE AND EMAIL" not in out
+    assert (
+        "No accounts would be created: 0 roster address(es) already have one "
+        "and 3 cannot be created." in out
+    )
+    assert "! Roster address 'alice@example.com' derives username" in out
 
 
 def test_acl_tool_creates_roster_users_with_yes(monkeypatch, capsys) -> None:
     _, create_calls = _install_roster_run(monkeypatch)
+    _stub_creation_plan(monkeypatch)
     monkeypatch.setattr(
         "builtins.input",
         lambda _prompt: pytest.fail("--yes must not prompt"),
@@ -5432,16 +5841,55 @@ def test_acl_tool_creates_roster_users_with_yes(monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert result == 0
     assert [args for args, _kwargs in create_calls] == [
-        ("lead@example.com", "lead@example.com", "leads_public"),
-        ("alice@example.com", "alice@example.com", "Analysts"),
-        ("bob@example.com", "bob@example.com", "Analysts"),
+        ("lead", "lead@example.com", "leads_public"),
+        ("alice", "alice@example.com", "Analysts"),
+        ("bob", "bob@example.com", "Analysts"),
     ]
     assert "!! CREATE AND EMAIL: 3 account(s) will be created" in out
-    assert "+ user alice@example.com (role Analysts, emailed)" in out
+    assert "+ user alice (role Analysts, emailed)" in out
+
+
+def test_acl_tool_refuses_email_shaped_addresses_and_exits_one(
+    monkeypatch, capsys
+) -> None:
+    """No account can be named, so the registry is never contacted at all.
+
+    The flag's headline case, and the honest outcome of it: quiltx reports every
+    address it cannot name and sends no mail, rather than issuing one doomed
+    creation per address.
+    """
+
+    def _never(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("the registry must not be contacted")
+
+    _, create_calls = _install_roster_run(monkeypatch, create=_never)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "create_roster_users",
+        lambda *_args, **_kwargs: pytest.fail(
+            "create_roster_users must not be reached"
+        ),
+    )
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert create_calls == []
+    assert (
+        "No accounts to create: 0 roster address(es) already have one and 3 "
+        "cannot be created." in captured.out
+    )
+    assert (
+        "Warning: Roster address 'alice@example.com' derives username "
+        "'alice@example.com', which the registry rejects" in captured.err
+    )
+    assert "Done with 3 warning(s)." in captured.err
 
 
 def test_acl_tool_declining_the_prompt_creates_nobody(monkeypatch, capsys) -> None:
     _, create_calls = _install_roster_run(monkeypatch)
+    _stub_creation_plan(monkeypatch)
     prompts: list[str] = []
 
     def _decline(prompt: str) -> str:
@@ -5463,6 +5911,7 @@ def test_acl_tool_declining_the_prompt_creates_nobody(monkeypatch, capsys) -> No
 
 def test_acl_tool_refuses_more_creations_than_the_cap(monkeypatch, capsys) -> None:
     _, create_calls = _install_roster_run(monkeypatch)
+    _stub_creation_plan(monkeypatch)
 
     result = acl_tool.main(
         ["config.yml", "--yes", "--create-and-email-users", "--max-created-users", "2"]
@@ -5481,10 +5930,11 @@ def test_acl_tool_creation_failure_becomes_a_warning_and_exits_one(
     monkeypatch, capsys
 ) -> None:
     def _fail(name: str, *_args: Any, **_kwargs: Any) -> None:
-        if name == "alice@example.com":
+        if name == "alice":
             raise RuntimeError("EmailAlreadyInUse")
 
     _, create_calls = _install_roster_run(monkeypatch, create=_fail)
+    _stub_creation_plan(monkeypatch)
 
     result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
 
@@ -5514,6 +5964,40 @@ def test_acl_tool_reports_when_every_roster_address_has_an_account(
     assert result == 0
     assert create_calls == []
     assert "No accounts to create: 3 roster address(es) already have one." in out
+
+
+def test_acl_tool_ambiguous_held_address_is_reported_without_failing(
+    monkeypatch, capsys
+) -> None:
+    """A held address is counted once, and holding it twice is not a failure.
+
+    Two accounts answering for one roster address needs no action and is already
+    in `existing`, so counting it as uncreatable both named it twice and turned a
+    run with nothing to do into an exit-1.
+    """
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "lead@example.com", "leads_public")
+    _add_user(current, "bob@example.com", "Analysts")
+    _add_user(current, "alice", "Analysts", email="alice@example.com")
+    _add_user(current, "alice_two", "Analysts", email="alice@example.com")
+    _, create_calls = _install_roster_run(monkeypatch, current=current)
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert create_calls == []
+    assert "No accounts to create: 3 roster address(es) already have one." in (
+        captured.out
+    )
+    assert captured.out.count("already have one") == 1
+    assert "cannot be created" not in captured.out
+    assert (
+        "! Roster address 'alice@example.com' is the email of 'alice', 'alice_two'"
+        in captured.out
+    )
+    assert "Warning:" not in captured.err
 
 
 def test_acl_tool_create_and_email_users_requires_a_config_file(capsys) -> None:
@@ -5583,6 +6067,7 @@ def test_acl_tool_creates_users_after_roles_and_drift_reset(monkeypatch) -> None
         ],
     )
     monkeypatch.setattr(acl_tool, "_handle_policy_drift", _handle_drift)
+    _stub_creation_plan(monkeypatch)
 
     result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
 
@@ -5592,7 +6077,7 @@ def test_acl_tool_creates_users_after_roles_and_drift_reset(monkeypatch) -> None
 
 def test_acl_tool_reports_username_collision_and_exits_one(monkeypatch, capsys) -> None:
     """A collision creates nobody for that address and is not silent."""
-    long_address = ("l" * 60) + "@example.com"
+    long_address = ("l" * 70) + "@example.com"
     config = acl.parse_acl_config_text(f"""
 policies:
   public:

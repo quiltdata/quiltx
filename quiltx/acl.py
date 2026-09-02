@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -33,10 +34,28 @@ CONFIG_UNMANAGED_KEY = "config.unmanaged"
 EVERYONE_GROUP = "Everyone"
 SSO_EMAIL_CLAIM = "email"
 USERNAME_MAX_LENGTH = 64
-"""How much of an address the registry keeps as a username.
+"""How long a username may be, and how much of an address the registry keeps.
 
-SSO self-registration names an account ``email[:64]``, so deriving the same name
-leaves a pre-created account indistinguishable from one that signed itself up.
+An SSO self-registration is named ``email[:64]`` by the registry itself. quiltx
+truncates to the same length but cannot reproduce the same *shape*; see
+``USERNAME_PATTERN``.
+"""
+USERNAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+"""What the registry accepts as an **admin-supplied** username.
+
+The grammar is enforced only on a username given explicitly. The registry
+derives ``email[:USERNAME_MAX_LENGTH]`` itself when the field is omitted, and
+does not hold that derivation to this pattern — which is why one catalog holds
+both shapes: email-shaped names for SSO self-registrations and handle-shaped
+names for admin-created accounts (the same two-shape fact ``users:`` key
+resolution is built on).
+
+quiltx cannot take the deriving path: ``quilt3.admin.users.create`` requires
+``name`` and ``UserInput.name`` is not optional, so every account quiltx creates
+carries a name quiltx chose, and that name has to match. An email address never
+does, and quiltx has no decided mapping from an address to a handle, so
+``plan_user_creations`` refuses such an address instead of attempting a creation
+the registry would reject.
 """
 REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
 REGISTRY_MANAGED_ROLE_EXCLUSIONS = frozenset({"Canary"})
@@ -242,11 +261,12 @@ class AclDiff:
     default_policy_titles: frozenset[str] = frozenset()
     """Policies the config marks ``config.default_policy: true``.
 
-    Composed into every managed role, so one of these failing to create costs
-    every role create and update rather than only the roles that named it.
+    Composed into every managed role, so one of these missing from the server
+    blocks every role create and update rather than only the roles that named it.
     ``apply_acl`` gets the diff and not the config, so like
-    ``no_preflight_buckets`` the fact rides along here; it tells a skipped role
-    apart from the reason it was skipped and is never a change on its own.
+    ``no_preflight_buckets`` the fact rides along here; it is what lets the apply
+    tell that case apart from an ordinary missing policy and stop before the
+    delete phases. Never a change on its own.
     """
 
     def has_changes(self) -> bool:
@@ -312,6 +332,14 @@ class _DesiredAclState:
     sso_mappings: list[_SsoMapping]
     default_role_name: str | None
     warnings: list[str] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
+    """Facts about the resolved state worth reporting that are not problems.
+
+    Kept apart from ``warnings`` because ``compute_diff`` feeds each to the
+    matching ``AclDiff`` channel and the CLI exits 1 on a non-empty
+    ``diff.warnings``: a note about what the config *means* must not fail an
+    apply in which every call succeeded.
+    """
     unmanaged_role_names: frozenset[str] = frozenset()
 
     def all_role_names(self) -> set[str]:
@@ -659,6 +687,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     desired_state = _build_desired_acl_state(desired)
     diff = AclDiff()
     diff.warnings.extend(desired_state.warnings)
+    diff.notices.extend(desired_state.notices)
     diff.buckets_to_add = sorted(all_buckets(desired) - current.buckets.keys())
     diff.no_preflight_buckets = frozenset(
         name for name, config in desired.buckets.items() if config.no_preflight
@@ -957,10 +986,18 @@ class UserCreationPlan:
     """Roster addresses an account already holds. Nothing to do, but provenance
     for a run that creates fewer accounts than the file lists addresses."""
     warnings: tuple[str, ...] = ()
-    """One message per address the run creates no account for and should not.
+    """One message per address that *cannot* be created and needs a human.
 
-    Covers addresses that cannot be created and addresses whose server state is
-    odd enough to report, so a plan is never silent about an address it read.
+    A missing role, or a derived username the registry would reject. Every entry
+    is an address the file asks to onboard and this run did not, so the CLI
+    counts them as uncreatable and exits non-zero.
+    """
+    notices: tuple[str, ...] = ()
+    """One message per address that needs nothing done but is worth reporting.
+
+    Separate from ``warnings`` because these addresses are already counted in
+    ``existing``: reporting them as uncreatable would both double-count the
+    address and fail a run in which nothing went wrong.
     """
 
 
@@ -1024,6 +1061,11 @@ def plan_user_creations(
     so pre-creating the account changes nothing about who ends up holding it. The
     permissions it confers are IAM-backed and therefore reported as undetermined
     by the downgrade analysis.
+
+    The derived username must also be one the registry would accept, and in
+    practice none is: see ``USERNAME_PATTERN``. Such an address becomes a
+    ``warnings`` entry and no ``creations`` entry, so the caller reports it and
+    exits non-zero without the registry ever being asked.
     """
     state = desired_state or _build_desired_acl_state(config)
     roster = sso_email_roster(config, desired_state=state)
@@ -1036,12 +1078,13 @@ def plan_user_creations(
     creations: list[UserCreation] = []
     existing: list[str] = []
     warnings: list[str] = []
+    notices: list[str] = []
     for address, roles in roster.items():
-        held, held_warning = _roster_address_is_held(
+        held, held_notice = _roster_address_is_held(
             address, users_by_name, users_by_email
         )
-        if held_warning is not None:
-            warnings.append(held_warning)
+        if held_notice is not None:
+            notices.append(held_notice)
         if held:
             existing.append(address)
             continue
@@ -1056,11 +1099,26 @@ def plan_user_creations(
             )
             continue
         name = address[:USERNAME_MAX_LENGTH]
+        if USERNAME_PATTERN.match(name) is None:
+            # In practice every address lands here: the grammar forbids '@'.
+            # Refuse before the registry is contacted rather than send N
+            # creations it will reject — each one would be a round trip whose
+            # only possible outcome is InvalidUserNameError.
+            warnings.append(
+                f"Roster address '{address}' derives username '{name}', which the "
+                "registry rejects: an admin-supplied username must match "
+                f"{USERNAME_PATTERN.pattern}. quiltx has no mapping from an email "
+                "address to a conforming handle, so no account was created; "
+                "create this account by hand."
+            )
+            continue
         collision = users_by_name.get(name)
         if collision is not None:
-            # Only reachable through truncation: an untruncated address that is
-            # some account's username resolves above. The registry would reject
-            # the duplicate name, so refuse the one address and keep going.
+            # Only reachable through truncation, and only when it cut the '@'
+            # off: an untruncated address that is some account's username
+            # resolves above, and one still holding its '@' fails the grammar.
+            # The registry would reject the duplicate name, so refuse the one
+            # address and keep going.
             other_email = getattr(collision, "email", None) or "(unknown)"
             warnings.append(
                 f"Roster address '{address}' derives username '{name}', which "
@@ -1082,6 +1140,7 @@ def plan_user_creations(
         creations=tuple(creations),
         existing=tuple(existing),
         warnings=tuple(warnings),
+        notices=tuple(notices),
     )
 
 
@@ -1090,15 +1149,19 @@ def _roster_address_is_held(
     users_by_name: dict[str, Any],
     users_by_email: dict[str, list[Any]],
 ) -> tuple[bool, str | None]:
-    """Return (some account already answers for *address*, anything odd about it).
+    """Return (some account already answers for *address*, a notice about it).
 
     An ambiguous address is held twice over, so it counts as held. A roster is
     keyed by email and cannot be rekeyed by username, so unlike a ``users:``
     entry there is nothing an author could rewrite; raising here would abort an
     apply over an address that needs no action. It is still reported rather than
-    folded into the "already have one" count, because two accounts answering for
-    one address is server data nobody asked for and the roles the roster grants
-    land on whichever of them logs in.
+    folded silently into the "already have one" count, because two accounts
+    answering for one address is server data nobody asked for and the roles the
+    roster grants land on whichever of them logs in.
+
+    The report is a notice and not a warning: the address is already counted in
+    ``existing``, so a warning would both name it twice and mark a run that had
+    nothing to do as failed.
     """
     try:
         resolved = _resolve_configured_user(address, users_by_name, users_by_email)
@@ -1305,43 +1368,48 @@ def print_bucket_registration_failures(
     )
 
 
-def default_policy_failure_message(title: str, skipped_roles: list[str]) -> str:
-    """One sentence naming a default policy as the cause of skipped roles."""
+def default_policy_failure_message(title: str, blocked_roles: list[str]) -> str:
+    """One sentence naming a default policy as the reason an apply stopped."""
     return (
         f"Policy '{title}' is declared {CONFIG_DEFAULT_POLICY_KEY}: true, so every "
-        f"managed role composes it; it does not exist, so {len(skipped_roles)} "
-        f"role(s) were skipped: {', '.join(skipped_roles)}."
+        f"managed role composes it; it does not exist, so this apply stopped "
+        f"before touching {len(blocked_roles)} role(s) and deleted nothing: "
+        f"{', '.join(blocked_roles)}."
     )
 
 
 def print_default_policy_failures(
-    skipped_by_policy: dict[str, list[str]], *, stream: Any = None
+    blocked_by_policy: dict[str, list[str]], *, stream: Any = None
 ) -> None:
-    """Print a prominent block naming a default policy that blocked every role.
+    """Print a prominent block naming a default policy that stopped the apply.
 
-    A default policy is a dependency of every managed role, so one that could not
-    be created turns into an ``unknown policy`` line per role — including roles
-    that never named it. Repeated per role that reads as many independent
-    failures; named once here it reads as the single cause it is. The roles are
-    left alone rather than created without the floor, because a role missing its
-    default policy is a silently narrower grant than the file asks for.
+    A default policy is a dependency of every managed role, so a floor that is
+    not on the server cannot produce a partial reconciliation: every role create
+    and update would fail, including the roles that never named it. Continuing
+    from there would reach the delete phases and remove the roles and policies
+    the file drops while provably unable to create the ones it adds — the old
+    state gone and the new state unreachable. ``apply_acl`` therefore returns at
+    this point, with the policy changes it already made kept, and this block is
+    the whole diagnosis rather than a footnote under one ``unknown policy`` line
+    per role.
     """
     out = sys.stdout if stream is None else stream
-    if not skipped_by_policy:
+    if not blocked_by_policy:
         return
     print(
-        f"!! DEFAULT POLICY MISSING: {len(skipped_by_policy)} default polic"
-        f"{'y' if len(skipped_by_policy) == 1 else 'ies'} blocked every managed "
+        f"!! DEFAULT POLICY MISSING: {len(blocked_by_policy)} default polic"
+        f"{'y' if len(blocked_by_policy) == 1 else 'ies'} blocked every managed "
         "role in this apply:",
         file=out,
     )
-    for title, roles in skipped_by_policy.items():
+    for title, roles in blocked_by_policy.items():
         print(f"  - {default_policy_failure_message(title, roles)}", file=out)
     print(
-        "This is the root cause of the per-role 'unknown policy' errors above. "
-        "The roles were left unchanged rather than created without the floor, "
-        "which would have granted less than the file asks for. Fix the policy "
-        "failure reported earlier and re-run.",
+        "This apply stopped before any role was created, updated or deleted, and "
+        "before any policy was deleted: every managed role composes the floor, so "
+        "no role could have been reconciled and deleting the roles and policies "
+        "this file drops would have removed working access with nothing to "
+        "replace it. Fix the policy failure reported earlier and re-run.",
         file=out,
     )
 
@@ -2492,13 +2560,20 @@ def apply_acl(
     assume_yes: bool = False,
     no_preflight: bool = False,
 ) -> list[str]:
-    """Apply ACL changes. Returns any runtime warnings."""
+    """Apply ACL changes. Returns any runtime warnings.
+
+    Every phase collects its failures and keeps going, so an apply is normally a
+    partial success: one rejected policy costs its own roles and nothing else. The
+    single exception is a missing ``config.default_policy`` floor, which every
+    managed role composes and which therefore blocks the whole role phase; that
+    returns early, before any role change and before both delete phases, rather
+    than deleting the old state with the new state unreachable.
+    """
 
     warnings = list(diff.warnings)
     failed_buckets: set[str] = set()
     bucket_failures: list[BucketRegistrationFailure] = []
     failed_roles: set[str] = set()
-    default_policy_skips: dict[str, list[str]] = {}
 
     graphql_only_buckets = {
         bucket
@@ -2656,6 +2731,31 @@ def apply_acl(
             warnings.append(f"Policy '{policy.title}' {detail}")
             print(f"  ! policy {policy.title}: {detail}", file=sys.stderr)
 
+    # Fail fast, here and not inside the role loops. Every managed role composes
+    # a default policy, so a floor the server does not hold makes every role
+    # create and update fail; the phases after them delete the roles and policies
+    # this file drops, which would tear down working access that nothing in this
+    # run can rebuild. Stopping between the policy phase and the role phase
+    # leaves a clean partial apply — the policies that did land, and nothing
+    # else — instead of a no-op followed by deletes.
+    # A file with no managed role change composes the floor onto nothing, so a
+    # missing one blocks nothing and must not suppress the deletes.
+    composing_roles = [
+        role.name for role in (*diff.roles_to_create, *diff.roles_to_update)
+    ]
+    blocked_by_default_policy = {
+        title: composing_roles
+        for title in sorted(diff.default_policy_titles)
+        if composing_roles and title not in known_policies
+    }
+    if blocked_by_default_policy:
+        print_default_policy_failures(blocked_by_default_policy, stream=sys.stderr)
+        warnings.extend(
+            default_policy_failure_message(title, roles)
+            for title, roles in blocked_by_default_policy.items()
+        )
+        return warnings
+
     for role in diff.roles_to_create:
         _print_apply_step(f"create role {role.name}", verbose=verbose)
         try:
@@ -2665,8 +2765,6 @@ def apply_acl(
             missing = exc.args[0]
             warnings.append(f"Role '{role.name}' skipped: unknown policy {missing!r}")
             print(f"  ! role {role.name}: unknown policy {missing!r}", file=sys.stderr)
-            if missing in diff.default_policy_titles:
-                default_policy_skips.setdefault(str(missing), []).append(role.name)
             failed_roles.add(role.name)
             continue
         except Exception as exc:
@@ -2690,8 +2788,6 @@ def apply_acl(
             missing = exc.args[0]
             warnings.append(f"Role '{role.name}' skipped: unknown policy {missing!r}")
             print(f"  ! role {role.name}: unknown policy {missing!r}", file=sys.stderr)
-            if missing in diff.default_policy_titles:
-                default_policy_skips.setdefault(str(missing), []).append(role.name)
             continue
         except Exception as exc:
             detail = format_exception(exc)
@@ -2699,15 +2795,6 @@ def apply_acl(
             print(f"  ! role {role.name}: {detail}", file=sys.stderr)
             continue
         print(f"  ~ role {role.name}")
-
-    if default_policy_skips:
-        # Said once, before the cascade into the default role and every user
-        # role assignment adds its own lines.
-        print_default_policy_failures(default_policy_skips, stream=sys.stderr)
-        warnings.extend(
-            default_policy_failure_message(title, roles)
-            for title, roles in default_policy_skips.items()
-        )
 
     if diff.default_role_needs_update and diff.default_role_name is not None:
         default_role_name = diff.default_role_name
@@ -3445,6 +3532,7 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
     sso_mappings: list[_SsoMapping] = []
     default_role_name: str | None = None
     warnings: list[str] = []
+    notices: list[str] = []
 
     cumulative_policy_titles: list[str] = []
     cumulative_admin_votes: list[tuple[str, bool]] = []
@@ -3591,7 +3679,12 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
             for role in static_roles
         ]
         if unmanaged_role_names:
-            warnings.append(
+            # A notice, not a warning: this is what the two flags together mean,
+            # not something that went wrong. The CLI exits 1 on a non-empty
+            # diff.warnings, and the combination is the shape the example file
+            # documents, so warning here failed every --yes run of a valid file
+            # that had any work to do.
+            notices.append(
                 f"Default policies {', '.join(default_policy_titles)} do not reach "
                 f"unmanaged roles {', '.join(sorted(unmanaged_role_names))}: quiltx "
                 "never modifies an unmanaged role's IAM permissions. A user whose "
@@ -3607,6 +3700,7 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         sso_mappings=sso_mappings,
         default_role_name=default_role_name,
         warnings=warnings,
+        notices=notices,
         unmanaged_role_names=frozenset(unmanaged_role_names),
     )
 
