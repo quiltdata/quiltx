@@ -145,6 +145,11 @@ cross-account path is the one most likely to be misconfigured — so pass
 `--no-test` to opt out. Set `QUILTX_NO_PREFLIGHT=1` to use the same mode for
 scripted runs.
 
+On `catalog acl` the flag applies to every new bucket in the run and is not
+recorded anywhere, so the next plain apply hits the same failure. Mark the
+individual bucket instead with
+[`config.no_preflight` under `buckets:`](#pre-prepared-buckets).
+
 ### Verifying access
 
 `quiltx bucket test BUCKET` reports three independent checks:
@@ -263,6 +268,216 @@ user or selector currently references them. Registered buckets not already
 represented by managed permissions are listed on both built-in roles, so a
 capture can register them when replayed without duplicating explicit grants.
 
+### Default policies
+
+`config.default_policy: true` marks a policy as the floor every managed role
+stands on. It is composed into each role's policy list, last and deduped, so a
+role that already names the policy is unchanged:
+
+```yaml
+policies:
+  general:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [quilt-open]
+```
+
+This is what `config.default_role` cannot express. The default role is a
+fallback: the registry assigns it only when an authenticated user's SSO claims
+matched no mapping at all. A specific grant therefore costs a user the general
+one — someone named in a narrow role's `sso.email` matches that mapping, never
+reaches the default role, and loses the open buckets unless every narrow role
+repeats the general policy. A default policy composes into the roles a user
+already matched, so it grants the same permissions without adding a role to
+anyone's set and cannot disturb which role the catalog treats as active.
+
+The flag requires `config.synthesize: false`. A synthesizing policy is a ladder
+rung whose `sso.<claim>` selector declares its audience; granting that rung to
+the rungs below it would hand its buckets to those broader audiences while
+leaving their synthesized role names unchanged, so the combination is rejected.
+
+Unmanaged roles never receive a default policy, because their permissions live
+in IAM and quiltx does not modify them. A user whose only role is unmanaged must
+also match a managed role's selector to stand on the floor; a config that
+declares both a default policy and an unmanaged role reports this as a warning.
+
+Composing into every role makes one policy a dependency of all of them, so a
+default policy that fails to create costs every role, not just the roles that
+named it. The roles are left alone rather than created without the floor, which
+would grant less than the file asks for, and the run names the policy once as the
+cause instead of leaving one `unknown policy` line per role to explain it:
+
+```text
+!! DEFAULT POLICY MISSING: 1 default policy blocked every managed role in this apply:
+  - Policy 'general' is declared config.default_policy: true, so every managed role composes it; it does not exist, so 3 role(s) were skipped: public, internal_public, exec.
+```
+
+`--yaml` does not re-emit the flag. The server has no notion of a default
+policy, and every captured role already lists it in its composed
+`config.policies`, so the capture replays to the same state. Re-add the flag by
+hand to keep the file shorter and to re-arm it for roles added later.
+
+### Pre-prepared buckets
+
+The optional `buckets:` block declares per-bucket registration options. A key
+there references the bucket on its own, so it can be registered before any role
+or policy grants access to it:
+
+```yaml
+roles:
+  SierraGeneralRole:
+    buckets.read_write: [sierra-general]
+buckets:
+  sierra-general:
+    config.no_preflight: true
+```
+
+`config.no_preflight: true` registers the bucket through GraphQL only and leaves
+its AWS setup alone. Use it for a bucket owned by another account that was
+already prepared owner-side with
+[`quiltx bucket prepare`](#bucket-registration): the SNS topic exists and the
+catalog's control account holds the grant, but the identity applying the ACL is
+a catalog admin rather than the bucket owner, so it cannot read or write that
+bucket's policy. Without the flag, preflight fails and the bucket never
+registers.
+
+The CLI's `--no-preflight` says the same thing for every new bucket in the run
+and remains a global override. The difference is durability and scope: declared
+in the file, the fact stays with the bucket, so the next plain apply — or a CI
+job that does not know which bucket is special — behaves the same way, and the
+buckets this identity does own still get their local setup. `--dry-run` names
+each bucket that would be registered via GraphQL only and where that mode came
+from.
+
+Captures do not re-emit the block. The registry records no per-bucket
+registration mode, so it cannot tell a bucket prepared in another account from
+one this identity owns. Replaying a capture against the catalog it came from is
+unaffected — those buckets are registered already — but re-add the flag by hand
+before replaying onto a catalog that has yet to register such a bucket.
+
+A bucket that does not register is reported as its own error block, naming the
+bucket and the reason, and the command exits non-zero. The apply continues past
+it deliberately, so the rest of the file still lands, but permissions that
+reference the bucket cannot be applied and are reported too:
+
+```text
+!! BUCKET REGISTRATION FAILED: 1 bucket(s) not registered:
+  - sierra-general: An error occurred (AccessDenied) when calling GetBucketLocation
+```
+
+### Users
+
+`users:` reconciles the active role, ordered extra roles, and admin status of
+accounts that already exist. quiltx never creates or deletes users.
+
+```yaml
+users:
+  alice:                  # admin-created account: the username is a handle
+    role: exec
+    extra_roles: [internal_public]
+    admin: true
+  bob@example.com:        # SSO self-registration: the username is the email
+    role: internal_public
+```
+
+Both shapes appear in one file because the registry derives an SSO
+self-registration's username from its email address, while an admin-created
+account must use a `^[a-z][a-z0-9_]*$` handle. Each key is therefore resolved
+against the server by exact username first, then by a unique case-insensitive
+email match, so writing an email works even when the account uses a handle.
+
+A key that names an account always means that account, even when someone else
+holds that string as their email address: precedence decides, and the clash is
+reported as a warning naming both accounts so you can rekey if you meant the
+other person. Making it fatal would reject this tool's own `--yaml` capture, which
+keys every entry by username.
+
+Two errors remain. A key that names no account and is the email of two of them
+has nothing to decide it, and two keys that resolve to the same account are two
+conflicting statements about one person. Both name the conflict and stop. A key
+that matches nothing is reported as a nonfatal notice and skipped, so check the
+output when an expected change does not appear. Running `quiltx catalog acl` with
+no config file lists both identifiers for every account.
+
+### Creating users from sso.email rosters
+
+Because `users:` only ever reaches accounts that exist, an ACL file cannot
+onboard anyone: granting a role to someone who has never logged in needs an
+admin-UI invite or a first SSO login, after which you re-run the tool. The
+`--create-and-email-users` flag closes that gap by creating an account for every
+`sso.email` address the server does not already hold:
+
+```bash
+uvx quiltx catalog acl config.yml --dry-run --create-and-email-users
+uvx quiltx catalog acl config.yml --yes --create-and-email-users
+```
+
+Creation is driven by `sso.email`, not by `users:`, and there is no config key
+for it. `sso.email` is already a per-role roster of individuals keyed by a field
+that can only be an email, which makes it the better source in three ways. There
+is no identifier ambiguity, because unlike a `users:` key an `sso.email` value is
+never a handle. There is no drift, because the role is implied by the nesting, so
+the role assigned at creation and the role the SSO mapping grants are the same
+declaration; a `users:`-assigned role would be overwritten anyway, since every
+SSO login recomputes roles from the SSO config and replaces the set. And the
+derived username is `email[:64]`, the registry's own SSO self-registration
+naming, so a pre-created account is indistinguishable from one that signed itself
+up. `sso.hd` and `sso.groups` contribute nobody: a domain or a group names no
+individual, so there is nobody to create.
+
+An address any account already answers for is never created again, decided by
+the same resolution `users:` keys get. Email is checked first, because the
+derived username is truncated and a long address is therefore not its own
+account's name. When several roles name the same person, the last declaration
+becomes the active role and the earlier ones become extra roles, matching
+`union_roles: true` and the last-matching first-login pick. If truncation lands a
+derived username on a different account, that one address is reported and
+skipped rather than failing the run. So is an address two accounts already answer
+for: nothing needs creating, but two accounts sharing one address is worth
+knowing about.
+
+An address is only created when every role it names will exist. Roles this file
+declares are fine, including ones the same run creates. A `config.unmanaged: true`
+role that the server does not hold is not: quiltx never creates one, so the
+registry would reject the account after the mail had already gone out. That
+address is reported and skipped. An unmanaged role that *does* exist is created
+into, because its selector would grant it at first login anyway — note that its
+permissions are IAM-backed, so the downgrade analysis reports that account's
+access as undetermined rather than enumerating it.
+
+**The mail cannot be recalled.** The registry's create mutation generates a
+password-reset link and sends a welcome email, with no suppress flag. That is
+why the flag lives only on the command line: a config default would make the
+*first* apply the irreversible one, and that is the apply you run before anyone
+has reviewed the roster. Real files carry community rosters whose addresses have
+no idea the stack exists.
+
+The addresses are therefore printed in full before anything is sent, and
+confirmed or passed `--yes`:
+
+```text
+!! CREATE AND EMAIL: 2 account(s) will be created and sent a welcome and password-reset email:
+  - alice@example.com -> user alice@example.com, roles internal_public
+  - bob@example.com -> user bob@example.com, roles exec, internal_public
+The registry sends this mail as part of creation; it cannot be recalled.
+Create and email 2 account(s)? [y/N]:
+```
+
+`--dry-run` creates nobody and mails nobody, and still names every address. A
+run that would create more than 10 accounts is refused; re-run with
+`--max-created-users N` to raise the cap once the printed list has been
+reviewed.
+
+The three ways a creation does not happen are not the same. Declining the prompt
+creates nobody, and so does declining the earlier apply prompt, which returns
+before this step. Refusing over the cap creates nobody either. Only a *failed*
+creation is per-address: the rest of the roster still gets its accounts. All
+three are warnings, so the command exits non-zero in each case.
+
+Creation runs after roles are reconciled — the registry rejects a creation naming
+a role it does not hold — and it is additive: accounts absent from the rosters are
+left alone.
+
 ### Downgrade warnings
 
 Both export and reconciliation compare each existing user's effective access
@@ -326,6 +541,9 @@ uvx quiltx catalog acl config.yml
 
 # Apply without prompting
 uvx quiltx catalog acl config.yml --yes
+
+# Also create (and mail) accounts for sso.email addresses with no user
+uvx quiltx catalog acl config.yml --yes --create-and-email-users
 ```
 
 ## SSO-only catalogs

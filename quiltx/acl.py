@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from quilt3.admin.types import Permission
 from quiltx import stack as stack_lib
 
 INLINE_POLICY_SUFFIX = "__inline"
-ACL_TOP_LEVEL_KEYS = {"policies", "roles", "users"}
+ACL_TOP_LEVEL_KEYS = {"policies", "roles", "users", "buckets"}
 ACL_ENTRY_KEYS = {
     "buckets.read",
     "buckets.read_write",
@@ -22,11 +23,21 @@ ACL_ENTRY_KEYS = {
     "config.is_admin",
 }
 USER_ENTRY_KEYS = {"role", "extra_roles", "admin"}
+CONFIG_NO_PREFLIGHT_KEY = "config.no_preflight"
+BUCKET_ENTRY_KEYS = {CONFIG_NO_PREFLIGHT_KEY}
 POLICY_ROLE_NAME_KEY = "name"
+CONFIG_DEFAULT_POLICY_KEY = "config.default_policy"
 CONFIG_POLICIES_KEY = "config.policies"
 CONFIG_SYNTHESIZE_KEY = "config.synthesize"
 CONFIG_UNMANAGED_KEY = "config.unmanaged"
 EVERYONE_GROUP = "Everyone"
+SSO_EMAIL_CLAIM = "email"
+USERNAME_MAX_LENGTH = 64
+"""How much of an address the registry keeps as a username.
+
+SSO self-registration names an account ``email[:64]``, so deriving the same name
+leaves a pre-created account indistinguishable from one that signed itself up.
+"""
 REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
 REGISTRY_MANAGED_ROLE_EXCLUSIONS = frozenset({"Canary"})
 BUILTIN_BUCKET_REGISTRATION_FIELDS = {
@@ -42,6 +53,18 @@ class AclPolicy:
     read: list[str] = field(default_factory=list)
     read_write: list[str] = field(default_factory=list)
     default_role: bool = False
+    default_policy: bool = False
+    """Compose this policy into every managed role: a floor, not a fallback.
+
+    ``default_role`` fires only when an authenticated user's claims matched no
+    mapping, so a *specific* grant costs a user the general one: whoever matches
+    a narrow selector never reaches the default role and loses the open buckets
+    unless every narrow role repeats the general policy. A default policy is
+    granted through the roles a user already matched, which needs no extra role
+    in their set and so cannot disturb the server's active-role selection.
+
+    Requires ``synthesize`` to be false; see ``parse_acl_config_text``.
+    """
     is_admin: bool | None = None
     role_name: str | None = None
     synthesize: bool = True
@@ -76,10 +99,29 @@ class AclUserConfig:
 
 
 @dataclass(frozen=True)
+class AclBucketConfig:
+    """Per-bucket registration options for a bucket the ACL declares."""
+
+    no_preflight: bool = False
+    """Register through GraphQL only, leaving the bucket's AWS setup alone.
+
+    A bucket owned by another account is prepared once, owner-side, with
+    ``quiltx bucket prepare``: the SNS topic exists and the catalog's control
+    account already holds the grant. The identity applying the ACL is a catalog
+    admin, not the bucket owner, so it cannot read or write that bucket's policy
+    and must not be expected to — preflight fails and the bucket never
+    registers. The CLI's ``--no-preflight`` says the same thing for every bucket
+    in one run and is forgotten afterwards; declaring it here keeps the fact
+    with the bucket, so a later plain apply (or a CI job) behaves the same way.
+    """
+
+
+@dataclass(frozen=True)
 class AclConfig:
     policies: list[AclPolicy]
     roles: dict[str, AclStaticRole]
     users: dict[str, AclUserConfig] = field(default_factory=dict)
+    buckets: dict[str, AclBucketConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -157,6 +199,14 @@ class UserDowngrade:
         return bool(self.lost_permissions or self.admin_lost or self.undetermined)
 
 
+@dataclass(frozen=True)
+class BucketRegistrationFailure:
+    """One bucket an apply attempted to register and could not."""
+
+    name: str
+    reason: str
+
+
 @dataclass
 class AclDiff:
     buckets_to_add: list[str] = field(default_factory=list)
@@ -175,6 +225,29 @@ class AclDiff:
     users_to_update: list[AclUserUpdate] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
     user_downgrades: list[UserDowngrade] = field(default_factory=list)
+    resolved_user_names: dict[str, str] = field(default_factory=dict)
+    """``users:`` key -> server username, for the keys that resolved.
+
+    A key may be an email, so reporting cannot assume it names an account.
+    This is provenance for the diff, never a change on its own.
+    """
+    no_preflight_buckets: frozenset[str] = frozenset()
+    """Buckets the config marks ``config.no_preflight: true``.
+
+    ``apply_acl`` receives the diff but not the config, and registration mode is
+    a property of the bucket rather than of the change, so the flag rides along
+    here. It selects how a bucket in ``buckets_to_add`` is registered and is
+    never a change on its own.
+    """
+    default_policy_titles: frozenset[str] = frozenset()
+    """Policies the config marks ``config.default_policy: true``.
+
+    Composed into every managed role, so one of these failing to create costs
+    every role create and update rather than only the roles that named it.
+    ``apply_acl`` gets the diff and not the config, so like
+    ``no_preflight_buckets`` the fact rides along here; it tells a skipped role
+    apart from the reason it was skipped and is never a change on its own.
+    """
 
     def has_changes(self) -> bool:
         return any(
@@ -283,6 +356,7 @@ def parse_acl_config_text(text: str) -> AclConfig:
     raw_policies = raw.get("policies") or {}
     raw_roles = raw.get("roles") or {}
     raw_users = raw.get("users", {})
+    raw_bucket_configs = raw.get("buckets", {})
 
     if not isinstance(raw_policies, dict):
         raise ValueError("'policies' must be a mapping")
@@ -290,6 +364,8 @@ def parse_acl_config_text(text: str) -> AclConfig:
         raise ValueError("'roles' must be a mapping")
     if not isinstance(raw_users, dict):
         raise ValueError("'users' must be a mapping")
+    if not isinstance(raw_bucket_configs, dict):
+        raise ValueError("'buckets' must be a mapping")
 
     policies: list[AclPolicy] = []
     policy_names: set[str] = set()
@@ -310,6 +386,22 @@ def parse_acl_config_text(text: str) -> AclConfig:
         if not isinstance(synthesize, bool):
             raise ValueError(
                 f"policies.{name}.{CONFIG_SYNTHESIZE_KEY} must be a boolean"
+            )
+        default_policy = value.get(CONFIG_DEFAULT_POLICY_KEY, False)
+        if not isinstance(default_policy, bool):
+            raise ValueError(
+                f"policies.{name}.{CONFIG_DEFAULT_POLICY_KEY} must be a boolean"
+            )
+        if default_policy and synthesize:
+            # Checked before the entry parse so the reported problem is the
+            # contradiction, not the missing selector it implies.
+            raise ValueError(
+                f"policies.{name}.{CONFIG_DEFAULT_POLICY_KEY} requires "
+                f"{CONFIG_SYNTHESIZE_KEY}: false because a default policy is "
+                "granted to every managed role: a ladder rung declares the "
+                "audience its sso.<claim> selector names, and appending it to "
+                "the rungs below would hand its buckets to those broader "
+                "audiences while leaving their synthesized names unchanged"
             )
         entry = _parse_acl_entry(
             value,
@@ -349,6 +441,7 @@ def parse_acl_config_text(text: str) -> AclConfig:
             read_write=entry.read_write,
             is_admin=entry.is_admin,
             default_role=entry.default_role,
+            default_policy=default_policy,
             role_name=role_name,
             synthesize=synthesize,
         )
@@ -457,6 +550,28 @@ def parse_acl_config_text(text: str) -> AclConfig:
             admin=admin,
         )
 
+    buckets: dict[str, AclBucketConfig] = {}
+    for name, value in raw_bucket_configs.items():
+        if not isinstance(name, str):
+            raise ValueError("Bucket names must be strings")
+        if not isinstance(value, dict):
+            raise ValueError(f"Bucket '{name}' must be a mapping")
+        unknown_fields = set(value) - BUCKET_ENTRY_KEYS
+        if unknown_fields:
+            raise ValueError(
+                f"Unknown fields in buckets.{name}: "
+                + ", ".join(sorted(str(field) for field in unknown_fields))
+                + ". Supported fields: "
+                + ", ".join(sorted(BUCKET_ENTRY_KEYS))
+                + "."
+            )
+        no_preflight = value.get(CONFIG_NO_PREFLIGHT_KEY, False)
+        if not isinstance(no_preflight, bool):
+            raise ValueError(
+                f"buckets.{name}.{CONFIG_NO_PREFLIGHT_KEY} must be a boolean"
+            )
+        buckets[name] = AclBucketConfig(no_preflight=no_preflight)
+
     if len(default_role_sources) > 1:
         raise ValueError(
             "Only one ACL entry may set config.default_role: true; found "
@@ -479,12 +594,19 @@ def parse_acl_config_text(text: str) -> AclConfig:
         policies=policies,
         roles=roles,
         users=users,
+        buckets=buckets,
     )
 
 
 def all_buckets(config: AclConfig) -> set[str]:
-    """Return all buckets referenced by the ACL config."""
-    result: set[str] = set()
+    """Return all buckets referenced by the ACL config.
+
+    A ``buckets:`` key counts as a reference on its own. The block is
+    declarative, so naming a bucket there is a statement that the catalog should
+    hold it, and the annotation has to be usable on a bucket whose grants are
+    added in a later commit.
+    """
+    result: set[str] = set(config.buckets)
     for policy in config.policies:
         result.update(policy.read)
         result.update(policy.read_write)
@@ -538,6 +660,12 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     diff = AclDiff()
     diff.warnings.extend(desired_state.warnings)
     diff.buckets_to_add = sorted(all_buckets(desired) - current.buckets.keys())
+    diff.no_preflight_buckets = frozenset(
+        name for name, config in desired.buckets.items() if config.no_preflight
+    )
+    diff.default_policy_titles = frozenset(
+        policy.name for policy in desired.policies if policy.default_policy
+    )
 
     desired_policy_titles = set(desired_state.policy_updates)
     for title, policy_update in desired_state.policy_updates.items():
@@ -615,10 +743,12 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         diff.default_role_needs_update = True
 
     current_users = {user.name: user for user in current.users}
+    current_users_by_email = _index_users_by_email(current.users)
     available_user_roles = set(desired_state.role_updates) | set(
         current.unmanaged_roles
     )
-    applied_user_names: set[str] = set()
+    resolved_users: dict[str, AclUserConfig] = {}
+    keys_by_server_name: dict[str, str] = {}
     for name, configured_user in desired.users.items():
         requested_roles = {configured_user.role, *configured_user.extra_roles}
         unknown_roles = sorted(requested_roles - available_user_roles)
@@ -628,13 +758,31 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
                 f"roles: {', '.join(unknown_roles)}; skipping."
             )
             continue
-        current_user = current_users.get(name)
+        resolved = _resolve_configured_user(name, current_users, current_users_by_email)
+        if resolved.collision is not None:
+            diff.warnings.append(f"Configured user {resolved.collision}")
+        current_user = resolved.user
         if current_user is None:
             diff.notices.append(
                 f"Configured user '{name}' does not exist on the server; skipping."
             )
             continue
-        applied_user_names.add(name)
+        server_name = str(current_user.name)
+        first_key = keys_by_server_name.get(server_name)
+        if first_key is not None:
+            # Two entries about one person cannot both be applied: the updates
+            # are walked in order with append=False, so the later one would
+            # replace the earlier one without saying so. Same reason the
+            # undecidable key is fatal — either reading grants roles the author
+            # did not write for that account.
+            raise ValueError(
+                f"Configured users '{first_key}' and '{name}' both address the "
+                f"server account '{server_name}'; one entry would silently "
+                "replace the other. Keep a single entry per account."
+            )
+        keys_by_server_name[server_name] = name
+        diff.resolved_user_names[name] = server_name
+        resolved_users[server_name] = configured_user
         current_role = current_user.role.name if current_user.role else None
         current_extras = tuple(
             role.name for role in (current_user.extra_roles or []) if role is not None
@@ -649,7 +797,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         if role_changed or admin_changed:
             diff.users_to_update.append(
                 AclUserUpdate(
-                    name=name,
+                    name=server_name,
                     role=configured_user.role,
                     extra_roles=configured_user.extra_roles,
                     role_changed=role_changed,
@@ -671,10 +819,360 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         current,
         diff,
         desired_state=desired_state,
-        applied_user_names=applied_user_names,
+        resolved_users=resolved_users,
     )
 
     return diff
+
+
+def _index_users_by_email(users: list[Any]) -> dict[str, list[Any]]:
+    """Group server users by lowercased email.
+
+    Emails are grouped rather than mapped one-to-one so a key matching several
+    accounts can be reported instead of silently resolving to whichever user
+    the registry happened to list first.
+    """
+    index: dict[str, list[Any]] = {}
+    for user in users:
+        email = getattr(user, "email", None)
+        if not email:
+            continue
+        index.setdefault(str(email).lower(), []).append(user)
+    return index
+
+
+@dataclass(frozen=True)
+class _ResolvedUser:
+    """The account a key addresses, and any collision resolving it stepped over."""
+
+    user: Any | None = None
+    collision: str | None = None
+    """Set when the key also reached other accounts by email.
+
+    A sentence about the key, phrased so a caller can prefix its own context
+    ("Configured user ...", "Roster address ..."). Resolution succeeded; this is
+    the risk it stepped over, never a reason to stop.
+    """
+
+
+def _resolve_configured_user(
+    key: str,
+    users_by_name: dict[str, Any],
+    users_by_email: dict[str, list[Any]],
+) -> _ResolvedUser:
+    """Return the server user a ``users:`` key addresses, if any.
+
+    ``user.name`` is email-shaped for SSO self-registrations and handle-shaped
+    for admin-created accounts, and a captured ACL mixes both without marking
+    which is which. Usernames therefore win, so a key that names an account
+    always means that account, and email is only a fallback for authors working
+    from a roster of addresses.
+
+    Precedence has to hold even when a *different* account carries the key as
+    its email, because ``--yaml`` keys every entry by ``user.name``: refusing
+    that combination would reject the tool's own capture of any catalog holding
+    an SSO self-registration whose name is another account's email, with an
+    error asking for the username the capture already used. The collision is
+    reported instead, so an author who meant the other person can rekey.
+
+    Only a key that names no account and is the email of two or more is fatal:
+    nothing there decides between them, and either reading regrants someone the
+    author did not name.
+    """
+    named = users_by_name.get(key)
+    by_email = users_by_email.get(key.lower(), [])
+    if named is not None:
+        others = [user for user in by_email if user is not named]
+        if others:
+            return _ResolvedUser(
+                user=named,
+                collision=(
+                    f"'{key}' is the server username of one account and the "
+                    f"email of {_quote_user_names(others)}; it resolves to the "
+                    f"account named '{key}', because a key that names an account "
+                    "always means that account. Rekey it to the other account's "
+                    "username if that is who was meant."
+                ),
+            )
+        return _ResolvedUser(user=named)
+    if len(by_email) > 1:
+        raise ValueError(
+            f"Configured user '{key}' is ambiguous: it is the email of "
+            f"{_quote_user_names(by_email)}; key this entry by the server "
+            "username of the account you mean."
+        )
+    return _ResolvedUser(user=by_email[0] if by_email else None)
+
+
+def _resolve_configured_users(
+    desired: AclConfig, current: CurrentState
+) -> dict[str, AclUserConfig]:
+    """Map server username -> ``users:`` entry for every key that resolves.
+
+    The standalone form of what ``compute_diff`` builds as it walks ``users:``.
+    An undecidable key is skipped rather than raised on: this feeds analysis, and
+    a caller who has not gone through ``compute_diff`` should still get findings
+    for the keys that do resolve.
+    """
+    users_by_name = {
+        str(user.name): user for user in current.users if getattr(user, "name", None)
+    }
+    users_by_email = _index_users_by_email(current.users)
+    resolved: dict[str, AclUserConfig] = {}
+    for key, configured_user in desired.users.items():
+        try:
+            match = _resolve_configured_user(key, users_by_name, users_by_email)
+        except ValueError:
+            continue
+        if match.user is not None:
+            resolved[str(match.user.name)] = configured_user
+    return resolved
+
+
+def _quote_user_names(users: list[Any]) -> str:
+    return ", ".join(sorted(f"'{getattr(user, 'name', None)}'" for user in users))
+
+
+@dataclass(frozen=True)
+class UserCreation:
+    """One account an ``sso.email`` roster names and the server does not hold."""
+
+    name: str
+    email: str
+    role: str
+    extra_roles: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class UserCreationPlan:
+    """What creating the missing roster accounts would do, before it is done.
+
+    Creation mails every new account, so the plan is computed and shown first
+    and carried out second: the addresses are the only part of the operation a
+    reviewer can still change their mind about.
+    """
+
+    creations: tuple[UserCreation, ...] = ()
+    existing: tuple[str, ...] = ()
+    """Roster addresses an account already holds. Nothing to do, but provenance
+    for a run that creates fewer accounts than the file lists addresses."""
+    warnings: tuple[str, ...] = ()
+    """One message per address the run creates no account for and should not.
+
+    Covers addresses that cannot be created and addresses whose server state is
+    odd enough to report, so a plan is never silent about an address it read.
+    """
+
+
+def sso_email_roster(
+    config: AclConfig, *, desired_state: _DesiredAclState | None = None
+) -> dict[str, list[str]]:
+    """Return each ``sso.email`` address mapped to the roles it is granted.
+
+    ``sso.email`` is the only selector that names individuals: ``sso.hd`` and
+    ``sso.groups`` are set-valued, so a domain or group has no roster to read.
+    The resolved desired state is walked rather than the raw config so a rung of
+    the synthesized policy ladder contributes its roster exactly like a static
+    role does, under the role name that will actually exist.
+
+    Roles come back in declaration order, deduped. Addresses are matched
+    case-insensitively and reported under the spelling the file used first, so
+    two spellings of one person are one entry rather than two accounts.
+    """
+    state = desired_state or _build_desired_acl_state(config)
+    canonical: dict[str, str] = {}
+    roster: dict[str, list[str]] = {}
+    for mapping in state.sso_mappings:
+        if mapping.claim != SSO_EMAIL_CLAIM:
+            continue
+        address = canonical.setdefault(mapping.value.lower(), mapping.value)
+        roles = roster.setdefault(address, [])
+        if mapping.role_name not in roles:
+            roles.append(mapping.role_name)
+    return roster
+
+
+def plan_user_creations(
+    config: AclConfig,
+    current: CurrentState,
+    *,
+    desired_state: _DesiredAclState | None = None,
+) -> UserCreationPlan:
+    """Work out which roster addresses have no account yet.
+
+    An address that any account already answers for is left alone, so a repeat
+    run creates nobody. Existence is decided by the same resolution ``users:``
+    keys get: email first, then username. Email has to come first here because
+    the derived username is truncated to ``USERNAME_MAX_LENGTH``, so a long
+    address is not its own account's name and only the email index can find it.
+
+    When several roles name the same person the last declaration becomes the
+    active role and the earlier ones become extra roles. The generated SSO
+    config sets ``union_roles: true`` and the catalog activates the
+    last-matching role at first login, so the account starts where its own first
+    login would have left it instead of somewhere a re-login would move it.
+
+    An address is only created when every role its roster entry names will exist:
+    the registry rejects a creation naming a role it does not hold, and the mail
+    is sent by the creation, so attempting one that cannot succeed is worse than
+    skipping it. The available set is the one ``compute_diff`` uses for ``users:``
+    entries — managed roles this file declares, plus unmanaged roles the server
+    already holds — so a dry run does not report a missing role that the same run
+    creates, while a ``config.unmanaged: true`` role that does not exist is
+    refused, since quiltx never creates one. An *existing* unmanaged role is
+    creatable into on purpose: its selector would grant it at first login anyway,
+    so pre-creating the account changes nothing about who ends up holding it. The
+    permissions it confers are IAM-backed and therefore reported as undetermined
+    by the downgrade analysis.
+    """
+    state = desired_state or _build_desired_acl_state(config)
+    roster = sso_email_roster(config, desired_state=state)
+    available_roles = set(state.role_updates) | set(current.all_roles)
+    users_by_name = {
+        str(user.name): user for user in current.users if getattr(user, "name", None)
+    }
+    users_by_email = _index_users_by_email(current.users)
+
+    creations: list[UserCreation] = []
+    existing: list[str] = []
+    warnings: list[str] = []
+    for address, roles in roster.items():
+        held, held_warning = _roster_address_is_held(
+            address, users_by_name, users_by_email
+        )
+        if held_warning is not None:
+            warnings.append(held_warning)
+        if held:
+            existing.append(address)
+            continue
+        unavailable = [role for role in roles if role not in available_roles]
+        if unavailable:
+            warnings.append(
+                f"Roster address '{address}' names role(s) "
+                f"{', '.join(unavailable)}, which the server does not hold and "
+                "this file does not create; not created. Unmanaged roles are "
+                "never created by quiltx, so create the role first or drop the "
+                "address."
+            )
+            continue
+        name = address[:USERNAME_MAX_LENGTH]
+        collision = users_by_name.get(name)
+        if collision is not None:
+            # Only reachable through truncation: an untruncated address that is
+            # some account's username resolves above. The registry would reject
+            # the duplicate name, so refuse the one address and keep going.
+            other_email = getattr(collision, "email", None) or "(unknown)"
+            warnings.append(
+                f"Roster address '{address}' derives username '{name}', which "
+                f"already belongs to a different account (email {other_email}); "
+                "not created. Create this account by hand, or shorten the "
+                f"address to under {USERNAME_MAX_LENGTH} characters."
+            )
+            continue
+        *extra_roles, active_role = roles
+        creations.append(
+            UserCreation(
+                name=name,
+                email=address,
+                role=active_role,
+                extra_roles=tuple(extra_roles),
+            )
+        )
+    return UserCreationPlan(
+        creations=tuple(creations),
+        existing=tuple(existing),
+        warnings=tuple(warnings),
+    )
+
+
+def _roster_address_is_held(
+    address: str,
+    users_by_name: dict[str, Any],
+    users_by_email: dict[str, list[Any]],
+) -> tuple[bool, str | None]:
+    """Return (some account already answers for *address*, anything odd about it).
+
+    An ambiguous address is held twice over, so it counts as held. A roster is
+    keyed by email and cannot be rekeyed by username, so unlike a ``users:``
+    entry there is nothing an author could rewrite; raising here would abort an
+    apply over an address that needs no action. It is still reported rather than
+    folded into the "already have one" count, because two accounts answering for
+    one address is server data nobody asked for and the roles the roster grants
+    land on whichever of them logs in.
+    """
+    try:
+        resolved = _resolve_configured_user(address, users_by_name, users_by_email)
+    except ValueError:
+        accounts = _quote_user_names(users_by_email.get(address.lower(), []))
+        return True, (
+            f"Roster address '{address}' is the email of {accounts}, so it counts "
+            "as already onboarded and no account was created for it. A roster is "
+            "keyed by email and cannot be rekeyed by username; resolve the "
+            "duplicate accounts on the server."
+        )
+    if resolved.user is None:
+        return False, None
+    if resolved.collision is None:
+        return True, None
+    return True, f"Roster address {resolved.collision}"
+
+
+def print_user_creations(
+    plan: UserCreationPlan, *, dry_run: bool = False, stream: Any = None
+) -> None:
+    """Name every address that would be created and mailed.
+
+    The registry generates a password-reset link and mails it as part of
+    creating an account, with no way to suppress the send, so the addresses are
+    printed in full before the prompt rather than summarized as a count.
+    """
+    out = sys.stdout if stream is None else stream
+    if not plan.creations:
+        return
+    verb = "would be" if dry_run else "will be"
+    print(
+        f"!! CREATE AND EMAIL: {len(plan.creations)} account(s) {verb} created "
+        "and sent a welcome and password-reset email:",
+        file=out,
+    )
+    for creation in plan.creations:
+        roles = ", ".join((creation.role, *creation.extra_roles))
+        print(f"  - {creation.email} -> user {creation.name}, roles {roles}", file=out)
+    print(
+        "The registry sends this mail as part of creation; it cannot be recalled.",
+        file=out,
+    )
+
+
+def create_roster_users(
+    stack: stack_lib.Catalog,
+    creations: Sequence[UserCreation],
+    *,
+    verbose: bool = False,
+) -> list[str]:
+    """Create the planned accounts, returning one warning per failure.
+
+    Each address stands alone: one rejected creation must not cost the rest of
+    the roster their accounts, so failures are collected the way the other apply
+    steps collect theirs instead of ending the run.
+    """
+    warnings: list[str] = []
+    for creation in creations:
+        _print_apply_step(f"create user {creation.name}", verbose=verbose)
+        try:
+            stack.admin.users.create(
+                creation.name,
+                creation.email,
+                creation.role,
+                extra_roles=list(creation.extra_roles) or None,
+            )
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(f"User '{creation.email}' could not be created: {detail}")
+            print(f"  ! user {creation.email}: {detail}", file=sys.stderr)
+        else:
+            print(f"  + user {creation.name} (role {creation.role}, emailed)")
+    return warnings
 
 
 _PERMISSION_RANK = {"READ": 1, "READ_WRITE": 2}
@@ -687,6 +1185,7 @@ def analyze_user_downgrades(
     *,
     desired_state: _DesiredAclState | None = None,
     applied_user_names: set[str] | None = None,
+    resolved_users: dict[str, AclUserConfig] | None = None,
 ) -> list[UserDowngrade]:
     """Return existing users whose effective access *diff* would reduce.
 
@@ -696,17 +1195,32 @@ def analyze_user_downgrades(
     ``users:`` entries. Roles whose permissions the registry cannot enumerate
     (unmanaged, IAM-backed) are treated as opaque: losing one is reported as
     undetermined rather than assumed harmless.
+
+    Pass *resolved_users* keyed by server username to analyse ``users:`` entries
+    whose key is an email: server users can only be matched by their own name,
+    so an unresolved key would read as "no entry" and hide the reduction it
+    causes. *applied_user_names* is the older form of the same argument and
+    assumes keys are usernames, so it names only the entries whose keys the
+    caller already matched against the server.
+
+    With neither kwarg the keys are resolved here, by the same username-then-email
+    rule ``compute_diff`` applies. Intersecting the keys with server usernames
+    instead would drop every email-keyed entry, which is the reporting hole the
+    resolution rule exists to close.
     """
     state = desired_state or _build_desired_acl_state(desired)
-    if applied_user_names is None:
-        applied_user_names = set(desired.users) & {
-            user.name for user in current.users if getattr(user, "name", None)
-        }
+    if resolved_users is None:
+        if applied_user_names is not None:
+            resolved_users = {
+                name: desired.users[name]
+                for name in applied_user_names
+                if name in desired.users
+            }
+        else:
+            resolved_users = _resolve_configured_users(desired, current)
     downgrades: list[UserDowngrade] = []
     for user in sorted(current.users, key=lambda item: str(getattr(item, "name", ""))):
-        downgrade = _analyze_user_downgrade(
-            user, desired, current, diff, state, applied_user_names
-        )
+        downgrade = _analyze_user_downgrade(user, current, diff, state, resolved_users)
         if downgrade is not None and downgrade.is_downgrade():
             downgrades.append(downgrade)
     return downgrades
@@ -762,6 +1276,76 @@ def print_user_downgrades(
             print(line, file=out)
 
 
+def print_bucket_registration_failures(
+    failures: list[BucketRegistrationFailure], *, stream: Any = None
+) -> None:
+    """Print a prominent block naming every bucket that was not registered.
+
+    An unregistered bucket is not a partial success that can be read off the
+    warning count: no policy can grant access to a bucket the catalog does not
+    hold, so each dependent policy fails too and the reason scrolls past between
+    those errors, drift resets, and a reapply. Naming the buckets and their
+    reasons in one block keeps the first cause visible.
+    """
+    out = sys.stdout if stream is None else stream
+    if not failures:
+        return
+    print(
+        f"!! BUCKET REGISTRATION FAILED: {len(failures)} bucket(s) not registered:",
+        file=out,
+    )
+    for failure in failures:
+        print(f"  - {failure.name}: {failure.reason}", file=out)
+    print("Permissions referencing these buckets were not applied.", file=out)
+    print(
+        "If a bucket is owned by another account and already prepared with "
+        "`quiltx bucket prepare`, declare it under `buckets:` with "
+        f"`{CONFIG_NO_PREFLIGHT_KEY}: true`.",
+        file=out,
+    )
+
+
+def default_policy_failure_message(title: str, skipped_roles: list[str]) -> str:
+    """One sentence naming a default policy as the cause of skipped roles."""
+    return (
+        f"Policy '{title}' is declared {CONFIG_DEFAULT_POLICY_KEY}: true, so every "
+        f"managed role composes it; it does not exist, so {len(skipped_roles)} "
+        f"role(s) were skipped: {', '.join(skipped_roles)}."
+    )
+
+
+def print_default_policy_failures(
+    skipped_by_policy: dict[str, list[str]], *, stream: Any = None
+) -> None:
+    """Print a prominent block naming a default policy that blocked every role.
+
+    A default policy is a dependency of every managed role, so one that could not
+    be created turns into an ``unknown policy`` line per role — including roles
+    that never named it. Repeated per role that reads as many independent
+    failures; named once here it reads as the single cause it is. The roles are
+    left alone rather than created without the floor, because a role missing its
+    default policy is a silently narrower grant than the file asks for.
+    """
+    out = sys.stdout if stream is None else stream
+    if not skipped_by_policy:
+        return
+    print(
+        f"!! DEFAULT POLICY MISSING: {len(skipped_by_policy)} default polic"
+        f"{'y' if len(skipped_by_policy) == 1 else 'ies'} blocked every managed "
+        "role in this apply:",
+        file=out,
+    )
+    for title, roles in skipped_by_policy.items():
+        print(f"  - {default_policy_failure_message(title, roles)}", file=out)
+    print(
+        "This is the root cause of the per-role 'unknown policy' errors above. "
+        "The roles were left unchanged rather than created without the floor, "
+        "which would have granted less than the file asks for. Fix the policy "
+        "failure reported earlier and re-run.",
+        file=out,
+    )
+
+
 def export_downgrade_warnings(current: CurrentState, yaml_text: str) -> list[str]:
     """Warn when replaying generated ACL YAML would not preserve access.
 
@@ -782,11 +1366,10 @@ def export_downgrade_warnings(current: CurrentState, yaml_text: str) -> list[str
 
 def _analyze_user_downgrade(
     user: Any,
-    desired: AclConfig,
     current: CurrentState,
     diff: AclDiff,
     state: _DesiredAclState,
-    applied_user_names: set[str],
+    resolved_users: dict[str, AclUserConfig],
 ) -> UserDowngrade | None:
     name = getattr(user, "name", None)
     if not name:
@@ -796,7 +1379,7 @@ def _analyze_user_downgrade(
         return None
 
     after, causes, undetermined = _projected_user_access(
-        user, before, desired, current, diff, state, applied_user_names
+        user, before, current, diff, state, resolved_users
     )
     after_roles = set(after.roles)
     lost_roles = tuple(role for role in before.roles if role not in after_roles)
@@ -861,16 +1444,15 @@ def _current_user_access(user: Any, current: CurrentState) -> UserAccess:
 def _projected_user_access(
     user: Any,
     before: UserAccess,
-    desired: AclConfig,
     current: CurrentState,
     diff: AclDiff,
     state: _DesiredAclState,
-    applied_user_names: set[str],
+    resolved_users: dict[str, AclUserConfig],
 ) -> tuple[UserAccess, list[str], list[str]]:
     name = user.name
     causes: list[str] = []
     undetermined: list[str] = []
-    configured = desired.users.get(name) if name in applied_user_names else None
+    configured = resolved_users.get(name)
 
     if configured is not None:
         roles = [configured.role, *configured.extra_roles]
@@ -1284,6 +1866,21 @@ def current_state_as_acl_yaml_with_warnings(
     roles. This avoids inventing ladder semantics while preserving the server's
     existing policy-to-role composition. Generated ``__inline`` policies are
     folded back into their owning role.
+
+    ``config.default_policy`` is authoring shorthand the server never stores, so
+    a capture cannot and need not re-emit it: every role that received the floor
+    already lists it in its composed ``config.policies``, which replays to the
+    same state. Re-adding the flag by hand keeps the file shorter and re-arms it
+    for roles added later.
+
+    The ``buckets:`` block is not captured either, and that omission does bite:
+    the registry records no per-bucket registration mode, so a capture cannot
+    tell a bucket prepared owner-side in another account from one this identity
+    owns. Replaying a capture against a catalog that has yet to register such a
+    bucket runs preflight against it and fails. Re-add
+    ``config.no_preflight: true`` for those buckets by hand, or replay with the
+    global ``--no-preflight``. Replays against the catalog the capture came from
+    are unaffected: its buckets are registered already, so nothing is added.
 
     Use this form when the caller must also report downgrade risks (for example,
     the CLI writes them to stderr). It computes the parse+diff analysis once and
@@ -1899,10 +2496,18 @@ def apply_acl(
 
     warnings = list(diff.warnings)
     failed_buckets: set[str] = set()
+    bucket_failures: list[BucketRegistrationFailure] = []
     failed_roles: set[str] = set()
+    default_policy_skips: dict[str, list[str]] = {}
+
+    graphql_only_buckets = {
+        bucket
+        for bucket in diff.buckets_to_add
+        if no_preflight or bucket in diff.no_preflight_buckets
+    }
 
     control_account_id: str | None = None
-    if diff.buckets_to_add:
+    if set(diff.buckets_to_add) - graphql_only_buckets:
         try:
             payload = stack.payload
             if payload and payload.get("account_id"):
@@ -1913,7 +2518,7 @@ def apply_acl(
     for bucket in diff.buckets_to_add:
         try:
             _print_apply_step(f"add bucket {bucket}", verbose=verbose)
-            if no_preflight:
+            if bucket in graphql_only_buckets:
                 from quiltx import bucket as bucket_lib
 
                 bucket_lib.add_bucket_without_preflight(stack, bucket, title=bucket)
@@ -1931,9 +2536,16 @@ def apply_acl(
                 )
             print(f"  + bucket {bucket}")
         except Exception as exc:
+            detail = format_exception(exc)
             failed_buckets.add(bucket)
-            warnings.append(f"Bucket '{bucket}' could not be added: {exc}")
-            print(f"  ! bucket {bucket}: {exc}", file=sys.stderr)
+            bucket_failures.append(
+                BucketRegistrationFailure(name=bucket, reason=detail)
+            )
+            warnings.append(f"Bucket '{bucket}' was not registered: {detail}")
+            print(f"  ! bucket {bucket}: {detail}", file=sys.stderr)
+
+    if bucket_failures:
+        print_bucket_registration_failures(bucket_failures, stream=sys.stderr)
 
     known_policies = dict(current.all_policies)
     for policy in diff.policies_to_create:
@@ -2050,12 +2662,11 @@ def apply_acl(
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
             stack.admin.roles.create_managed(role.name, policies=policy_ids)
         except KeyError as exc:
-            warnings.append(
-                f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}"
-            )
-            print(
-                f"  ! role {role.name}: unknown policy {exc.args[0]!r}", file=sys.stderr
-            )
+            missing = exc.args[0]
+            warnings.append(f"Role '{role.name}' skipped: unknown policy {missing!r}")
+            print(f"  ! role {role.name}: unknown policy {missing!r}", file=sys.stderr)
+            if missing in diff.default_policy_titles:
+                default_policy_skips.setdefault(str(missing), []).append(role.name)
             failed_roles.add(role.name)
             continue
         except Exception as exc:
@@ -2076,12 +2687,11 @@ def apply_acl(
                 role_ref, name=role.name, policies=policy_ids
             )
         except KeyError as exc:
-            warnings.append(
-                f"Role '{role.name}' skipped: unknown policy {exc.args[0]!r}"
-            )
-            print(
-                f"  ! role {role.name}: unknown policy {exc.args[0]!r}", file=sys.stderr
-            )
+            missing = exc.args[0]
+            warnings.append(f"Role '{role.name}' skipped: unknown policy {missing!r}")
+            print(f"  ! role {role.name}: unknown policy {missing!r}", file=sys.stderr)
+            if missing in diff.default_policy_titles:
+                default_policy_skips.setdefault(str(missing), []).append(role.name)
             continue
         except Exception as exc:
             detail = format_exception(exc)
@@ -2089,6 +2699,15 @@ def apply_acl(
             print(f"  ! role {role.name}: {detail}", file=sys.stderr)
             continue
         print(f"  ~ role {role.name}")
+
+    if default_policy_skips:
+        # Said once, before the cascade into the default role and every user
+        # role assignment adds its own lines.
+        print_default_policy_failures(default_policy_skips, stream=sys.stderr)
+        warnings.extend(
+            default_policy_failure_message(title, roles)
+            for title, roles in default_policy_skips.items()
+        )
 
     if diff.default_role_needs_update and diff.default_role_name is not None:
         default_role_name = diff.default_role_name
@@ -2939,6 +3558,47 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         if role.default_role:
             default_role_name = role.name
 
+    default_policy_titles = [
+        policy.name for policy in config.policies if policy.default_policy
+    ]
+    if default_policy_titles:
+        # Composed after the ladder so cumulative_policy_titles stays the only
+        # input to _synthesized_role_name: a floor adds permissions to a role,
+        # never a rung to its name. Appending last and deduping leaves a role
+        # that already lists the policy unchanged, so a replay stays a no-op.
+        role_updates = {
+            name: RoleUpdate(
+                name=name,
+                policy_titles=_dedupe_preserve_order(
+                    [*update.policy_titles, *default_policy_titles]
+                ),
+            )
+            for name, update in role_updates.items()
+        }
+        # The verbose listing reads these, and it must show what gets applied.
+        synthesized_roles = [
+            replace(role, policy_titles=list(role_updates[role.name].policy_titles))
+            for role in synthesized_roles
+        ]
+        static_roles = [
+            (
+                role
+                if role.unmanaged
+                else replace(
+                    role, policy_titles=list(role_updates[role.name].policy_titles)
+                )
+            )
+            for role in static_roles
+        ]
+        if unmanaged_role_names:
+            warnings.append(
+                f"Default policies {', '.join(default_policy_titles)} do not reach "
+                f"unmanaged roles {', '.join(sorted(unmanaged_role_names))}: quiltx "
+                "never modifies an unmanaged role's IAM permissions. A user whose "
+                "only role is unmanaged does not receive the default policies and "
+                "must also match a managed role's selector to get them."
+            )
+
     return _DesiredAclState(
         policy_updates=policy_updates,
         synthesized_roles=synthesized_roles,
@@ -2984,7 +3644,9 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
 def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) -> None:
     allowed_keys = set(ACL_ENTRY_KEYS)
     if section == "policies":
-        allowed_keys.update({POLICY_ROLE_NAME_KEY, CONFIG_SYNTHESIZE_KEY})
+        allowed_keys.update(
+            {POLICY_ROLE_NAME_KEY, CONFIG_DEFAULT_POLICY_KEY, CONFIG_SYNTHESIZE_KEY}
+        )
     if section == "roles":
         allowed_keys.update({CONFIG_POLICIES_KEY, CONFIG_UNMANAGED_KEY})
     unknown_keys = sorted(
@@ -3000,6 +3662,11 @@ def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) 
         hint += (
             f" Explicit roles also support the magic {CONFIG_POLICIES_KEY} and "
             f"{CONFIG_UNMANAGED_KEY} keys."
+        )
+    if section == "policies":
+        hint += (
+            f" Policies also support the magic {POLICY_ROLE_NAME_KEY}, "
+            f"{CONFIG_DEFAULT_POLICY_KEY}, and {CONFIG_SYNTHESIZE_KEY} keys."
         )
     if section == "policies" and CONFIG_POLICIES_KEY in unknown_keys:
         hint += (
@@ -3133,6 +3800,8 @@ def _print_verbose_state(
         _print_permissions(_permissions_for_buckets(policy.read, policy.read_write))
         if policy.default_role:
             print("    default_role: true")
+        if policy.default_policy:
+            print("    default_policy: true")
 
     for role in desired_state.static_roles:
         if role.inline_policy_title is None:
@@ -3174,12 +3843,15 @@ def _print_verbose_state(
         {user.name for user in current.users} if current is not None else set()
     )
     for name, user in desired.users.items():
+        # A key may be an email, so report the username the diff acted on.
+        server_name = diff.resolved_user_names.get(name, name)
         prefix = (
             "~"
-            if name in updated_users
-            else "=" if current is None or name in current_user_names else "?"
+            if server_name in updated_users
+            else "=" if current is None or server_name in current_user_names else "?"
         )
-        print(f"{prefix} user {name}")
+        label = name if server_name == name else f"{name} -> {server_name}"
+        print(f"{prefix} user {label}")
         print(f"    role: {user.role}")
         print(f"    extra_roles: {', '.join(user.extra_roles) or '(none)'}")
         if user.admin is not None:

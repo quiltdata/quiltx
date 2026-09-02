@@ -8,6 +8,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-01
+
+### Fixed
+
+- Resolve `users:` keys by username or email
+  ([#104](https://github.com/quiltdata/quiltx/issues/104)). Keys were matched
+  against `user.name` only, and `user.name` is not one thing: the registry
+  derives it from `email[:64]` for accounts that self-registered through SSO,
+  while an admin-created account must satisfy `^[a-z][a-z0-9_]*$`, so an email
+  is not a legal value there. One captured ACL therefore mixes both shapes with
+  nothing marking which is which, and writing someone's email when their account
+  is under a handle produced a nonfatal notice and silently skipped the grant.
+  Each key now resolves by exact username first, then by a unique
+  case-insensitive email match. Precedence decides, so a key that names an
+  account still means that account even when a *different* account holds it as an
+  email; the clash is a warning naming both, because refusing it would reject
+  `--yaml`'s own captures, which key every entry by `user.name`. A key that names
+  no account and is the email of two, or two keys resolving to one account, is a
+  hard error naming the conflict rather than a guess about who was meant.
+  Everything downstream — the `set_role`/`set_admin` call, downgrade analysis,
+  verbose output — now uses the resolved server username, so an email-keyed entry
+  that reduces access is reported instead of being read as "no entry".
+
+### Added
+
+- `config.default_policy: true` on a policy, the floor every managed role stands
+  on ([#105](https://github.com/quiltdata/quiltx/issues/105)).
+  `config.default_role` cannot express this: it is a fallback the registry
+  applies only when an authenticated user's claims matched no mapping, so a
+  *specific* grant costs a user the general one. Whoever is named in a narrow
+  role's `sso.email` matches that mapping, never reaches the default role, and
+  loses the open buckets unless every narrow role repeats the general policy —
+  in one real config, twelve hand-maintained `extra_roles` entries expressing a
+  single intent. A default policy composes into the roles a user already
+  matched, so it grants the same permissions without adding a role to anyone's
+  set; a baseline *role* would have changed which role each user lands on and put
+  an extra entry in every user's role switcher. Composition is
+  client-side codegen appended after the policy ladder is built, so synthesized
+  role names are unchanged, and it is deduped, so a role that already names the
+  policy stays a no-op. The flag requires `config.synthesize: false`, because
+  granting a ladder rung to the rungs below it would hand its buckets to
+  audiences its own `sso.<claim>` selector excludes. Unmanaged roles are out of
+  reach — quiltx never edits their IAM — and that combination is reported as a
+  warning naming both.
+- Per-bucket `config.no_preflight` under a new top-level `buckets:` block
+  ([#96](https://github.com/quiltdata/quiltx/issues/96)). A bucket owned by
+  another account and already prepared owner-side with `quiltx bucket prepare`
+  cannot be preflighted by the catalog admin applying the ACL, so the add failed
+  and the bucket was never registered; `sierra-general` on open.quiltdata.com
+  needed two attempts and the global flag. That flag is all-or-nothing and lives
+  outside the file, so the next plain apply or CI job hit the same wall.
+  Declaring the bucket keeps the fact with the bucket. A `buckets:` key counts as
+  a reference on its own, so a bucket can be registered before any grant names
+  it, and `--no-preflight` remains a global override. Captures do not re-emit
+  the block — the registry records no per-bucket registration mode — which is
+  documented where the capture is.
+- `--create-and-email-users`, which creates accounts for `sso.email` addresses
+  that have none ([#106](https://github.com/quiltdata/quiltx/issues/106)).
+  `users:` entries only ever apply to accounts that already exist, so an ACL
+  file could not onboard anyone: granting a role to someone who has never logged
+  in needed an out-of-band invite first. Creation is driven from `sso.email`
+  rather than `users:` because that roster is keyed by a field that can only be
+  an email (no ambiguity to resolve) and the role is implied by nesting, so the
+  role assigned at creation and the role the SSO mapping grants are the same
+  declaration and cannot drift — a `users:`-assigned role would be overwritten
+  on first SSO login anyway. Usernames are derived as `email[:64]`, matching the
+  registry's own self-registration naming. There is deliberately no config key:
+  the registry mails a welcome and password-reset link as part of creating an
+  account, with no suppress flag, so the first apply would be the irreversible
+  one. The flag is named for that side effect, prints every address before
+  asking, and refuses more than `--max-created-users` (default 10) in one run. An
+  address is skipped when a role it names is unmanaged and absent from the server,
+  since quiltx never creates one and the registry would reject the account after
+  the mail had gone out; an unmanaged role that does exist is created into,
+  because its selector grants it at first login regardless.
+
+### Changed
+
+- A default policy that fails to create now names itself as the cause. Composing
+  into every managed role makes one policy a dependency of all of them, so a
+  failed create turned into one `unknown policy` line per role — including roles
+  that never named it — and the run diagnosed the symptom. Apply now prints a
+  `!! DEFAULT POLICY MISSING` block naming the policy and the roles it blocked,
+  and carries the same sentence into the warning list. The roles are still left
+  unchanged rather than created without the floor, which would grant less than
+  the file asks for.
+- The GraphQL-only bucket list is printed on a real apply, not only under
+  `--dry-run`, so a `--yes` CI log records which buckets skipped local AWS
+  bucket-owner setup and which flag or file entry put them in that mode.
+- A bucket that does not get registered is now loud. The failure was a warning
+  among warnings, after which every dependent policy failed, drift detection
+  printed a reset and a reapply, and the run ended on a generic
+  `Done with N warning(s).` — the first cause scrolled past. Apply now prints a
+  `!! BUCKET REGISTRATION FAILED` block naming each bucket and reason, and the
+  command re-reads the catalog afterwards and exits non-zero for any bucket it
+  still does not hold, so an add that returns cleanly without registering is
+  caught too.
+
 ## [0.21.0] - 2026-08-29
 
 ### Changed

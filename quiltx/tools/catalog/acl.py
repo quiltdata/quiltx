@@ -11,13 +11,22 @@ from quiltx import acl as acl_lib
 from quiltx import stack as stack_lib
 from quiltx.cli_common import add_catalog_args, env_flag
 
+MAX_CREATED_USERS_DEFAULT = 10
+"""How many accounts one --create-and-email-users run may create unprompted.
+
+The cap is small on purpose. A roster that grew past a handful of unknown
+addresses is more often a config mistake — a whole community list pasted in, a
+domain roster mistaken for a group selector — than an intended onboarding, and
+the mail those addresses receive cannot be recalled.
+"""
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="quiltx catalog acl",
         description=(
             "Reconcile Quilt ACLs from flat YAML with top-level "
-            "'policies:', 'roles:', and optional 'users:' blocks."
+            "'policies:', 'roles:', and optional 'users:' and 'buckets:' blocks."
         ),
     )
     add_catalog_args(parser, auth_required=True)
@@ -45,8 +54,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-preflight",
         action="store_true",
         help=(
-            "Register new buckets via GraphQL only, skipping local AWS "
-            "bucket-owner setup."
+            "Register every new bucket via GraphQL only, skipping local AWS "
+            "bucket-owner setup. Mark individual pre-prepared buckets with "
+            "config.no_preflight under 'buckets:' instead."
+        ),
+    )
+    parser.add_argument(
+        "--create-and-email-users",
+        action="store_true",
+        help=(
+            "Create an account for every sso.email address with no existing "
+            "user. The registry mails each new account a welcome and "
+            "password-reset link as part of creating it, and that send cannot "
+            "be recalled, so this is never read from the config file."
+        ),
+    )
+    parser.add_argument(
+        "--max-created-users",
+        type=int,
+        # Not MAX_CREATED_USERS_DEFAULT: the validation below tests whether the
+        # flag was supplied, and a default equal to the cap makes
+        # `--max-created-users 10` alone indistinguishable from omitting it.
+        default=None,
+        metavar="N",
+        help=(
+            "Refuse --create-and-email-users when the rosters would create more "
+            f"than N accounts in one run (default: {MAX_CREATED_USERS_DEFAULT})."
         ),
     )
     output_group = parser.add_mutually_exclusive_group()
@@ -85,6 +118,10 @@ def main(argv: list[str] | None = None) -> int:
     if (args.json or args.yaml) and args.config_file is not None:
         output_flag = "--json" if args.json else "--yaml"
         parser.error(f"{output_flag} is only valid when config_file is omitted")
+    if args.create_and_email_users and args.config_file is None:
+        parser.error("--create-and-email-users requires a config_file")
+    if args.max_created_users is not None and not args.create_and_email_users:
+        parser.error("--max-created-users requires --create-and-email-users")
 
     try:
         return _run(args)
@@ -142,46 +179,88 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
 
         no_preflight = bool(args.no_preflight or env_flag("QUILTX_NO_PREFLIGHT"))
 
-        if not diff.has_changes():
+        # Creating roster accounts is not part of the diff, so a file that is
+        # otherwise reconciled must not short-circuit it: that is exactly the
+        # state a first apply leaves behind before anyone has been onboarded.
+        if not diff.has_changes() and not args.create_and_email_users:
             return 0
 
         if args.dry_run:
-            if no_preflight and diff.buckets_to_add:
-                _print_no_preflight_dry_run_notice()
+            _print_no_preflight_notice(diff, no_preflight=no_preflight, dry_run=True)
+            if args.create_and_email_users:
+                _print_user_creation_dry_run(desired, current)
             return 0
 
-        if not args.yes and not _confirm_apply():
-            print("Aborted.")
-            return 1
+        warnings: list[str] = []
+        post_current = current
+        if diff.has_changes():
+            _print_no_preflight_notice(diff, no_preflight=no_preflight)
+            if not args.yes and not _confirm_apply():
+                print("Aborted.")
+                return 1
 
-        print("Applying...")
-        warnings = acl_lib.apply_acl(
-            stack,
-            diff,
-            current,
-            verbose=args.verbose,
-            assume_yes=args.yes,
-            no_preflight=no_preflight,
-        )
-
-        post_current = acl_lib.fetch_current_state(stack)
-        drift = acl_lib.detect_policy_drift(desired, post_current)
-        if drift:
-            reset_warnings, post_current = _handle_policy_drift(
+            print("Applying...")
+            warnings = acl_lib.apply_acl(
                 stack,
-                drift,
-                desired,
-                post_current,
-                auto=args.yes,
+                diff,
+                current,
                 verbose=args.verbose,
+                assume_yes=args.yes,
                 no_preflight=no_preflight,
             )
-            warnings.extend(reset_warnings)
+
+            post_current = acl_lib.fetch_current_state(stack)
+            drift = acl_lib.detect_policy_drift(desired, post_current)
+            if drift:
+                reset_warnings, post_current = _handle_policy_drift(
+                    stack,
+                    drift,
+                    desired,
+                    post_current,
+                    auto=args.yes,
+                    verbose=args.verbose,
+                    no_preflight=no_preflight,
+                )
+                warnings.extend(reset_warnings)
+
+        if args.create_and_email_users:
+            warnings.extend(
+                _create_and_email_users(
+                    stack,
+                    desired,
+                    post_current,
+                    assume_yes=args.yes,
+                    max_created=(
+                        MAX_CREATED_USERS_DEFAULT
+                        if args.max_created_users is None
+                        else args.max_created_users
+                    ),
+                    verbose=args.verbose,
+                )
+            )
 
         for warning in warnings:
             print(f"Warning: {warning}", file=sys.stderr)
-        if warnings:
-            print(f"Done with {len(warnings)} warning(s).", file=sys.stderr)
+
+        # Ground truth, not a tally of what apply_acl reported: a bucket the
+        # catalog still does not hold is a failure even when the add returned
+        # cleanly, and it is the failure that makes every dependent policy fail.
+        unregistered = [
+            bucket
+            for bucket in diff.buckets_to_add
+            if bucket not in post_current.buckets
+        ]
+        if unregistered:
+            print(
+                f"!! {len(unregistered)} bucket(s) are still not registered: "
+                + ", ".join(unregistered),
+                file=sys.stderr,
+            )
+        if warnings or unregistered:
+            summary = f"Done with {len(warnings)} warning(s)"
+            if unregistered:
+                summary += f" and {len(unregistered)} unregistered bucket(s)"
+            print(f"{summary}.", file=sys.stderr)
             return 1
         print("Done.")
         return 0
@@ -217,12 +296,124 @@ def _confirm_apply() -> bool:
     return input("Apply ACL changes? [y/N]: ").strip().lower() in {"y", "yes"}
 
 
-def _print_no_preflight_dry_run_notice() -> None:
+def _confirm_create_and_email(count: int) -> bool:
+    return input(f"Create and email {count} account(s)? [y/N]: ").strip().lower() in {
+        "y",
+        "yes",
+    }
+
+
+def _unmakeable_accounts(plan: acl_lib.UserCreationPlan) -> str:
+    """Keep a plan of nothing-but-warnings from reading as a fully-onboarded one."""
+    if not plan.warnings:
+        return ""
+    return f" and {len(plan.warnings)} cannot be created"
+
+
+def _print_user_creation_dry_run(
+    desired: acl_lib.AclConfig, current: acl_lib.CurrentState
+) -> None:
+    """Name the accounts a real run would create, and therefore mail."""
+    plan = acl_lib.plan_user_creations(desired, current)
     print()
+    if plan.creations:
+        acl_lib.print_user_creations(plan, dry_run=True)
+    else:
+        print(
+            f"No accounts would be created: {len(plan.existing)} roster "
+            f"address(es) already have one{_unmakeable_accounts(plan)}."
+        )
+    for warning in plan.warnings:
+        print(f"! {warning}")
+
+
+def _create_and_email_users(
+    stack: stack_lib.Catalog,
+    desired: acl_lib.AclConfig,
+    current: acl_lib.CurrentState,
+    *,
+    assume_yes: bool,
+    max_created: int,
+    verbose: bool,
+) -> list[str]:
+    """Create the accounts the sso.email rosters name and the server lacks.
+
+    Called after role reconciliation and after any drift reset, because the
+    registry rejects a creation naming a role it does not hold and the reset pass
+    is what puts the last of those roles in place. *current* is therefore the
+    server state as of that point, which is also what makes the "already has an
+    account" check accurate on a second pass.
+
+    The addresses are printed before the prompt because the welcome mail is sent
+    by the creation itself: after this returns there is nothing left to confirm.
+    """
+    plan = acl_lib.plan_user_creations(desired, current)
+    warnings = list(plan.warnings)
+    if not plan.creations:
+        print(
+            f"No accounts to create: {len(plan.existing)} roster address(es) "
+            f"already have one{_unmakeable_accounts(plan)}."
+        )
+        return warnings
+
+    acl_lib.print_user_creations(plan)
+    if len(plan.creations) > max_created:
+        refusal = (
+            f"Refusing to create and email {len(plan.creations)} account(s): "
+            f"more than --max-created-users ({max_created}). Re-run with "
+            f"--max-created-users {len(plan.creations)} once the addresses "
+            "above have been reviewed."
+        )
+        print(f"!! REFUSED: {refusal}", file=sys.stderr)
+        warnings.append(refusal)
+        return warnings
+    if not assume_yes and not _confirm_create_and_email(len(plan.creations)):
+        warnings.append(
+            f"{len(plan.creations)} roster account(s) were not created "
+            "(user declined)."
+        )
+        return warnings
+
+    print("Creating and emailing users...")
+    warnings.extend(acl_lib.create_roster_users(stack, plan.creations, verbose=verbose))
+    return warnings
+
+
+def _print_no_preflight_notice(
+    diff: acl_lib.AclDiff, *, no_preflight: bool, dry_run: bool = False
+) -> None:
+    """Name the new buckets registered via GraphQL only, and why.
+
+    The mode is per bucket, so a global claim would be a guess: an apply can mix
+    pre-prepared buckets declared in the file with buckets this identity does
+    prepare itself. Each bucket is listed with the source that put it in
+    GraphQL-only mode so the run can be checked against the file.
+
+    Printed on a real apply as well as a dry run. Whether a bucket's AWS setup
+    was verified locally or taken on trust is the kind of fact someone reads back
+    off a ``--yes`` CI log months later, and only the file it ran against could
+    otherwise answer it.
+    """
+    sources = {
+        bucket: (
+            f"buckets.{bucket}.{acl_lib.CONFIG_NO_PREFLIGHT_KEY}"
+            if bucket in diff.no_preflight_buckets
+            else "--no-preflight"
+        )
+        for bucket in diff.buckets_to_add
+        if no_preflight or bucket in diff.no_preflight_buckets
+    }
+    if not sources:
+        return
+    print()
+    verb = "would be" if dry_run else "will be"
     print(
-        "--no-preflight: new buckets would be registered via GraphQL only; "
-        "skipped local AWS steps per bucket:"
+        f"{len(sources)} new bucket(s) {verb} registered via GraphQL only, "
+        "skipping local AWS bucket-owner setup:"
     )
+    for bucket, source in sources.items():
+        print(f"  - {bucket} ({source})")
+    print("Skipped local AWS steps per bucket:")
     for item in (
         "GetBucketLocation",
         "GetBucketPolicy / PutBucketPolicy",

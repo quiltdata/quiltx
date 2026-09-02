@@ -1788,7 +1788,7 @@ def test_apply_acl_no_preflight_failure_does_not_rollback(monkeypatch) -> None:
     )
 
     assert calls == ["good-bucket", "bad-bucket"]
-    assert warnings == ["Bucket 'bad-bucket' could not be added: BucketDoesNotExist"]
+    assert warnings == ["Bucket 'bad-bucket' was not registered: BucketDoesNotExist"]
 
 
 def test_acl_tool_dry_run_does_not_apply(monkeypatch, capsys) -> None:
@@ -1837,6 +1837,9 @@ def test_acl_tool_yes_flag_applies_without_prompt(monkeypatch) -> None:
 
     def _apply_acl(*_args: Any, **_kwargs: Any) -> list[str]:
         applied.append("applied")
+        # A successful apply leaves the bucket registered; the CLI re-reads the
+        # server afterwards and reports buckets that are still missing.
+        current.buckets["bucket-a"] = FakeBucket(name="bucket-a", title="bucket-a")
         return []
 
     monkeypatch.setattr(
@@ -1877,6 +1880,7 @@ def test_acl_tool_no_preflight_threads_to_apply(monkeypatch) -> None:
 
     def _apply_acl(*_args: Any, **kwargs: Any) -> list[str]:
         no_preflight_values.append(kwargs["no_preflight"])
+        current.buckets["bucket-a"] = FakeBucket(name="bucket-a", title="bucket-a")
         return []
 
     monkeypatch.setattr(acl_tool.acl_lib, "apply_acl", _apply_acl)
@@ -3010,6 +3014,457 @@ def test_compute_diff_protects_managed_role_declared_unmanaged() -> None:
     assert diff.roles_to_update == []
 
 
+# --- default policies (#105) ------------------------------------------------
+
+
+_DEFAULT_POLICY_CONFIG = """
+policies:
+  general:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [open-bucket]
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [quilt-example]
+    config.default_role: true
+  internal:
+    sso.groups: [Employees]
+    buckets.read_write: [quilt-dev]
+roles:
+  exec:
+    sso.groups: [Executives]
+    config.policies: [public]
+    buckets.read_write: [quilt-leadership]
+"""
+
+
+def test_default_policy_composes_last_into_every_managed_role(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text(_DEFAULT_POLICY_CONFIG)
+
+    config = acl.parse_acl_config(config_path)
+    desired = acl._build_desired_acl_state(config)
+
+    assert config.policies[0].default_policy is True
+    assert desired.role_updates["public"].policy_titles == ["public", "general"]
+    assert desired.role_updates["internal_public"].policy_titles == [
+        "public",
+        "internal",
+        "general",
+    ]
+    assert desired.role_updates["exec"].policy_titles == [
+        "public",
+        "exec__inline",
+        "general",
+    ]
+    assert [role.policy_titles for role in desired.synthesized_roles] == [
+        ["public", "general"],
+        ["public", "internal", "general"],
+    ]
+    assert [role.policy_titles for role in desired.static_roles] == [
+        ["public", "exec__inline", "general"]
+    ]
+
+
+def test_default_policy_leaves_synthesized_role_names_unchanged(
+    tmp_path: Path,
+) -> None:
+    flagged_path = tmp_path / "flagged.yml"
+    flagged_path.write_text(_DEFAULT_POLICY_CONFIG)
+    plain_path = tmp_path / "plain.yml"
+    plain_path.write_text(
+        _DEFAULT_POLICY_CONFIG.replace("    config.default_policy: true\n", "")
+    )
+
+    flagged = acl._build_desired_acl_state(acl.parse_acl_config(flagged_path))
+    plain = acl._build_desired_acl_state(acl.parse_acl_config(plain_path))
+
+    assert list(flagged.role_updates) == ["public", "internal_public", "exec"]
+    assert list(plain.role_updates) == list(flagged.role_updates)
+    assert [role.source_policies for role in flagged.synthesized_roles] == [
+        ["public"],
+        ["public", "internal"],
+    ]
+
+
+def test_default_policy_is_not_duplicated_when_a_role_lists_it(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  general:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [open-bucket]
+  extra:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [extra-bucket]
+  public:
+    sso.groups: [Everyone]
+    config.default_role: true
+roles:
+  exec:
+    sso.groups: [Executives]
+    config.policies: [general, public]
+""")
+
+    desired = acl._build_desired_acl_state(acl.parse_acl_config(config_path))
+
+    assert desired.role_updates["exec"].policy_titles == ["general", "public", "extra"]
+    assert desired.role_updates["public"].policy_titles == [
+        "public",
+        "general",
+        "extra",
+    ]
+
+
+def test_default_policy_skips_unmanaged_roles_and_warns() -> None:
+    config = acl.parse_acl_config_text("""
+policies:
+  general:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [open-bucket]
+roles:
+  Analysts: {}
+  ReadQuiltBucket:
+    config.unmanaged: true
+""")
+    desired = acl._build_desired_acl_state(config)
+
+    diff = acl.compute_diff(config, _current_state_for_config(config))
+
+    assert desired.role_updates["Analysts"].policy_titles == ["general"]
+    assert "ReadQuiltBucket" not in desired.role_updates
+    unmanaged = next(
+        role for role in desired.static_roles if role.name == "ReadQuiltBucket"
+    )
+    assert unmanaged.policy_titles == []
+    assert any(
+        "general" in warning and "ReadQuiltBucket" in warning
+        for warning in diff.warnings
+    )
+    assert any(
+        "must also match a managed role's selector" in warning
+        for warning in diff.warnings
+    )
+
+
+def test_default_policy_diff_is_idempotent_against_matching_state(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text(_DEFAULT_POLICY_CONFIG)
+    config = acl.parse_acl_config(config_path)
+
+    diff = acl.compute_diff(config, _current_state_for_config(config))
+
+    assert diff.has_changes() is False
+    assert diff.warnings == []
+
+
+def test_default_policy_rejects_synthesizing_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    config.default_role: true
+    config.default_policy: true
+""")
+
+    with pytest.raises(ValueError) as error:
+        acl.parse_acl_config(config_path)
+
+    message = str(error.value)
+    assert (
+        "policies.public.config.default_policy requires config.synthesize: false"
+        in message
+    )
+    assert "granted to every managed role" in message
+
+
+def test_default_policy_rejects_non_boolean(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  general:
+    config.synthesize: false
+    config.default_policy: "yes"
+roles: {}
+""")
+
+    with pytest.raises(
+        ValueError, match="policies.general.config.default_policy must be a boolean"
+    ):
+        acl.parse_acl_config(config_path)
+
+
+def test_default_policy_is_rejected_on_a_role_entry(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  general:
+    config.synthesize: false
+roles:
+  Analysts:
+    config.default_policy: true
+""")
+
+    with pytest.raises(ValueError) as error:
+        acl.parse_acl_config(config_path)
+
+    message = str(error.value)
+    assert "Unknown ACL fields in roles.Analysts: config.default_policy" in message
+    assert (
+        "Explicit roles also support the magic config.policies and "
+        "config.unmanaged keys" in message
+    )
+
+
+def test_print_diff_verbose_shows_default_policy_on_every_role(capsys) -> None:
+    desired = acl.parse_acl_config_text(_DEFAULT_POLICY_CONFIG)
+    diff = acl.compute_diff(desired, _empty_current_state())
+
+    acl.print_diff(diff, verbose=True, desired=desired)
+    out = capsys.readouterr().out
+
+    assert "    default_policy: true" in out
+    assert "role internal_public (synthesized from policies public, internal)" in out
+    assert "    policies: public, internal, general" in out
+    assert "    policies: public, exec__inline, general" in out
+
+
+def test_current_state_yaml_round_trips_default_policy_as_composed_lists(
+    tmp_path: Path,
+) -> None:
+    """A capture replays the floor without the flag: the server never stores it."""
+    source = tmp_path / "source.yml"
+    source.write_text("""
+policies:
+  general:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [open-bucket]
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read_write: [analyst-bucket]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+    config.default_role: true
+  Observers: {}
+users: {}
+""")
+    current = _current_state_for_config(acl.parse_acl_config(source))
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="catalog", captured_on="2026-09-01"
+    )
+    exported_path = tmp_path / "exported.yml"
+    exported_path.write_text(exported)
+    parsed = acl.parse_acl_config(exported_path)
+    diff = acl.compute_diff(parsed, current)
+    payload = yaml.safe_load(exported)
+
+    assert acl.CONFIG_DEFAULT_POLICY_KEY not in exported
+    assert all(policy.default_policy is False for policy in parsed.policies)
+    assert payload["roles"]["Analysts"]["config.policies"] == [
+        "AnalystPolicy",
+        "general",
+    ]
+    assert payload["roles"]["Observers"]["config.policies"] == ["general"]
+    assert not diff.has_changes()
+    assert diff.warnings == []
+
+
+_CASCADING_DEFAULT_POLICY_CONFIG = """
+policies:
+  general:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [open-bucket]
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [quilt-example]
+    config.default_role: true
+roles:
+  Analysts:
+    sso.groups: [Analysts]
+    config.policies: [public]
+"""
+
+
+def _default_policy_state_with_buckets() -> acl.CurrentState:
+    current = _empty_current_state()
+    for bucket in ("open-bucket", "quilt-example"):
+        current.buckets[bucket] = FakeBucket(name=bucket, title=bucket)
+    return current
+
+
+def test_default_policy_diff_composes_the_floor_onto_hand_built_server_state() -> None:
+    """Idempotence against a fixture built by hand, not by the code under test.
+
+    `_current_state_for_config` is `_build_desired_acl_state` of the same config,
+    so a diff against it can only detect non-determinism. These role fixtures
+    spell the composed lists out, so a floor composed in the wrong place — or
+    onto the wrong roles — shows up as a role update.
+    """
+    config = acl.parse_acl_config_text(_DEFAULT_POLICY_CONFIG)
+    policies = {
+        "general": [Permission(bucket="open-bucket", level=BucketPermissionLevel.READ)],
+        "public": [
+            Permission(bucket="quilt-example", level=BucketPermissionLevel.READ)
+        ],
+        "internal": [
+            Permission(bucket="quilt-dev", level=BucketPermissionLevel.READ_WRITE)
+        ],
+        "exec__inline": [
+            Permission(
+                bucket="quilt-leadership", level=BucketPermissionLevel.READ_WRITE
+            )
+        ],
+    }
+    composed = {
+        "public": ["public", "general"],
+        "internal_public": ["public", "internal", "general"],
+        "exec": ["public", "exec__inline", "general"],
+    }
+    managed_policies = {
+        title: FakePolicy(
+            id=f"id-{title}",
+            title=title,
+            managed=True,
+            permissions=permissions,
+            roles=[],
+        )
+        for title, permissions in policies.items()
+    }
+    managed_roles = {
+        name: FakeRole(
+            id=f"id-{name}",
+            name=name,
+            policies=[
+                FakePolicySummary(id=f"id-{title}", title=title) for title in titles
+            ],
+            permissions=[],
+        )
+        for name, titles in composed.items()
+    }
+    current = acl.CurrentState(
+        buckets={
+            name: FakeBucket(name=name, title=name) for name in acl.all_buckets(config)
+        },
+        managed_policies=managed_policies,
+        unmanaged_policies={},
+        all_policies=dict(managed_policies),
+        managed_roles=managed_roles,
+        unmanaged_roles={},
+        all_roles=dict(managed_roles),
+        sso_config_text=acl.build_sso_config(config),
+        default_role_name="public",
+    )
+
+    diff = acl.compute_diff(config, current)
+
+    assert diff.default_policy_titles == frozenset({"general"})
+    assert diff.roles_to_create == []
+    assert diff.roles_to_update == []
+    assert diff.has_changes() is False
+    assert diff.warnings == []
+
+
+def test_compute_diff_records_default_policy_titles_without_a_change() -> None:
+    config = acl.parse_acl_config_text(_CASCADING_DEFAULT_POLICY_CONFIG)
+
+    diff = acl.compute_diff(config, _current_state_for_config(config))
+
+    assert diff.default_policy_titles == frozenset({"general"})
+    assert diff.has_changes() is False
+
+
+def test_apply_acl_names_a_failed_default_policy_as_the_cause(capsys) -> None:
+    """One failed default policy skips every managed role; say so once, up front.
+
+    #105 makes the floor a dependency of roles that never named it, so the
+    per-role `unknown policy` lines name the symptom. The roles are left alone
+    rather than created without the floor, which would grant less than the file
+    asks for.
+    """
+    created_policies: list[FakePolicy] = []
+    created_roles: list[str] = []
+
+    def policy_create(title: str, *, permissions: list[Any]) -> FakePolicy:
+        if title == "general":
+            raise RuntimeError("NoSuchBucket: open-bucket")
+        policy = FakePolicy(
+            id=f"id-{title}",
+            title=title,
+            managed=True,
+            permissions=permissions,
+            roles=[],
+        )
+        created_policies.append(policy)
+        return policy
+
+    stack = _fake_stack(
+        policies=SimpleNamespace(
+            create_managed=policy_create,
+            list=lambda: list(created_policies),
+        ),
+        roles=SimpleNamespace(
+            create_managed=lambda name, policies: created_roles.append(name),
+            list=lambda: [],
+        ),
+        sso_config=SimpleNamespace(set=lambda _text: None),
+    )
+    config = acl.parse_acl_config_text(_CASCADING_DEFAULT_POLICY_CONFIG)
+    current = _default_policy_state_with_buckets()
+    diff = acl.compute_diff(config, current)
+
+    warnings = acl.apply_acl(stack, diff, current)
+
+    err = capsys.readouterr().err
+    assert [role.name for role in diff.roles_to_create] == ["public", "Analysts"]
+    assert created_roles == []
+    assert (
+        "!! DEFAULT POLICY MISSING: 1 default policy blocked every managed role" in err
+    )
+    assert (
+        "  - Policy 'general' is declared config.default_policy: true, so every "
+        "managed role composes it; it does not exist, so 2 role(s) were skipped: "
+        "public, Analysts." in err
+    )
+    assert "root cause of the per-role 'unknown policy' errors" in err
+    assert (
+        "Policy 'general' is declared config.default_policy: true, so every "
+        "managed role composes it; it does not exist, so 2 role(s) were skipped: "
+        "public, Analysts." in warnings
+    )
+    # The per-role symptom is still reported; it is no longer the only diagnosis.
+    assert "Role 'public' skipped: unknown policy 'general'" in warnings
+    assert "Role 'Analysts' skipped: unknown policy 'general'" in warnings
+
+
+def test_apply_acl_stays_quiet_about_an_ordinary_missing_policy(capsys) -> None:
+    """Only a default policy gets the block: an ordinary one costs its own roles."""
+    stack = _fake_stack(
+        policies=SimpleNamespace(list=lambda: []),
+        roles=SimpleNamespace(create_managed=lambda name, policies: None),
+    )
+    diff = acl.AclDiff(
+        roles_to_create=[acl.RoleUpdate(name="Analysts", policy_titles=["absent"])]
+    )
+
+    warnings = acl.apply_acl(stack, diff, _empty_current_state())
+
+    err = capsys.readouterr().err
+    assert warnings == ["Role 'Analysts' skipped: unknown policy 'absent'"]
+    assert "DEFAULT POLICY MISSING" not in err
+
+
 # --- downgrade detection (#89) ----------------------------------------------
 
 
@@ -3049,16 +3504,20 @@ def _add_user(
     extras: tuple[str, ...] = (),
     admin: bool = False,
     sso_only: bool = False,
+    email: str | None = None,
 ) -> None:
-    current.users.append(
-        SimpleNamespace(
-            name=name,
-            role=current.all_roles[primary],
-            extra_roles=[current.all_roles[role] for role in extras],
-            is_admin=admin,
-            is_sso_only=sso_only,
-        )
+    user = SimpleNamespace(
+        name=name,
+        role=current.all_roles[primary],
+        extra_roles=[current.all_roles[role] for role in extras],
+        is_admin=admin,
+        is_sso_only=sso_only,
     )
+    # Most fakes stay email-less so the production code keeps tolerating server
+    # objects that do not carry the field.
+    if email is not None:
+        user.email = email
+    current.users.append(user)
 
 
 def test_compute_diff_reports_downgrade_from_policy_shrink(tmp_path: Path) -> None:
@@ -3727,6 +4186,411 @@ def test_acl_yaml_with_warnings_reuses_neutral_general_risk(
     assert general_risk in stderr
 
 
+# --- users: key resolution (#104) --------------------------------------------
+
+
+def _roles_for_user_tests() -> dict[str, acl.AclStaticRole]:
+    return {
+        "Old": acl.AclStaticRole(name="Old"),
+        "New": acl.AclStaticRole(name="New"),
+    }
+
+
+def test_user_block_resolves_email_key_to_handle_named_account() -> None:
+    """An email key reaches the handle-named account that owns it (#104)."""
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice", "Old", email="alice@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"alice@example.com": acl.AclUserConfig(role="New")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.users_to_update == [
+        acl.AclUserUpdate(name="alice", role="New", role_changed=True)
+    ]
+    assert diff.resolved_user_names == {"alice@example.com": "alice"}
+    assert diff.notices == []
+
+
+def test_user_block_resolves_username_before_email() -> None:
+    """A key that names an account keeps meaning that account.
+
+    An SSO self-registration's username is its own email, so the name and email
+    indexes both answer for the same key; that self-match must resolve, not
+    collide.
+    """
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice@example.com", "Old", email="alice@example.com")
+    _add_user(current, "alice", "Old", email="alice.alt@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"alice@example.com": acl.AclUserConfig(role="New")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.users_to_update == [
+        acl.AclUserUpdate(name="alice@example.com", role="New", role_changed=True)
+    ]
+    assert diff.resolved_user_names == {"alice@example.com": "alice@example.com"}
+
+
+def test_user_block_resolves_key_naming_an_account_over_another_email() -> None:
+    """A key that names an account means that account, and the clash is reported.
+
+    Refusing this combination would reject the tool's own `--yaml` capture, which
+    keys every entry by `user.name`. Precedence decides it; the risk is a warning
+    so an author who meant the other person can rekey.
+    """
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice@example.com", "Old", email="alice.new@example.com")
+    _add_user(current, "alice", "Old", email="alice@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"alice@example.com": acl.AclUserConfig(role="New")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.users_to_update == [
+        acl.AclUserUpdate(name="alice@example.com", role="New", role_changed=True)
+    ]
+    assert diff.resolved_user_names == {"alice@example.com": "alice@example.com"}
+    assert len(diff.warnings) == 1
+    warning = diff.warnings[0]
+    assert "Configured user 'alice@example.com'" in warning
+    assert "the email of 'alice'" in warning
+    assert "resolves to the account named 'alice@example.com'" in warning
+    assert "Rekey it to the other account's username" in warning
+
+
+def test_yaml_capture_of_a_username_email_collision_replays_unchanged() -> None:
+    """The capture of that exact server state is still valid input (#104 fix)."""
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice@example.com", "Old", email="alice.new@example.com")
+    _add_user(current, "alice", "New", email="alice@example.com")
+
+    exported, risk_warnings = acl.current_state_as_acl_yaml_with_warnings(
+        current, catalog="catalog", captured_on="2026-09-02"
+    )
+    replayed = acl.parse_acl_config_text(exported)
+    diff = acl.compute_diff(replayed, current)
+
+    assert set(replayed.users) == {"alice", "alice@example.com"}
+    assert diff.has_changes() is False
+    assert diff.users_to_update == []
+    # The generic "not valid input" line stood in for every per-user finding.
+    assert not any("not valid input" in warning for warning in risk_warnings)
+    assert acl.export_downgrade_warnings(current, exported) == []
+
+
+def test_export_downgrade_warnings_reports_per_user_despite_the_collision() -> None:
+    """A real downgrade is still named per user when a key/email collision exists.
+
+    The collision used to raise out of `compute_diff`, which
+    `export_downgrade_warnings` caught and replaced with one "not valid input"
+    line, discarding every per-user finding it was written to produce.
+    """
+    config = acl.parse_acl_config_text("""
+policies:
+  OldPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+  NewPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-b]
+roles:
+  Old:
+    config.policies: [OldPolicy]
+    config.default_role: true
+  New:
+    config.policies: [NewPolicy]
+""")
+    current = _current_state_for_config(config)
+    _add_user(current, "alice@example.com", "Old", email="alice.new@example.com")
+    _add_user(current, "alice", "New", email="alice@example.com")
+
+    # A capture keyed by user.name, as --yaml emits, that drops role 'New'.
+    captured = """
+policies:
+  OldPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Old:
+    config.policies: [OldPolicy]
+    config.default_role: true
+users:
+  alice:
+    role: Old
+    admin: false
+  alice@example.com:
+    role: Old
+    admin: false
+"""
+
+    warnings = acl.export_downgrade_warnings(current, captured)
+
+    assert not any("not valid input" in warning for warning in warnings)
+    assert warnings == [
+        "user 'alice': loses READ_WRITE:bucket-b; loses role(s) New",
+    ]
+
+
+def test_user_block_rejects_two_keys_addressing_one_account() -> None:
+    """A handle key and an email key for one person cannot both be applied."""
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice", "Old", email="alice@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={
+            "alice": acl.AclUserConfig(role="New"),
+            "alice@example.com": acl.AclUserConfig(role="Old"),
+        },
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        acl.compute_diff(desired, current)
+
+    message = str(excinfo.value)
+    assert "'alice' and 'alice@example.com'" in message
+    assert "both address the server account 'alice'" in message
+    assert "silently replace" in message
+
+
+_DOWNGRADING_USER_CONFIG = """
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read_write: [bucket-a]
+  ObserverPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+    config.default_role: true
+  Observers:
+    config.policies: [ObserverPolicy]
+users:
+  {key}:
+    role: Observers
+"""
+
+
+def _analyst_observer_state() -> acl.CurrentState:
+    """A server holding both roles, where Observers is strictly narrower."""
+    current = _state_with_role(
+        "Analysts",
+        [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ_WRITE)],
+    )
+    policy = FakePolicy(
+        id="id-ObserverPolicy",
+        title="ObserverPolicy",
+        managed=True,
+        permissions=[Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)],
+        roles=[],
+    )
+    role = FakeRole(
+        id="id-Observers",
+        name="Observers",
+        policies=[FakePolicySummary(id=policy.id, title=policy.title)],
+        permissions=[],
+    )
+    policy.roles.append(role)
+    current.managed_policies[policy.title] = policy
+    current.all_policies[policy.title] = policy
+    current.managed_roles[role.name] = role
+    current.all_roles[role.name] = role
+    current.buckets["bucket-a"] = FakeBucket(name="bucket-a", title="bucket-a")
+    return replace(current, default_role_name="Analysts")
+
+
+def test_analyze_user_downgrades_honours_applied_user_names() -> None:
+    """The older kwarg still selects which users: entries count as applied."""
+    current = _analyst_observer_state()
+    _add_user(current, "alice", "Analysts")
+    desired = acl.parse_acl_config_text(_DOWNGRADING_USER_CONFIG.format(key="alice"))
+    diff = acl.compute_diff(desired, current)
+
+    named = acl.analyze_user_downgrades(
+        desired, current, diff, applied_user_names={"alice"}
+    )
+    unnamed = acl.analyze_user_downgrades(
+        desired, current, diff, applied_user_names=set()
+    )
+
+    assert [item.name for item in named] == ["alice"]
+    assert named[0].lost_permissions == ("READ_WRITE:bucket-a",)
+    assert named[0].causes == ("the users: entry reassigns roles",)
+    # Nothing else in the diff reduces access, so an unnamed entry means no finding.
+    assert unnamed == []
+
+
+def test_analyze_user_downgrades_resolves_email_keys_by_default() -> None:
+    """No kwargs must not reopen the hole #104 closed for public-API callers.
+
+    Intersecting `desired.users` with server usernames drops every email-keyed
+    entry, so the reduction it causes reads as "no entry".
+    """
+    current = _analyst_observer_state()
+    _add_user(current, "alice", "Analysts", email="alice@example.com")
+    desired = acl.parse_acl_config_text(
+        _DOWNGRADING_USER_CONFIG.format(key="alice@example.com")
+    )
+    diff = acl.compute_diff(desired, current)
+
+    downgrades = acl.analyze_user_downgrades(desired, current, diff)
+
+    assert set(desired.users) == {"alice@example.com"}
+    assert [item.name for item in downgrades] == ["alice"]
+    assert downgrades[0].lost_permissions == ("READ_WRITE:bucket-a",)
+    assert downgrades[0].causes == ("the users: entry reassigns roles",)
+
+
+def test_user_block_rejects_key_matching_two_emails() -> None:
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice", "Old", email="shared@example.com")
+    _add_user(current, "alice_two", "Old", email="shared@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"shared@example.com": acl.AclUserConfig(role="New")},
+    )
+
+    with pytest.raises(
+        ValueError, match="'shared@example.com' is ambiguous"
+    ) as excinfo:
+        acl.compute_diff(desired, current)
+
+    assert "email of 'alice', 'alice_two'" in str(excinfo.value)
+
+
+def test_user_block_matches_email_case_insensitively() -> None:
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice", "Old", email="Alice@Example.COM")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"alice@example.com": acl.AclUserConfig(role="New")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert [update.name for update in diff.users_to_update] == ["alice"]
+
+
+def test_user_block_notices_key_matching_neither_name_nor_email() -> None:
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice", "Old", email="alice@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"nobody@example.com": acl.AclUserConfig(role="New")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.users_to_update == []
+    assert diff.resolved_user_names == {}
+    assert diff.notices == [
+        "Configured user 'nobody@example.com' does not exist on the server; skipping."
+    ]
+
+
+def test_apply_sends_server_username_for_email_keyed_user() -> None:
+    """The SDK is only ever given a username, never the key that resolved."""
+    role_calls: list[Any] = []
+    admin_calls: list[Any] = []
+    stack = _fake_stack(
+        users=SimpleNamespace(
+            set_role=lambda *args, **kwargs: role_calls.append((args, kwargs)),
+            set_admin=lambda *args: admin_calls.append(args),
+        )
+    )
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice", "Old", email="alice@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"alice@example.com": acl.AclUserConfig(role="New", admin=True)},
+    )
+
+    diff = acl.compute_diff(desired, current)
+    warnings = acl.apply_acl(stack, diff, current)
+
+    assert warnings == []
+    assert role_calls == [
+        (("alice", "New"), {"extra_roles": None, "append": False}),
+    ]
+    assert admin_calls == [("alice", True)]
+
+
+def test_email_keyed_user_entry_reports_admin_downgrade(tmp_path: Path) -> None:
+    """Downgrade analysis sees an email-keyed entry, which matches by username."""
+    current = _state_with_role(
+        "Analysts", [Permission(bucket="bucket-a", level=BucketPermissionLevel.READ)]
+    )
+    _add_user(current, "alice", "Analysts", admin=True, email="alice@example.com")
+    config = tmp_path / "acl.yml"
+    config.write_text("""
+policies:
+  AnalystPolicy:
+    config.synthesize: false
+    buckets.read: [bucket-a]
+roles:
+  Analysts:
+    config.policies: [AnalystPolicy]
+users:
+  alice@example.com:
+    role: Analysts
+    admin: false
+""")
+
+    diff = acl.compute_diff(acl.parse_acl_config(config), current)
+
+    assert diff.users_to_update == [
+        acl.AclUserUpdate(
+            name="alice", role="Analysts", admin=False, admin_changed=True
+        )
+    ]
+    assert [downgrade.name for downgrade in diff.user_downgrades] == ["alice"]
+    downgrade = diff.user_downgrades[0]
+    assert downgrade.admin_lost is True
+    assert "the users: entry sets admin: false" in downgrade.causes
+
+
+def test_print_diff_verbose_labels_resolved_email_key(capsys) -> None:
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "alice", "Old", email="alice@example.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"alice@example.com": acl.AclUserConfig(role="New")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+    acl.print_diff(diff, verbose=True, desired=desired, current=current)
+
+    assert "~ user alice@example.com -> alice" in capsys.readouterr().out
+
+
 def test_register_bucket_reports_grants_it_keeps(monkeypatch, capsys) -> None:
     """Two stacks sharing a bucket must not evict each other silently (issue #102)."""
     from quiltx import bucket as bucket_lib
@@ -3762,3 +4626,1001 @@ def test_register_bucket_reports_grants_it_keeps(monkeypatch, capsys) -> None:
 
     err = capsys.readouterr().err
     assert "keeping existing grants for arn:aws:iam::712023778557:root" in err
+
+
+# --- per-bucket no-preflight (#96) -------------------------------------------
+
+
+def test_parse_acl_config_accepts_per_bucket_no_preflight(tmp_path: Path) -> None:
+    """A bucket prepared owner-side is declared, not passed on the command line."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  SierraGeneralRole:
+    buckets.read_write: [sierra-general]
+buckets:
+  sierra-general:
+    config.no_preflight: true
+""")
+
+    config = acl.parse_acl_config(config_path)
+
+    assert config.buckets == {"sierra-general": acl.AclBucketConfig(no_preflight=True)}
+    assert acl.all_buckets(config) == {"sierra-general"}
+
+
+def test_parse_acl_config_registers_declared_bucket_without_any_grant() -> None:
+    """A `buckets:` entry references the bucket on its own."""
+    config = acl.parse_acl_config_text("""
+policies: {}
+roles: {}
+buckets:
+  sierra-general:
+    config.no_preflight: true
+  plain-bucket: {}
+""")
+
+    assert acl.all_buckets(config) == {"sierra-general", "plain-bucket"}
+    assert config.buckets["plain-bucket"].no_preflight is False
+
+
+def test_parse_acl_config_rejects_unknown_bucket_field() -> None:
+    with pytest.raises(ValueError, match="Unknown fields in buckets.sierra-general"):
+        acl.parse_acl_config_text("""
+policies: {}
+roles: {}
+buckets:
+  sierra-general:
+    config.no_prefight: true
+""")
+
+
+def test_parse_acl_config_rejects_non_boolean_no_preflight() -> None:
+    with pytest.raises(
+        ValueError,
+        match="buckets.sierra-general.config.no_preflight must be a boolean",
+    ):
+        acl.parse_acl_config_text("""
+policies: {}
+roles: {}
+buckets:
+  sierra-general:
+    config.no_preflight: yes-please
+""")
+
+
+def test_parse_acl_config_rejects_non_mapping_buckets_block() -> None:
+    with pytest.raises(ValueError, match="'buckets' must be a mapping"):
+        acl.parse_acl_config_text("""
+policies: {}
+roles: {}
+buckets: [sierra-general]
+""")
+
+
+def test_parse_acl_config_rejects_non_mapping_bucket_entry() -> None:
+    with pytest.raises(ValueError, match="Bucket 'sierra-general' must be a mapping"):
+        acl.parse_acl_config_text("""
+policies: {}
+roles: {}
+buckets:
+  sierra-general: true
+""")
+
+
+def test_compute_diff_records_per_bucket_no_preflight() -> None:
+    desired = acl.parse_acl_config_text("""
+policies: {}
+roles:
+  SierraGeneralRole:
+    buckets.read_write: [sierra-general, owned-bucket]
+buckets:
+  sierra-general:
+    config.no_preflight: true
+  owned-bucket:
+    config.no_preflight: false
+""")
+
+    diff = acl.compute_diff(desired, _empty_current_state())
+
+    assert diff.buckets_to_add == ["owned-bucket", "sierra-general"]
+    assert diff.no_preflight_buckets == frozenset({"sierra-general"})
+
+
+def test_apply_acl_no_preflight_applies_per_bucket_not_globally(monkeypatch) -> None:
+    """The marked bucket skips preflight; the rest of the apply is unchanged."""
+    graphql_only: list[str] = []
+    prepared: list[str] = []
+
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight",
+        lambda _stack, bucket, *, title=None: graphql_only.append(bucket),
+    )
+    monkeypatch.setattr(
+        acl,
+        "_register_bucket_with_retry",
+        lambda _stack, bucket, _account, *, assume_yes: prepared.append(bucket),
+    )
+    stack = _fake_stack(payload={"account_id": "111"})
+
+    warnings = acl.apply_acl(
+        stack,
+        acl.AclDiff(
+            buckets_to_add=["owned-bucket", "sierra-general"],
+            no_preflight_buckets=frozenset({"sierra-general"}),
+        ),
+        _empty_current_state(),
+    )
+
+    assert warnings == []
+    assert graphql_only == ["sierra-general"]
+    assert prepared == ["owned-bucket"]
+
+
+def test_apply_acl_per_bucket_no_preflight_needs_no_control_account(
+    monkeypatch,
+) -> None:
+    """No local AWS work means no control-account metadata to demand."""
+    graphql_only: list[str] = []
+
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight",
+        lambda _stack, bucket, *, title=None: graphql_only.append(bucket),
+    )
+    monkeypatch.setattr(
+        acl,
+        "_register_bucket_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("preflight must not run for a no-preflight bucket")
+        ),
+    )
+    stack = _fake_stack(payload={"region": "us-east-1"})
+
+    warnings = acl.apply_acl(
+        stack,
+        acl.AclDiff(
+            buckets_to_add=["sierra-general"],
+            no_preflight_buckets=frozenset({"sierra-general"}),
+        ),
+        _empty_current_state(),
+    )
+
+    assert warnings == []
+    assert graphql_only == ["sierra-general"]
+
+
+def test_apply_acl_global_no_preflight_flag_covers_unmarked_buckets(
+    monkeypatch,
+) -> None:
+    """The CLI flag stays a global override of the per-bucket declaration."""
+    graphql_only: list[str] = []
+
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight",
+        lambda _stack, bucket, *, title=None: graphql_only.append(bucket),
+    )
+    monkeypatch.setattr(
+        acl,
+        "_register_bucket_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("--no-preflight must skip preparation for every bucket")
+        ),
+    )
+    stack = _fake_stack(payload={"account_id": "111"})
+
+    warnings = acl.apply_acl(
+        stack,
+        acl.AclDiff(
+            buckets_to_add=["owned-bucket", "sierra-general"],
+            no_preflight_buckets=frozenset({"sierra-general"}),
+        ),
+        _empty_current_state(),
+        no_preflight=True,
+    )
+
+    assert warnings == []
+    assert graphql_only == ["owned-bucket", "sierra-general"]
+
+
+def test_apply_acl_prints_prominent_block_for_failed_bucket(
+    monkeypatch, capsys
+) -> None:
+    """A bucket that did not register is named in its own block, with the reason."""
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight",
+        lambda _stack, bucket, *, title=None: (_ for _ in ()).throw(
+            RuntimeError("AccessDenied on GetBucketLocation")
+        ),
+    )
+    stack = _fake_stack(payload={"account_id": "111"})
+
+    warnings = acl.apply_acl(
+        stack,
+        acl.AclDiff(
+            buckets_to_add=["sierra-general"],
+            no_preflight_buckets=frozenset({"sierra-general"}),
+        ),
+        _empty_current_state(),
+    )
+
+    err = capsys.readouterr().err
+    assert warnings == [
+        "Bucket 'sierra-general' was not registered: AccessDenied on GetBucketLocation"
+    ]
+    assert "!! BUCKET REGISTRATION FAILED: 1 bucket(s) not registered:" in err
+    assert "  - sierra-general: AccessDenied on GetBucketLocation" in err
+    assert "config.no_preflight" in err
+
+
+def test_acl_tool_exits_nonzero_when_bucket_registration_fails(
+    monkeypatch, capsys
+) -> None:
+    desired = acl.parse_acl_config_text("""
+policies: {}
+roles: {}
+buckets:
+  sierra-general:
+    config.no_preflight: true
+""")
+    current = _empty_current_state()
+    _install_acl_tool_stack(monkeypatch, _fake_stack(payload={"account_id": "111"}))
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: desired)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+    monkeypatch.setattr(
+        "quiltx.bucket.add_bucket_without_preflight",
+        lambda _stack, bucket, *, title=None: (_ for _ in ()).throw(
+            RuntimeError("AccessDenied")
+        ),
+    )
+
+    result = acl_tool.main(["config.yml", "--yes"])
+
+    err = capsys.readouterr().err
+    assert result == 1
+    assert "!! BUCKET REGISTRATION FAILED: 1 bucket(s) not registered:" in err
+    assert "  - sierra-general: AccessDenied" in err
+    assert "!! 1 bucket(s) are still not registered: sierra-general" in err
+    assert "Done with 1 warning(s) and 1 unregistered bucket(s)." in err
+
+
+def test_acl_tool_dry_run_names_per_bucket_no_preflight_buckets(
+    monkeypatch, capsys
+) -> None:
+    desired = acl.parse_acl_config_text("""
+policies: {}
+roles:
+  Analysts:
+    buckets.read: [owned-bucket]
+buckets:
+  sierra-general:
+    config.no_preflight: true
+""")
+    _install_acl_tool_stack(monkeypatch)
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: desired)
+    monkeypatch.setattr(
+        acl_tool.acl_lib, "fetch_current_state", lambda _stack: _empty_current_state()
+    )
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "apply_acl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("apply_acl should not be called")
+        ),
+    )
+
+    result = acl_tool.main(["config.yml", "--dry-run"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "1 new bucket(s) would be registered via GraphQL only" in out
+    assert "- sierra-general (buckets.sierra-general.config.no_preflight)" in out
+    assert "- owned-bucket" not in out
+
+
+def test_acl_tool_apply_records_per_bucket_no_preflight_buckets(
+    monkeypatch, capsys
+) -> None:
+    """A --yes CI log has to say which buckets skipped local AWS verification."""
+    desired = acl.parse_acl_config_text("""
+policies: {}
+roles:
+  Analysts:
+    buckets.read: [owned-bucket]
+buckets:
+  sierra-general:
+    config.no_preflight: true
+""")
+    states = [_empty_current_state(), _current_state_for_config(desired)]
+    _install_acl_tool_stack(monkeypatch)
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: desired)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "fetch_current_state",
+        lambda _stack: states.pop(0) if len(states) > 1 else states[0],
+    )
+    monkeypatch.setattr(acl_tool.acl_lib, "apply_acl", lambda *_args, **_kwargs: [])
+
+    result = acl_tool.main(["config.yml", "--yes"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "1 new bucket(s) will be registered via GraphQL only" in out
+    assert "- sierra-general (buckets.sierra-general.config.no_preflight)" in out
+    assert "- owned-bucket" not in out
+
+
+# --- --create-and-email-users (#106) -----------------------------------------
+
+
+_ROSTER_CONFIG = """
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+  leads:
+    sso.email: [lead@example.com]
+    buckets.read_write: [bucket-a]
+roles:
+  Analysts:
+    sso.email: [alice@example.com, bob@example.com]
+    sso.hd: [example.com]
+    config.policies: [public]
+"""
+
+
+def _roster_config() -> acl.AclConfig:
+    return acl.parse_acl_config_text(_ROSTER_CONFIG)
+
+
+def test_sso_email_roster_reads_static_and_synthesized_roles() -> None:
+    """Only sso.email names individuals, and the role comes from the nesting."""
+    roster = acl.sso_email_roster(_roster_config())
+
+    assert roster == {
+        "lead@example.com": ["leads_public"],
+        "alice@example.com": ["Analysts"],
+        "bob@example.com": ["Analysts"],
+    }
+
+
+def test_sso_email_roster_ignores_group_and_domain_selectors() -> None:
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Domain:
+    sso.hd: [example.com]
+    config.policies: [public]
+""")
+
+    assert acl.sso_email_roster(config) == {}
+
+
+def test_sso_email_roster_folds_case_variants_into_one_entry() -> None:
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.email: [Alice@Example.com]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Leads:
+    sso.email: [alice@example.com]
+    config.policies: [public]
+""")
+
+    assert acl.sso_email_roster(config) == {"Alice@Example.com": ["public", "Leads"]}
+
+
+def test_plan_user_creations_derives_username_and_role() -> None:
+    config = _roster_config()
+
+    plan = acl.plan_user_creations(config, _current_state_for_config(config))
+
+    assert plan.existing == ()
+    assert plan.warnings == ()
+    assert plan.creations == (
+        acl.UserCreation(
+            name="lead@example.com", email="lead@example.com", role="leads_public"
+        ),
+        acl.UserCreation(
+            name="alice@example.com", email="alice@example.com", role="Analysts"
+        ),
+        acl.UserCreation(
+            name="bob@example.com", email="bob@example.com", role="Analysts"
+        ),
+    )
+
+
+def test_plan_user_creations_skips_address_held_as_an_email() -> None:
+    """A handle-named account owning the address is still that address's account."""
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "alice", "Analysts", email="alice@example.com")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.existing == ("alice@example.com",)
+    assert [creation.email for creation in plan.creations] == [
+        "lead@example.com",
+        "bob@example.com",
+    ]
+
+
+def test_plan_user_creations_skips_address_held_as_a_username() -> None:
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "alice@example.com", "Analysts")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.existing == ("alice@example.com",)
+    assert [creation.email for creation in plan.creations] == [
+        "lead@example.com",
+        "bob@example.com",
+    ]
+
+
+def test_plan_user_creations_reports_an_ambiguous_address_as_held() -> None:
+    """Two accounts answering for one address is held, and said out loud.
+
+    Not a raise: a roster is keyed by email and cannot be rekeyed, so aborting
+    the apply over an address needing no action would be wrong. Not silence
+    either, or the address reads as ordinarily onboarded.
+    """
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "alice", "Analysts", email="alice@example.com")
+    _add_user(current, "alice_two", "Analysts", email="alice@example.com")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.existing == ("alice@example.com",)
+    assert [creation.email for creation in plan.creations] == [
+        "lead@example.com",
+        "bob@example.com",
+    ]
+    assert len(plan.warnings) == 1
+    warning = plan.warnings[0]
+    assert "Roster address 'alice@example.com'" in warning
+    assert "the email of 'alice', 'alice_two'" in warning
+    assert "no account was created for it" in warning
+    assert "cannot be rekeyed by username" in warning
+
+
+def test_plan_user_creations_skips_an_address_whose_role_is_not_on_the_server() -> None:
+    """An unmanaged role quiltx will never create cannot receive a new account."""
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  LegacyIam:
+    config.unmanaged: true
+    sso.email: [legacy@example.com]
+""")
+    current = _current_state_for_config(config)
+    current.unmanaged_roles.pop("LegacyIam")
+    current.all_roles.pop("LegacyIam")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.creations == ()
+    assert plan.existing == ()
+    assert len(plan.warnings) == 1
+    warning = plan.warnings[0]
+    assert "Roster address 'legacy@example.com'" in warning
+    assert "names role(s) LegacyIam" in warning
+    assert "the server does not hold" in warning
+    assert "Unmanaged roles are never created" in warning
+
+
+def test_plan_user_creations_creates_into_an_existing_unmanaged_role() -> None:
+    """The selector grants that role at first login anyway, so pre-creating is safe.
+
+    The permissions it confers are IAM-backed, which the downgrade analysis
+    reports as undetermined; that is a property of the role, not of the creation.
+    """
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  LegacyIam:
+    config.unmanaged: true
+    sso.email: [legacy@example.com]
+""")
+    current = _current_state_for_config(config)
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert "LegacyIam" in current.unmanaged_roles
+    assert plan.warnings == ()
+    assert plan.creations == (
+        acl.UserCreation(
+            name="legacy@example.com", email="legacy@example.com", role="LegacyIam"
+        ),
+    )
+
+
+def test_plan_user_creations_allows_a_managed_role_this_run_creates() -> None:
+    """A dry run must not report a missing role that the same apply creates."""
+    config = _roster_config()
+
+    plan = acl.plan_user_creations(config, _empty_current_state())
+
+    assert plan.warnings == ()
+    assert [creation.role for creation in plan.creations] == [
+        "leads_public",
+        "Analysts",
+        "Analysts",
+    ]
+
+
+def test_plan_user_creations_truncates_derived_username_to_64_characters() -> None:
+    long_address = ("l" * 60) + "@example.com"
+    config = acl.parse_acl_config_text(f"""
+policies:
+  public:
+    sso.email: [{long_address}]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles: {{}}
+""")
+
+    plan = acl.plan_user_creations(config, _current_state_for_config(config))
+
+    assert len(long_address) == 72
+    assert plan.creations == (
+        acl.UserCreation(name=long_address[:64], email=long_address, role="public"),
+    )
+    assert len(plan.creations[0].name) == 64
+
+
+def test_plan_user_creations_refuses_truncated_username_collision() -> None:
+    """Truncation can land on somebody else's username; that address is skipped."""
+    long_address = ("l" * 60) + "@example.com"
+    config = acl.parse_acl_config_text(f"""
+policies:
+  public:
+    sso.email: [{long_address}]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles: {{}}
+""")
+    current = _current_state_for_config(config)
+    _add_user(current, long_address[:64], "public", email="squatter@example.com")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.creations == ()
+    assert len(plan.warnings) == 1
+    warning = plan.warnings[0]
+    assert f"Roster address '{long_address}'" in warning
+    assert f"derives username '{long_address[:64]}'" in warning
+    assert "email squatter@example.com" in warning
+    assert "not created" in warning
+
+
+def test_plan_user_creations_makes_last_matching_role_active() -> None:
+    """One person on several rungs starts where their first login would leave them."""
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.email: [alice@example.com]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Leads:
+    sso.email: [alice@example.com]
+    config.policies: [public]
+  Execs:
+    sso.email: [alice@example.com]
+    config.policies: [public]
+""")
+
+    plan = acl.plan_user_creations(config, _current_state_for_config(config))
+
+    assert plan.creations == (
+        acl.UserCreation(
+            name="alice@example.com",
+            email="alice@example.com",
+            role="Execs",
+            extra_roles=("public", "Leads"),
+        ),
+    )
+
+
+def test_create_roster_users_sends_derived_name_email_and_role() -> None:
+    create_calls: list[Any] = []
+    stack = _fake_stack(
+        users=SimpleNamespace(
+            create=lambda *args, **kwargs: create_calls.append((args, kwargs))
+        )
+    )
+
+    warnings = acl.create_roster_users(
+        stack,
+        (
+            acl.UserCreation(
+                name="alice@example.com",
+                email="alice@example.com",
+                role="Analysts",
+                extra_roles=("public",),
+            ),
+            acl.UserCreation(
+                name="bob@example.com", email="bob@example.com", role="Analysts"
+            ),
+        ),
+    )
+
+    assert warnings == []
+    assert create_calls == [
+        (
+            ("alice@example.com", "alice@example.com", "Analysts"),
+            {"extra_roles": ["public"]},
+        ),
+        (
+            ("bob@example.com", "bob@example.com", "Analysts"),
+            {"extra_roles": None},
+        ),
+    ]
+
+
+def _install_roster_run(
+    monkeypatch, *, current: acl.CurrentState | None = None, create: Any = None
+) -> tuple[acl.CurrentState, list[Any]]:
+    """Wire acl_tool against a roster config whose ACL state is already applied."""
+    create_calls: list[Any] = []
+
+    def _create(*args: Any, **kwargs: Any) -> None:
+        create_calls.append((args, kwargs))
+        if create is not None:
+            create(*args, **kwargs)
+
+    config = _roster_config()
+    state = current if current is not None else _current_state_for_config(config)
+    stack = _fake_stack(users=SimpleNamespace(create=_create))
+    _install_acl_tool_stack(monkeypatch, stack)
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: config)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: state)
+    return state, create_calls
+
+
+def _install_pending_roster_run(
+    monkeypatch, *, applied: list[str], create_calls: list[Any]
+) -> None:
+    """Wire acl_tool against a roster config that still has ACL changes to apply.
+
+    The reconciled fixture cannot show the two-prompt ordering: with nothing to
+    apply there is only ever one prompt.
+    """
+
+    def _create(*args: Any, **kwargs: Any) -> None:
+        create_calls.append((args, kwargs))
+
+    config = _roster_config()
+    reconciled = _current_state_for_config(config)
+    pending = replace(
+        reconciled,
+        managed_roles={
+            name: role
+            for name, role in reconciled.managed_roles.items()
+            if name != "Analysts"
+        },
+        all_roles={
+            name: role
+            for name, role in reconciled.all_roles.items()
+            if name != "Analysts"
+        },
+    )
+    states = [pending, reconciled]
+    stack = _fake_stack(users=SimpleNamespace(create=_create))
+    _install_acl_tool_stack(monkeypatch, stack)
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: config)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "fetch_current_state",
+        lambda _stack: states.pop(0) if len(states) > 1 else states[0],
+    )
+
+    def _apply(*_args: Any, **_kwargs: Any) -> list[str]:
+        applied.append("apply")
+        return []
+
+    monkeypatch.setattr(acl_tool.acl_lib, "apply_acl", _apply)
+
+
+def test_acl_tool_creates_nobody_without_the_flag(monkeypatch, capsys) -> None:
+    """The default is unchanged: a reconciled file with a roster is a no-op."""
+    _, create_calls = _install_roster_run(monkeypatch)
+
+    result = acl_tool.main(["config.yml", "--yes"])
+
+    assert result == 0
+    assert create_calls == []
+    assert "CREATE AND EMAIL" not in capsys.readouterr().out
+
+
+def test_acl_tool_prompts_for_the_apply_and_the_creations_separately(
+    monkeypatch, capsys
+) -> None:
+    """Creating accounts is a second irreversible action, so it asks a second time."""
+    applied: list[str] = []
+    create_calls: list[Any] = []
+    prompts: list[str] = []
+    _install_pending_roster_run(monkeypatch, applied=applied, create_calls=create_calls)
+
+    def _accept(prompt: str) -> str:
+        prompts.append(prompt)
+        return "y"
+
+    monkeypatch.setattr("builtins.input", _accept)
+
+    result = acl_tool.main(["config.yml", "--create-and-email-users"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert prompts == [
+        "Apply ACL changes? [y/N]: ",
+        "Create and email 3 account(s)? [y/N]: ",
+    ]
+    assert applied == ["apply"]
+    assert len(create_calls) == 3
+    assert out.index("Applying...") < out.index("!! CREATE AND EMAIL")
+
+
+def test_acl_tool_declining_the_apply_prompt_creates_nobody(
+    monkeypatch, capsys
+) -> None:
+    """The creation prompt is never reached, so the mail is never sent."""
+    applied: list[str] = []
+    create_calls: list[Any] = []
+    prompts: list[str] = []
+    _install_pending_roster_run(monkeypatch, applied=applied, create_calls=create_calls)
+
+    def _decline(prompt: str) -> str:
+        prompts.append(prompt)
+        return "n"
+
+    monkeypatch.setattr("builtins.input", _decline)
+
+    result = acl_tool.main(["config.yml", "--create-and-email-users"])
+
+    out = capsys.readouterr().out
+    assert result == 1
+    assert prompts == ["Apply ACL changes? [y/N]: "]
+    assert applied == []
+    assert create_calls == []
+    assert "CREATE AND EMAIL" not in out
+    assert "Aborted." in out
+
+
+def test_acl_tool_dry_run_names_addresses_without_creating(monkeypatch, capsys) -> None:
+    _, create_calls = _install_roster_run(monkeypatch)
+
+    result = acl_tool.main(["config.yml", "--dry-run", "--create-and-email-users"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert create_calls == []
+    assert "!! CREATE AND EMAIL: 3 account(s) would be created" in out
+    assert "- lead@example.com -> user lead@example.com, roles leads_public" in out
+    assert "- alice@example.com -> user alice@example.com, roles Analysts" in out
+    assert "- bob@example.com -> user bob@example.com, roles Analysts" in out
+    assert "cannot be recalled" in out
+
+
+def test_acl_tool_creates_roster_users_with_yes(monkeypatch, capsys) -> None:
+    _, create_calls = _install_roster_run(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: pytest.fail("--yes must not prompt"),
+    )
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert [args for args, _kwargs in create_calls] == [
+        ("lead@example.com", "lead@example.com", "leads_public"),
+        ("alice@example.com", "alice@example.com", "Analysts"),
+        ("bob@example.com", "bob@example.com", "Analysts"),
+    ]
+    assert "!! CREATE AND EMAIL: 3 account(s) will be created" in out
+    assert "+ user alice@example.com (role Analysts, emailed)" in out
+
+
+def test_acl_tool_declining_the_prompt_creates_nobody(monkeypatch, capsys) -> None:
+    _, create_calls = _install_roster_run(monkeypatch)
+    prompts: list[str] = []
+
+    def _decline(prompt: str) -> str:
+        prompts.append(prompt)
+        return "n"
+
+    monkeypatch.setattr("builtins.input", _decline)
+
+    result = acl_tool.main(["config.yml", "--create-and-email-users"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert create_calls == []
+    assert prompts == ["Create and email 3 account(s)? [y/N]: "]
+    assert "!! CREATE AND EMAIL: 3 account(s) will be created" in captured.out
+    assert "- alice@example.com" in captured.out
+    assert "3 roster account(s) were not created (user declined)." in captured.err
+
+
+def test_acl_tool_refuses_more_creations_than_the_cap(monkeypatch, capsys) -> None:
+    _, create_calls = _install_roster_run(monkeypatch)
+
+    result = acl_tool.main(
+        ["config.yml", "--yes", "--create-and-email-users", "--max-created-users", "2"]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert create_calls == []
+    assert (
+        "!! REFUSED: Refusing to create and email 3 account(s): more than "
+        "--max-created-users (2). Re-run with --max-created-users 3" in captured.err
+    )
+
+
+def test_acl_tool_creation_failure_becomes_a_warning_and_exits_one(
+    monkeypatch, capsys
+) -> None:
+    def _fail(name: str, *_args: Any, **_kwargs: Any) -> None:
+        if name == "alice@example.com":
+            raise RuntimeError("EmailAlreadyInUse")
+
+    _, create_calls = _install_roster_run(monkeypatch, create=_fail)
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert len(create_calls) == 3
+    assert (
+        "Warning: User 'alice@example.com' could not be created: EmailAlreadyInUse"
+        in captured.err
+    )
+    assert "Done with 1 warning(s)." in captured.err
+
+
+def test_acl_tool_reports_when_every_roster_address_has_an_account(
+    monkeypatch, capsys
+) -> None:
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "lead@example.com", "leads_public")
+    _add_user(current, "alice@example.com", "Analysts")
+    _add_user(current, "bob@example.com", "Analysts")
+    _, create_calls = _install_roster_run(monkeypatch, current=current)
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert create_calls == []
+    assert "No accounts to create: 3 roster address(es) already have one." in out
+
+
+def test_acl_tool_create_and_email_users_requires_a_config_file(capsys) -> None:
+    with pytest.raises(SystemExit):
+        acl_tool.main(["--create-and-email-users"])
+
+    assert "--create-and-email-users requires a config_file" in capsys.readouterr().err
+
+
+def test_acl_tool_max_created_users_requires_the_creation_flag(capsys) -> None:
+    with pytest.raises(SystemExit):
+        acl_tool.main(["config.yml", "--max-created-users", "50"])
+
+    err = capsys.readouterr().err
+    assert "--max-created-users requires --create-and-email-users" in err
+
+
+def test_acl_tool_max_created_users_at_the_default_still_requires_the_flag(
+    capsys,
+) -> None:
+    """Presence of the flag is what is tested, not whether its value differs."""
+    with pytest.raises(SystemExit):
+        acl_tool.main(
+            [
+                "config.yml",
+                "--max-created-users",
+                str(acl_tool.MAX_CREATED_USERS_DEFAULT),
+            ]
+        )
+
+    err = capsys.readouterr().err
+    assert "--max-created-users requires --create-and-email-users" in err
+
+
+def test_acl_tool_creates_users_after_roles_and_drift_reset(monkeypatch) -> None:
+    """Creation is rejected for a role that does not exist yet, so it runs last."""
+    calls: list[str] = []
+    config = _roster_config()
+    current = _empty_current_state()
+    stack = _fake_stack(
+        users=SimpleNamespace(create=lambda *args, **kwargs: calls.append("create"))
+    )
+    _install_acl_tool_stack(monkeypatch, stack)
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: config)
+
+    states = [current, _current_state_for_config(config)]
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "fetch_current_state",
+        lambda _stack: states.pop(0) if states else _current_state_for_config(config),
+    )
+
+    def _apply_acl(*_args: Any, **_kwargs: Any) -> list[str]:
+        calls.append("apply_acl")
+        return []
+
+    def _handle_drift(*_args: Any, **_kwargs: Any) -> tuple[list[str], Any]:
+        calls.append("drift")
+        return [], _current_state_for_config(config)
+
+    monkeypatch.setattr(acl_tool.acl_lib, "apply_acl", _apply_acl)
+    monkeypatch.setattr(
+        acl_tool.acl_lib,
+        "detect_policy_drift",
+        lambda _desired, _current: [
+            acl.PolicyDrift(title="public", desired=[], actual=[])
+        ],
+    )
+    monkeypatch.setattr(acl_tool, "_handle_policy_drift", _handle_drift)
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    assert result == 0
+    assert calls == ["apply_acl", "drift", "create", "create", "create"]
+
+
+def test_acl_tool_reports_username_collision_and_exits_one(monkeypatch, capsys) -> None:
+    """A collision creates nobody for that address and is not silent."""
+    long_address = ("l" * 60) + "@example.com"
+    config = acl.parse_acl_config_text(f"""
+policies:
+  public:
+    sso.email: [{long_address}]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles: {{}}
+""")
+    current = _current_state_for_config(config)
+    _add_user(current, long_address[:64], "public", email="squatter@example.com")
+    create_calls: list[Any] = []
+    stack = _fake_stack(
+        users=SimpleNamespace(
+            create=lambda *args, **kwargs: create_calls.append((args, kwargs))
+        )
+    )
+    _install_acl_tool_stack(monkeypatch, stack)
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: config)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert create_calls == []
+    assert (
+        "No accounts to create: 0 roster address(es) already have one and 1 "
+        "cannot be created." in captured.out
+    )
+    assert f"Warning: Roster address '{long_address}' derives username" in captured.err
+    assert "Done with 1 warning(s)." in captured.err
