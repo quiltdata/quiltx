@@ -5266,29 +5266,6 @@ def _roster_config() -> acl.AclConfig:
     return acl.parse_acl_config_text(_ROSTER_CONFIG)
 
 
-def _handle_address(handle: str) -> str:
-    """An address whose derived username the registry would actually accept.
-
-    `plan_user_creations` derives `address[:USERNAME_MAX_LENGTH]`, and the
-    registry holds an admin-supplied username to `USERNAME_PATTERN`, which
-    forbids '@'. The only address that survives is one whose local part alone
-    fills the limit, so truncation cuts the '@' and the domain off. Padding
-    *handle* to the limit produces exactly that, with the derived username equal
-    to the padded local part.
-    """
-    local = f"{handle}{'_' * acl.USERNAME_MAX_LENGTH}"[: acl.USERNAME_MAX_LENGTH]
-    return f"{local}@example.com"
-
-
-def _handle_roster_config() -> acl.AclConfig:
-    """`_ROSTER_CONFIG`, addressed so the plan can actually create the accounts."""
-    return acl.parse_acl_config_text(
-        _ROSTER_CONFIG.replace("lead@example.com", _handle_address("lead"))
-        .replace("alice@example.com", _handle_address("alice"))
-        .replace("bob@example.com", _handle_address("bob"))
-    )
-
-
 def test_sso_email_roster_reads_static_and_synthesized_roles() -> None:
     """Only sso.email names individuals, and the role comes from the nesting."""
     roster = acl.sso_email_roster(_roster_config())
@@ -5332,85 +5309,258 @@ roles:
     assert acl.sso_email_roster(config) == {"Alice@Example.com": ["public", "Leads"]}
 
 
-def test_plan_user_creations_refuses_an_email_shaped_username() -> None:
-    """The ordinary case: no address can be named, so nothing is attempted.
+@pytest.mark.parametrize(
+    "address, expected",
+    [
+        ("alice@example.com", "alice_example_com"),
+        ("Alice.Smith@Example.COM", "alice_smith_example_com"),
+        ("a+tag@example.com", "a_tag_example_com"),
+        # A leading digit is legal in a local part and illegal in a username.
+        ("7t9@example.com", "u_7t9_example_com"),
+        ("_leading@example.com", "u__leading_example_com"),
+        ("ernő@example.com", "ern__example_com"),
+        (("l" * 70) + "@example.com", "l" * 64),
+    ],
+)
+def test_derive_username_folds_an_address_into_a_handle(
+    address: str, expected: str
+) -> None:
+    """The mapping itself: fold to the grammar, keep the domain, truncate to 64."""
+    assert acl.derive_username(address) == expected
 
-    The registry validates an admin-supplied username against `USERNAME_PATTERN`
-    and only derives `email[:64]` itself when the name is omitted, which
-    `quilt3.admin.users.create` does not allow. Every address is therefore
-    refused before the registry is contacted, rather than turned into a round
-    trip whose only outcome is InvalidUserNameError.
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "alice@example.com",
+        "7t9@example.com",
+        "_@example.com",
+        "@",
+        "!!!",
+        "ernő@example.com",
+        "",
+        "   ",
+        ("x" * 200) + "@example.com",
+        "9" * 200,
+    ],
+)
+def test_derive_username_always_satisfies_the_registry_grammar(address: str) -> None:
+    """The invariant the caller relies on to skip a pre-flight name check.
+
+    `plan_user_creations` sends the derived name straight to the registry, and a
+    rejected creation is a wasted round trip whose mail may already have gone out
+    for the addresses before it. Rather than re-validate a value it just built,
+    the derivation is total: pinned here over the shapes that could break it —
+    empty, blank, leading digit, leading underscore, punctuation only, non-ASCII,
+    and long enough that truncation is in play.
+    """
+    name = acl.derive_username(address)
+
+    assert acl.USERNAME_PATTERN.match(name) is not None
+    assert 1 <= len(name) <= acl.USERNAME_MAX_LENGTH
+
+
+def test_plan_user_creations_folds_ordinary_addresses_into_handles() -> None:
+    """The headline case: a roster of ordinary addresses is now creatable.
+
+    `quilt3.admin.users.create` requires `name`, so quiltx cannot let the
+    registry derive `email[:64]` and must supply a handle the grammar accepts.
+    The account is still matched by email when its owner first signs in through
+    SSO, so the handle is an administrative label rather than the identity.
     """
     config = _roster_config()
 
     plan = acl.plan_user_creations(config, _current_state_for_config(config))
 
-    assert plan.creations == ()
-    assert plan.existing == ()
-    assert plan.notices == ()
-    assert len(plan.warnings) == 3
-    warning = plan.warnings[1]
-    assert "Roster address 'alice@example.com'" in warning
-    assert "derives username 'alice@example.com'" in warning
-    assert "the registry rejects" in warning
-    assert "^[a-z][a-z0-9_]*$" in warning
-    assert "no mapping from an email address to a conforming handle" in warning
-    assert "create this account by hand" in warning
-
-
-def test_plan_user_creations_derives_username_and_role() -> None:
-    """A conforming derived username is planned, with the role from the nesting."""
-    config = _handle_roster_config()
-
-    plan = acl.plan_user_creations(config, _current_state_for_config(config))
-
-    assert plan.existing == ()
     assert plan.warnings == ()
+    assert plan.notices == ()
+    assert plan.existing == ()
     assert plan.creations == (
         acl.UserCreation(
-            name=_handle_address("lead").split("@")[0],
-            email=_handle_address("lead"),
-            role="leads_public",
+            name="lead_example_com", email="lead@example.com", role="leads_public"
         ),
         acl.UserCreation(
-            name=_handle_address("alice").split("@")[0],
-            email=_handle_address("alice"),
-            role="Analysts",
+            name="alice_example_com", email="alice@example.com", role="Analysts"
         ),
         acl.UserCreation(
-            name=_handle_address("bob").split("@")[0],
-            email=_handle_address("bob"),
-            role="Analysts",
+            name="bob_example_com", email="bob@example.com", role="Analysts"
         ),
     )
 
 
-def test_plan_user_creations_skips_address_held_as_an_email() -> None:
-    """A handle-named account owning the address is still that address's account."""
-    config = _handle_roster_config()
+def test_plan_user_creations_refuses_an_address_that_looks_like_a_rename() -> None:
+    """An address nobody holds is not proof of a new person.
+
+    The live case this comes from: an account existed as `robbyqbutler` /
+    `robbyqbutler@protonmail.com` and the roster was edited to
+    `robbyqbutler@pm.me`. Neither index matches — the derived handle
+    `robbyqbutler_pm_me` clashes with nothing either — so the address read as a
+    brand-new person and a second account would have been created and mailed.
+    quiltx never calls `set_email`, so nothing later merges them.
+    """
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Analysts:
+    sso.email: [robbyqbutler@pm.me]
+    config.policies: [public]
+""")
     current = _current_state_for_config(config)
-    _add_user(current, "alice", "Analysts", email=_handle_address("alice"))
+    _add_user(current, "robbyqbutler", "Analysts", email="robbyqbutler@protonmail.com")
 
     plan = acl.plan_user_creations(config, current)
 
-    assert plan.existing == (_handle_address("alice"),)
+    assert plan.creations == ()
+    assert plan.existing == ()
+    assert len(plan.warnings) == 1
+    warning = plan.warnings[0]
+    assert "Roster address 'robbyqbutler@pm.me' has no account" in warning
+    assert "local part 'robbyqbutler' is already used by" in warning
+    assert "'robbyqbutler' (email robbyqbutler@protonmail.com)" in warning
+    assert "never edits an account's email" in warning
+    assert "Set the existing account's email to this address" in warning
+
+
+def test_plan_user_creations_matches_a_rename_against_an_email_shaped_username() -> (
+    None
+):
+    """An SSO self-registration carries the old address as its username.
+
+    `user.name` is `email[:64]` for accounts that signed themselves up, so the
+    local part has to be read out of the username too, not just out of `email`.
+    """
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Analysts:
+    sso.email: [alice@newmail.example]
+    config.policies: [public]
+""")
+    current = _current_state_for_config(config)
+    _add_user(current, "alice@example.com", "Analysts")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.creations == ()
+    assert len(plan.warnings) == 1
+    assert "local part 'alice' is already used by 'alice@example.com'" in (
+        plan.warnings[0]
+    )
+
+
+def test_plan_user_creations_still_onboards_an_unrelated_local_part() -> None:
+    """The rename check must not block ordinary onboarding.
+
+    Only an address whose local part an existing account already uses is refused;
+    a roster of genuinely new people is created as before.
+    """
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "carol", "Analysts", email="carol@example.com")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.warnings == ()
+    assert [creation.name for creation in plan.creations] == [
+        "lead_example_com",
+        "alice_example_com",
+        "bob_example_com",
+    ]
+
+
+def test_plan_user_creations_refuses_two_addresses_deriving_one_username() -> None:
+    """Folding is not injective, and the clash is refused rather than resolved.
+
+    '.' and '+' both fold to '_', so two distinct people can want one handle.
+    Only one account can hold it, so quiltx creates neither: picking one would
+    silently onboard one person and drop the other, and the mail for the winner
+    cannot be recalled. Both addresses are refused, so both are counted.
+    """
+    config = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Analysts:
+    sso.email: [a.b@example.com, a+b@example.com]
+    config.policies: [public]
+""")
+
+    plan = acl.plan_user_creations(config, _current_state_for_config(config))
+
+    assert plan.creations == ()
+    assert len(plan.warnings) == 2
+    assert "Roster address 'a.b@example.com' derives username 'a_b_example_com'" in (
+        plan.warnings[0]
+    )
+    assert "also derived by 'a+b@example.com'" in plan.warnings[0]
+    assert "also derived by 'a.b@example.com'" in plan.warnings[1]
+    for warning in plan.warnings:
+        assert "not created" in warning
+        assert "will not decide which of these addresses gets it" in warning
+
+
+def test_plan_user_creations_refuses_a_handle_another_account_holds() -> None:
+    """A derived handle an unrelated account already uses is somebody else's name."""
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "alice_example_com", "public", email="squatter@example.com")
+
+    plan = acl.plan_user_creations(config, current)
+
     assert [creation.email for creation in plan.creations] == [
-        _handle_address("lead"),
-        _handle_address("bob"),
+        "lead@example.com",
+        "bob@example.com",
+    ]
+    assert len(plan.warnings) == 1
+    assert (
+        "Roster address 'alice@example.com' derives username 'alice_example_com', "
+        "which already belongs to a different account (email squatter@example.com)"
+    ) in plan.warnings[0]
+
+
+def test_plan_user_creations_skips_address_held_as_an_email() -> None:
+    """An account under an unrelated handle still owns the address it answers for.
+
+    The handle quiltx would derive is not the handle a human picked, so only the
+    email index can find this account — which is why existence is decided by
+    email before username.
+    """
+    config = _roster_config()
+    current = _current_state_for_config(config)
+    _add_user(current, "asmith", "Analysts", email="alice@example.com")
+
+    plan = acl.plan_user_creations(config, current)
+
+    assert plan.existing == ("alice@example.com",)
+    assert [creation.email for creation in plan.creations] == [
+        "lead@example.com",
+        "bob@example.com",
     ]
 
 
 def test_plan_user_creations_skips_address_held_as_a_username() -> None:
-    config = _handle_roster_config()
+    """An SSO self-registration is named `email[:64]`, so the address is the name."""
+    config = _roster_config()
     current = _current_state_for_config(config)
-    _add_user(current, _handle_address("alice"), "Analysts")
+    _add_user(current, "alice@example.com", "Analysts")
 
     plan = acl.plan_user_creations(config, current)
 
-    assert plan.existing == (_handle_address("alice"),)
+    assert plan.existing == ("alice@example.com",)
     assert [creation.email for creation in plan.creations] == [
-        _handle_address("lead"),
-        _handle_address("bob"),
+        "lead@example.com",
+        "bob@example.com",
     ]
 
 
@@ -5423,22 +5573,22 @@ def test_plan_user_creations_reports_an_ambiguous_address_as_held() -> None:
     warning, because the address is already counted in `existing`: reporting it
     as uncreatable would name it twice and fail a run with nothing to do.
     """
-    config = _handle_roster_config()
+    config = _roster_config()
     current = _current_state_for_config(config)
-    _add_user(current, "alice", "Analysts", email=_handle_address("alice"))
-    _add_user(current, "alice_two", "Analysts", email=_handle_address("alice"))
+    _add_user(current, "alice", "Analysts", email="alice@example.com")
+    _add_user(current, "alice_two", "Analysts", email="alice@example.com")
 
     plan = acl.plan_user_creations(config, current)
 
-    assert plan.existing == (_handle_address("alice"),)
+    assert plan.existing == ("alice@example.com",)
     assert [creation.email for creation in plan.creations] == [
-        _handle_address("lead"),
-        _handle_address("bob"),
+        "lead@example.com",
+        "bob@example.com",
     ]
     assert plan.warnings == ()
     assert len(plan.notices) == 1
     notice = plan.notices[0]
-    assert f"Roster address '{_handle_address('alice')}'" in notice
+    assert "Roster address 'alice@example.com'" in notice
     assert "the email of 'alice', 'alice_two'" in notice
     assert "no account was created for it" in notice
     assert "cannot be rekeyed by username" in notice
@@ -5479,7 +5629,7 @@ def test_plan_user_creations_creates_into_an_existing_unmanaged_role() -> None:
     The permissions it confers are IAM-backed, which the downgrade analysis
     reports as undetermined; that is a property of the role, not of the creation.
     """
-    config = acl.parse_acl_config_text(f"""
+    config = acl.parse_acl_config_text("""
 policies:
   public:
     sso.groups: [Everyone]
@@ -5488,7 +5638,7 @@ policies:
 roles:
   LegacyIam:
     config.unmanaged: true
-    sso.email: [{_handle_address("legacy")}]
+    sso.email: [legacy@example.com]
 """)
     current = _current_state_for_config(config)
 
@@ -5498,8 +5648,8 @@ roles:
     assert plan.warnings == ()
     assert plan.creations == (
         acl.UserCreation(
-            name=_handle_address("legacy").split("@")[0],
-            email=_handle_address("legacy"),
+            name="legacy_example_com",
+            email="legacy@example.com",
             role="LegacyIam",
         ),
     )
@@ -5507,7 +5657,7 @@ roles:
 
 def test_plan_user_creations_allows_a_managed_role_this_run_creates() -> None:
     """A dry run must not report a missing role that the same apply creates."""
-    config = _handle_roster_config()
+    config = _roster_config()
 
     plan = acl.plan_user_creations(config, _empty_current_state())
 
@@ -5520,11 +5670,11 @@ def test_plan_user_creations_allows_a_managed_role_this_run_creates() -> None:
 
 
 def test_plan_user_creations_truncates_derived_username_to_64_characters() -> None:
-    """Truncation is also the only thing that can make a derived name legal.
+    """The registry's length limit is enforced client-side, before the round trip.
 
-    A local part long enough to fill the limit loses the '@' and the domain, so
-    what is left matches `USERNAME_PATTERN`; anything shorter keeps the '@' and is
-    refused.
+    A local part that fills the limit on its own pushes the folded domain past the
+    cut, so the handle carries none of it — which is also how truncation turns a
+    total mapping into a colliding one, the case the next test covers.
     """
     long_address = ("l" * 70) + "@example.com"
     config = acl.parse_acl_config_text(f"""
@@ -5573,7 +5723,7 @@ roles: {{}}
 
 def test_plan_user_creations_makes_last_matching_role_active() -> None:
     """One person on several rungs starts where their first login would leave them."""
-    address = _handle_address("alice")
+    address = "alice@example.com"
     config = acl.parse_acl_config_text(f"""
 policies:
   public:
@@ -5593,7 +5743,7 @@ roles:
 
     assert plan.creations == (
         acl.UserCreation(
-            name=address.split("@")[0],
+            name="alice_example_com",
             email=address,
             role="Execs",
             extra_roles=("public", "Leads"),
@@ -5602,11 +5752,10 @@ roles:
 
 
 def test_create_roster_users_sends_name_email_and_role() -> None:
-    """The creation machinery, given the conforming handles the registry wants.
+    """The creation machinery on its own: what reaches `users.create`.
 
-    Built by hand rather than planned: `plan_user_creations` cannot derive a
-    conforming handle from an ordinary address, and what is under test here is
-    the call, not the derivation.
+    The `UserCreation` objects are built by hand rather than planned, so a change
+    to `derive_username` cannot quietly rewrite what this test asserts is sent.
     """
     create_calls: list[Any] = []
     stack = _fake_stack(
@@ -5651,13 +5800,13 @@ _ROSTER_CREATIONS = (
 def _stub_creation_plan(
     monkeypatch, creations: tuple[acl.UserCreation, ...] = _ROSTER_CREATIONS
 ) -> None:
-    """Hand the CLI a plan whose accounts can actually be created.
+    """Hand the CLI a plan outright, so the seam after it can be tested alone.
 
-    Planning cannot produce one from an ordinary address: the registry rejects an
-    email-shaped username (`USERNAME_PATTERN`) and quiltx has no mapping to a
-    handle, so `plan_user_creations` refuses every roster entry. These tests are
-    about the seam after the plan — the prompt, the cap, the phase ordering and
-    the per-address failure path — so the handles are supplied directly.
+    These tests are about what happens once a plan exists — the prompt, the cap,
+    the phase ordering, the per-address failure path — and several of them need a
+    creation count the real roster does not have. `derive_username` has its own
+    coverage, and `test_acl_tool_creates_the_handles_the_plan_derived` runs the
+    two together unstubbed.
     """
     plan = acl.UserCreationPlan(creations=creations)
     monkeypatch.setattr(
@@ -5666,7 +5815,11 @@ def _stub_creation_plan(
 
 
 def _install_roster_run(
-    monkeypatch, *, current: acl.CurrentState | None = None, create: Any = None
+    monkeypatch,
+    *,
+    current: acl.CurrentState | None = None,
+    create: Any = None,
+    config: acl.AclConfig | None = None,
 ) -> tuple[acl.CurrentState, list[Any]]:
     """Wire acl_tool against a roster config whose ACL state is already applied."""
     create_calls: list[Any] = []
@@ -5676,7 +5829,7 @@ def _install_roster_run(
         if create is not None:
             create(*args, **kwargs)
 
-    config = _roster_config()
+    config = _roster_config() if config is None else config
     state = current if current is not None else _current_state_for_config(config)
     stack = _fake_stack(users=SimpleNamespace(create=_create))
     _install_acl_tool_stack(monkeypatch, stack)
@@ -5811,8 +5964,16 @@ def test_acl_tool_dry_run_names_addresses_without_creating(monkeypatch, capsys) 
     assert "cannot be recalled" in out
 
 
-def test_acl_tool_dry_run_refuses_email_shaped_addresses(monkeypatch, capsys) -> None:
-    """The real dry run of an ordinary roster: named, refused, nothing planned."""
+def test_acl_tool_dry_run_names_the_accounts_it_would_create(
+    monkeypatch, capsys
+) -> None:
+    """The real dry run of an ordinary roster: every address named, none created.
+
+    Unstubbed, so the derivation the real plan performs is what gets printed. The
+    addresses are shown in full rather than counted because the welcome mail is
+    sent by the creation itself, making the dry run the last point at which the
+    roster can still be corrected.
+    """
     _, create_calls = _install_roster_run(monkeypatch)
 
     result = acl_tool.main(["config.yml", "--dry-run", "--create-and-email-users"])
@@ -5820,12 +5981,33 @@ def test_acl_tool_dry_run_refuses_email_shaped_addresses(monkeypatch, capsys) ->
     out = capsys.readouterr().out
     assert result == 0
     assert create_calls == []
-    assert "CREATE AND EMAIL" not in out
+    assert "!! CREATE AND EMAIL: 3 account(s) would be created" in out
+    assert "- alice@example.com -> user alice_example_com, roles Analysts" in out
+    assert "- lead@example.com -> user lead_example_com, roles leads_public" in out
+    assert "cannot be recalled" in out
+    assert "cannot be created" not in out
+
+
+def test_acl_tool_creates_the_handles_the_plan_derived(monkeypatch, capsys) -> None:
+    """End to end with nothing stubbed: derived handle reaches users.create.
+
+    The other creation tests hand the CLI a plan so they can isolate the prompt,
+    the cap and the failure path; this one lets the real plan run, so the name
+    the registry is asked for is the one `derive_username` produced.
+    """
+    _, create_calls = _install_roster_run(monkeypatch)
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    assert result == 0
+    assert [args for args, _kwargs in create_calls] == [
+        ("lead_example_com", "lead@example.com", "leads_public"),
+        ("alice_example_com", "alice@example.com", "Analysts"),
+        ("bob_example_com", "bob@example.com", "Analysts"),
+    ]
     assert (
-        "No accounts would be created: 0 roster address(es) already have one "
-        "and 3 cannot be created." in out
+        "+ user alice_example_com (role Analysts, emailed)" in capsys.readouterr().out
     )
-    assert "! Roster address 'alice@example.com' derives username" in out
 
 
 def test_acl_tool_creates_roster_users_with_yes(monkeypatch, capsys) -> None:
@@ -5849,20 +6031,32 @@ def test_acl_tool_creates_roster_users_with_yes(monkeypatch, capsys) -> None:
     assert "+ user alice (role Analysts, emailed)" in out
 
 
-def test_acl_tool_refuses_email_shaped_addresses_and_exits_one(
+def test_acl_tool_refuses_colliding_addresses_and_exits_one(
     monkeypatch, capsys
 ) -> None:
-    """No account can be named, so the registry is never contacted at all.
+    """Nothing creatable means the registry is never contacted, and exit is 1.
 
-    The flag's headline case, and the honest outcome of it: quiltx reports every
-    address it cannot name and sends no mail, rather than issuing one doomed
-    creation per address.
+    Both addresses fold to one handle, so neither can be created. The run reports
+    each address it could not onboard and sends no mail, rather than issuing a
+    creation and letting the registry reject the second one after the first has
+    already been mailed.
     """
 
     def _never(*_args: Any, **_kwargs: Any) -> None:
         pytest.fail("the registry must not be contacted")
 
-    _, create_calls = _install_roster_run(monkeypatch, create=_never)
+    colliding = acl.parse_acl_config_text("""
+policies:
+  public:
+    sso.groups: [Everyone]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Analysts:
+    sso.email: [a.b@example.com, a+b@example.com]
+    config.policies: [public]
+""")
+    _, create_calls = _install_roster_run(monkeypatch, create=_never, config=colliding)
     monkeypatch.setattr(
         acl_tool.acl_lib,
         "create_roster_users",
@@ -5877,14 +6071,14 @@ def test_acl_tool_refuses_email_shaped_addresses_and_exits_one(
     assert result == 1
     assert create_calls == []
     assert (
-        "No accounts to create: 0 roster address(es) already have one and 3 "
+        "No accounts to create: 0 roster address(es) already have one and 2 "
         "cannot be created." in captured.out
     )
     assert (
-        "Warning: Roster address 'alice@example.com' derives username "
-        "'alice@example.com', which the registry rejects" in captured.err
-    )
-    assert "Done with 3 warning(s)." in captured.err
+        "Warning: Roster address 'a.b@example.com' derives username "
+        "'a_b_example_com', which is also derived by 'a+b@example.com'"
+    ) in captured.err
+    assert "Done with 2 warning(s)." in captured.err
 
 
 def test_acl_tool_declining_the_prompt_creates_nobody(monkeypatch, capsys) -> None:

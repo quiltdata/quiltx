@@ -428,34 +428,53 @@ SSO login recomputes roles from the SSO config and replaces the set. `sso.hd` an
 `sso.groups` contribute nobody: a domain or a group names no individual, so there
 is nobody to create.
 
-**Current limitation: the flag plans and reports, but creates nobody.** An
-account created through the admin API carries a username quiltx chose, and the
-registry validates a supplied username against `^[a-z][a-z0-9_]*$`. Only the
-registry may produce the email-shaped names an SSO self-registration gets, and
-only by deriving `email[:64]` itself when no name is given — which
-`quilt3.admin.users.create` does not allow, since the field is required. Every
-address therefore derives a username the registry rejects, and quiltx has no
-decided mapping from an address to a handle: whether a later SSO login would
-reconcile against a handle-named account by email, or create a second account
-under its own derived name, is registry behaviour and not quiltx's to guess. Get
-it wrong and the mail is already sent and the roles sit on an orphaned account.
-So each address is refused before the registry is contacted, named in the output
-with the username it would have needed, and the run exits non-zero. Create those
-accounts by hand for now. Everything else below — the roster, the roles, the
-prompt, the cap, the reporting — works as described and is what a decided mapping
-would plug into.
+An account created through the admin API carries a username quiltx chose:
+`quilt3.admin.users.create` requires the field, so quiltx cannot use the
+registry's own `email[:64]` derivation and must supply a name matching
+`^[a-z][a-z0-9_]*$`. It folds the whole address — `alice@example.com` becomes
+`alice_example_com`. The domain is folded in rather than dropped because a
+handle built from the local part alone maps `alice@example.com` and
+`alice@contractor.example` onto one name, and only one account can hold it; a
+catalog with an outside collaborator is exactly where this flag gets used. The
+handle is an administrative label, not the identity — first SSO login matches the
+pre-created account by email, so the person signs in as themselves regardless of
+what the account is called.
+
+Folding is not reversible or unique: `.` and `+` both become `_`, and the name is
+capped at 64 characters. So the derived handle is checked against the catalog's
+existing usernames *and* against the rest of the roster, and any clash refuses
+those addresses with a warning rather than picking a winner or appending a
+suffix — a suffix would make somebody's username depend on what else happened to
+be in the file.
 
 An address any account already answers for is never created again, decided by
-the same resolution `users:` keys get. Email is checked first, because the
-derived username is truncated and a long address is therefore not its own
-account's name. When several roles name the same person, the last declaration
-becomes the active role and the earlier ones become extra roles, matching
-`union_roles: true` and the last-matching first-login pick. If truncation lands a
-derived username on a different account, that one address is reported and
-skipped rather than failing the run. An address two accounts already answer for
-is reported too, but as a nonfatal notice: nothing needs creating, so it is
-counted once as already onboarded and does not fail the run, while two accounts
-sharing one address is still worth knowing about.
+the same resolution `users:` keys get: username first, then a unique email match.
+For a roster it is almost always the email that matches, since a folded handle is
+not the address it came from. When several roles name the same person, the last
+declaration becomes the active role and the earlier ones become extra roles,
+matching `union_roles: true` and the last-matching first-login pick. An address
+two accounts already answer for is reported as a nonfatal notice: nothing needs
+creating, so it is counted once as already onboarded and does not fail the run,
+while two accounts sharing one address is still worth knowing about.
+
+**An address that looks like a rename is refused, not onboarded twice.** quiltx
+never changes an existing account's email, so an address the server does not hold
+is either a new person or somebody whose address changed — and a changed address
+is usually *why* you are editing the roster. Nothing in the data distinguishes
+them, and the two checks above do not help: `robbyqbutler@protonmail.com`,
+`robbyqbutler@pm.me` and an account named `robbyqbutler` are three different
+strings. So an address whose local part an existing account already uses, as its
+username or in its own address, is reported and skipped:
+
+```text
+Warning: Roster address 'robbyqbutler@pm.me' has no account, but its local part 'robbyqbutler' is already used by 'robbyqbutler' (email robbyqbutler@protonmail.com); not created. ...
+```
+
+Set the existing account's email to the new address if it is the same person, or
+create the account by hand if it is not. This is deliberately cautious in one
+direction: `alice@example.com` and `alice@partner.example` get separate handles
+but trigger this warning, because merging two people and splitting one person are
+both worse than asking.
 
 An address is only created when every role it names will exist. Roles this file
 declares are fine, including ones the same run creates. A `config.unmanaged: true`
@@ -478,18 +497,18 @@ confirmed or passed `--yes`:
 
 ```text
 !! CREATE AND EMAIL: 2 account(s) will be created and sent a welcome and password-reset email:
-  - alice@example.com -> user alice, roles internal_public
-  - bob@example.com -> user bob, roles exec, internal_public
+  - alice@example.com -> user alice_example_com, roles internal_public
+  - bob@example.com -> user bob_example_com, roles exec, internal_public
 The registry sends this mail as part of creation; it cannot be recalled.
 Create and email 2 account(s)? [y/N]:
 ```
 
-Until an address-to-handle mapping is decided, what you will actually see is the
-refusal — no prompt, no mail, no registry call, and a non-zero exit:
+When no address can be created, there is no prompt, no mail and no registry
+call — just the reasons and a non-zero exit:
 
 ```text
 No accounts to create: 0 roster address(es) already have one and 2 cannot be created.
-Warning: Roster address 'alice@example.com' derives username 'alice@example.com', which the registry rejects: an admin-supplied username must match ^[a-z][a-z0-9_]*$. quiltx has no mapping from an email address to a conforming handle, so no account was created; create this account by hand.
+Warning: Roster address 'a.b@example.com' derives username 'a_b_example_com', which is also derived by 'a+b@example.com'; not created. A username belongs to one account, so quiltx will not decide which of these addresses gets it: create these accounts by hand.
 ```
 
 `--dry-run` creates nobody and mails nobody, and still names every address. A

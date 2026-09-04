@@ -73,18 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an email (no ambiguity to resolve) and the role is implied by nesting, so the
   role assigned at creation and the role the SSO mapping grants are the same
   declaration and cannot drift — a `users:`-assigned role would be overwritten
-  on first SSO login anyway. **The flag creates nobody yet**: an account created
-  through the admin API carries a username quiltx chose, the registry validates a
-  supplied username against `^[a-z][a-z0-9_]*$`, and it derives `email[:64]`
-  itself only when the name is omitted — which `quilt3.admin.users.create` does
-  not allow, since `name` is required. Every address therefore derives a username
-  the registry rejects, and picking a handle instead would decide something this
-  repo cannot verify: whether a later SSO login reconciles against a pre-created
-  account by email or opens a second one under its own derived name. Guess wrong
-  and the mail is already sent and the roles sit on an orphaned account. So each
-  address is refused before the registry is contacted, named with the username it
-  would have needed, and the run exits non-zero rather than issuing N doomed
-  creations. There is deliberately no config key:
+  on first SSO login anyway. `quilt3.admin.users.create` requires `name`, so
+  quiltx cannot use the registry's own `email[:64]` derivation and must supply a
+  handle matching `^[a-z][a-z0-9_]*$`; `derive_username` folds the whole address
+  (`alice@example.com` -> `alice_example_com`). The domain is folded in rather
+  than dropped because a local-part handle maps `alice@example.com` and
+  `alice@contractor.example` onto one name, and only one account can hold it — a
+  catalog with an outside collaborator is exactly where this flag gets used. The
+  handle is an administrative label, not the identity: first SSO login reconciles
+  against the pre-created account by email. Folding is not injective (`.` and `+`
+  both become `_`, and 64 characters is a hard cap), so the handle is checked
+  against the server's usernames *and* against the rest of the roster, and any
+  clash refuses those addresses instead of picking a winner or appending a
+  suffix — a suffix would make someone's username depend on what else was in the
+  file. There is deliberately no config key:
   the registry mails a welcome and password-reset link as part of creating an
   account, with no suppress flag, so the first apply would be the irreversible
   one. The flag is named for that side effect, prints every address before
@@ -93,6 +95,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since quiltx never creates one and the registry would reject the account after
   the mail had gone out; an unmanaged role that does exist is created into,
   because its selector grants it at first login regardless.
+- An address that looks like an existing account's new one is refused rather than
+  onboarded twice. quiltx never calls `quilt3.admin.users.set_email`, so an
+  address no account holds is either a new person or somebody whose address
+  changed, and an operator edits a roster *because* it changed. Neither existing
+  guard catches it: the duplicate-account notice needs two accounts sharing one
+  email, and the handle check compares folded addresses, so
+  `robbyqbutler@protonmail.com`, `robbyqbutler@pm.me` and an account named
+  `robbyqbutler` are three distinct strings. Observed on open.quiltdata.com,
+  where a real run would have created and mailed a second account silently,
+  leaving the person's roles on the new account and their login on the old one.
+  An address whose local part an existing account already uses — as its username
+  or in its own address — is now a warning naming both records and no creation.
+  This treats `alice@example.com` and `alice@partner.example` as *possibly* one
+  person while the handle derivation treats them as two, which is consistent
+  rather than contradictory: one refuses to silently merge two people, the other
+  refuses to silently split one, and both resolve to reporting instead of
+  guessing.
 
 ### Changed
 

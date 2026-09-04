@@ -118,14 +118,16 @@ roles:
 # each account's username and email.
 #
 # Onboarding has no config key. `quiltx catalog acl --create-and-email-users`
-# plans an account for every sso.email address above with no existing user,
-# giving it the role its nesting implies. It creates none of them yet: the
-# registry holds an admin-supplied username to `^[a-z][a-z0-9_]*$` and only
-# derives email[:64] itself when the name is omitted, which the admin API does
-# not permit, so every address derives a name the registry would reject. quiltx
-# has no decided mapping from an address to a handle, so it names each address
-# and the username it would have needed, exits non-zero, and creates nobody —
-# create these accounts by hand for now. It is CLI-only because creation mails a
+# creates an account for every sso.email address above with no existing user,
+# giving it the role its nesting implies. The admin API requires a username, so
+# quiltx folds the address into one the registry accepts (`^[a-z][a-z0-9_]*$`):
+# alice@example.com -> alice_example_com. That handle is only a label; first SSO
+# login matches the account by email. Two addresses that fold to one handle, or a
+# handle another account already holds, are reported and skipped rather than
+# resolved by guesswork. So is an address whose local part an existing account
+# already uses, because quiltx never edits an account's email and cannot tell a
+# changed address from a different person with a similar one — set the existing
+# account's email instead. It is CLI-only because creation mails a
 # welcome and password-reset link that cannot be recalled, so no config file
 # should be able
 # to send it; the addresses are printed before the prompt, --dry-run mails

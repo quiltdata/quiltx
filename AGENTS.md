@@ -148,7 +148,6 @@ implied by the nesting, so creation and the SSO mapping cannot diverge (a
 recomputes the set). `sso.hd`/`sso.groups` name no individual and contribute
 nobody.
 
-**It creates nobody today, by design, and the refusal is the feature.**
 `USERNAME_PATTERN` (`^[a-z][a-z0-9_]*$`) is the registry's grammar for an
 *admin-supplied* username; the registry derives `email[:USERNAME_MAX_LENGTH]`
 itself only when `name` is omitted, and holds that derivation to no pattern —
@@ -156,19 +155,44 @@ which is why one catalog carries both shapes (the same two-shape fact `users:`
 key resolution is built on). quiltx cannot take the deriving path:
 `UserInput.name` is `str`, not `Optional[str]`, and `quilt3.admin.users.create`
 requires it, so every account quiltx creates carries a name quiltx chose.
-`plan_user_creations` validates the derived name and routes a non-conforming one
-to `warnings` with no `creations` entry, so `_create_and_email_users` reports
-"N cannot be created" and exits 1 without contacting the registry or sending
-mail. In practice that is every address, since the grammar forbids `@`. Do not
-invent a handle derivation to close this: mapping `alice@example.com` to `alice`
-decides whether a later SSO login reconciles against the pre-created account by
-email or opens a second one under its own `email[:64]` name, which is registry
-behaviour this repo cannot verify. If it is the latter, pre-creating sends
-irrecoverable mail and parks the roles on an orphan — strictly worse than not
-pre-creating. The only derived name that currently conforms comes from truncation
-cutting the `@` off, i.e. a local part at least `USERNAME_MAX_LENGTH` long, which
-is what the plan-level tests use to reach the creation paths at all; the CLI tests
-supply `UserCreation` objects directly for the same reason.
+`derive_username` supplies it by folding every character outside `[a-z0-9_]` to
+`_`, prefixing `USERNAME_FALLBACK_PREFIX` when the result does not start with a
+letter, and truncating to `USERNAME_MAX_LENGTH`. The result always satisfies
+`USERNAME_PATTERN`, which is why `plan_user_creations` no longer pre-validates
+it; that invariant is pinned by a parametrized test over empty, blank,
+leading-digit, leading-underscore, punctuation-only, non-ASCII and over-length
+inputs rather than by a branch that cannot fire.
+
+The **whole address** is folded, domain included. A local-part handle maps
+`alice@example.com` and `alice@contractor.example` to one name, and only one
+account can hold it, so that collision costs one of two people their account.
+First SSO login reconciles against the pre-created account **by email**, so the
+handle is an administrative label (admin UI, `--yaml` captures) and not the
+identity — this is the fact that makes pre-creation safe at all, and the reason
+the mapping does not need to reproduce what the registry would have derived.
+
+Folding is not injective: `.` and `+` both become `_`, and truncation merges any
+two addresses agreeing on their first 64 folded characters. So the handle is
+checked against server usernames *and* against the rest of the roster (two
+passes, `claimants`, so the outcome does not depend on the order the file is
+written in), and any clash refuses those addresses. No disambiguating suffix: it
+would make somebody's username depend on what else happened to be in the file.
+
+Existence is not identity. quiltx never calls `quilt3.admin.users.set_email`, so
+an address no account holds may be a person who already has one under their old
+address — which is *why* an operator edits a roster. Neither older guard catches
+it: the duplicate-account notice needs two accounts sharing one email, and the
+handle check compares folded addresses, so `robbyqbutler@protonmail.com`,
+`robbyqbutler@pm.me` and an account named `robbyqbutler` are three distinct
+strings. `_accounts_sharing_a_local_part` matches the roster address's local part
+against each account's username *and* the local part of its email (so an
+email-shaped `user.name` is covered), and a hit is a `warnings` entry naming both
+records with no creation. It runs in the first pass, before handle assignment:
+identity precedes naming, and an address refused here never competes for a handle
+it was not going to get. This treats `alice@example.com` and
+`alice@partner.example` as *possibly* one person while `derive_username` treats
+them as two — not a contradiction, since one refuses to silently merge two people
+and the other refuses to silently split one, and both only report.
 
 `sso_email_roster` walks `_DesiredAclState.sso_mappings`, so ladder rungs and
 static roles (including unmanaged ones) are covered under the role names that
@@ -179,17 +203,19 @@ ambiguous address as held — a roster cannot be rekeyed by username, so raising
 would abort an apply over an address needing no action — but reports it instead of
 folding it silently into the "already have one" count. `UserCreationPlan` carries
 two per-address channels because it reports two different outcomes: `warnings`
-means "cannot be created and needs a human" (a missing role, a non-conforming
-derived username, a truncation collision) and `notices` means "needs nothing done,
-worth reporting". Only `warnings` reach `_unmakeable_accounts` and the exit-1 path;
-an ambiguous held address is already in `existing`, so counting it as uncreatable
-both named one address twice and failed a run in which nothing went wrong.
-`_print_user_creation_notices` prints the notices in both readers, since only
-`warnings` travel back to `_run`. Email matches before username because
-`USERNAME_MAX_LENGTH` (64, the registry's own `email[:64]`) truncation means a
-long address is not its own account's name. Multi-role: last declaration is
-active, earlier ones are extra roles, matching `union_roles: true` and the
-last-matching first-login pick.
+means "cannot be created and needs a human" (a missing role, a suspected rename,
+a handle another account or another roster address holds) and `notices` means
+"needs nothing done, worth reporting". Only `warnings` reach
+`_unmakeable_accounts` and the exit-1 path; an ambiguous held address is already
+in `existing`, so counting it as uncreatable both named one address twice and
+failed a run in which nothing went wrong. `_print_user_creation_notices` prints
+the notices in both readers, since only `warnings` travel back to `_run`.
+Resolution order is username then unique email, the same as a `users:` key, but
+for a roster it is nearly always the email index that hits: `derive_username`
+folds rather than copies, so a quiltx-created account is not named after its own
+address, and an SSO self-registration is only until `USERNAME_MAX_LENGTH` cuts it
+off. Multi-role: last declaration is active, earlier ones are extra roles,
+matching `union_roles: true` and the last-matching first-login pick.
 
 An address is only created when every role it names will exist. The available set
 is the one `compute_diff` uses for `users:` entries — managed roles the file

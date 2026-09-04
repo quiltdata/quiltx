@@ -53,9 +53,17 @@ resolution is built on).
 quiltx cannot take the deriving path: ``quilt3.admin.users.create`` requires
 ``name`` and ``UserInput.name`` is not optional, so every account quiltx creates
 carries a name quiltx chose, and that name has to match. An email address never
-does, and quiltx has no decided mapping from an address to a handle, so
-``plan_user_creations`` refuses such an address instead of attempting a creation
-the registry would reject.
+does — the grammar forbids ``@`` — so ``derive_username`` folds the address into
+a handle that does.
+"""
+USERNAME_FALLBACK_PREFIX = "u_"
+"""Prefix that gives a derived username the leading letter the grammar demands.
+
+``USERNAME_PATTERN`` requires the first character to be a lowercase letter, but
+a local part may legally begin with a digit (``7t9@example.com``). Prefixing is
+preferred over dropping the offending characters because dropping them maps
+``7alice@`` and ``alice@`` of the same domain onto one handle, turning a
+distinction the addresses make into a collision quiltx would have to refuse.
 """
 REGISTRY_MANAGED_POLICY_EXCLUSIONS = frozenset({"CanaryBucketAccess"})
 REGISTRY_MANAGED_ROLE_EXCLUSIONS = frozenset({"Canary"})
@@ -962,6 +970,72 @@ def _quote_user_names(users: list[Any]) -> str:
     return ", ".join(sorted(f"'{getattr(user, 'name', None)}'" for user in users))
 
 
+def _quote_addresses(addresses: Sequence[str]) -> str:
+    """Quote roster addresses in a stable order, so a message reads the same twice."""
+    return ", ".join(sorted(f"'{address}'" for address in addresses))
+
+
+def _quote_user_identities(users: list[Any]) -> str:
+    """Name accounts by username *and* email.
+
+    A message about which person an account belongs to has to show both fields:
+    the username alone is what ``user.name``'s two shapes make ambiguous, and the
+    email alone does not say what to look up in the admin UI.
+    """
+    return ", ".join(
+        sorted(
+            f"'{getattr(user, 'name', None)}' "
+            f"(email {getattr(user, 'email', None) or '(unknown)'})"
+            for user in users
+        )
+    )
+
+
+def _address_local_part(value: str) -> str:
+    """The part of *value* before its last ``@``, lowercased.
+
+    A handle-shaped username has no ``@`` and comes back whole, so one function
+    covers both shapes ``user.name`` arrives in as well as an email.
+    """
+    cleaned = value.strip().lower()
+    local, _at, _domain = cleaned.rpartition("@")
+    return local or cleaned
+
+
+def _accounts_sharing_a_local_part(address: str, users: list[Any]) -> list[Any]:
+    """Accounts that might already belong to *address*'s owner.
+
+    quiltx never reconciles an account's email — ``quilt3.admin.users.set_email``
+    is not called anywhere — so an address the server does not hold is either a
+    new person or a person whose address changed, and nothing in the data says
+    which. Matching on the local part is the one signal available: an operator
+    edits a roster *because* somebody's address changed, and both the old
+    account's username and the local part of its old address usually survive the
+    change (``robbyqbutler`` / ``robbyqbutler@protonmail.com`` ->
+    ``robbyqbutler@pm.me``).
+
+    This deliberately treats ``alice@example.com`` and ``alice@partner.example``
+    as *possibly* one person, while ``derive_username`` treats them as two for
+    naming. That is not a contradiction: one refuses to silently merge two
+    people into one handle, the other refuses to silently split one person across
+    two accounts. Both resolve to reporting rather than guessing, so neither
+    decides anything on its own.
+    """
+    local = _address_local_part(address)
+    if not local:
+        return []
+    return [
+        user
+        for user in users
+        if local
+        in {
+            _address_local_part(str(part))
+            for part in (getattr(user, "name", None), getattr(user, "email", None))
+            if part
+        }
+    ]
+
+
 @dataclass(frozen=True)
 class UserCreation:
     """One account an ``sso.email`` roster names and the server does not hold."""
@@ -988,9 +1062,10 @@ class UserCreationPlan:
     warnings: tuple[str, ...] = ()
     """One message per address that *cannot* be created and needs a human.
 
-    A missing role, or a derived username the registry would reject. Every entry
-    is an address the file asks to onboard and this run did not, so the CLI
-    counts them as uncreatable and exits non-zero.
+    A role the server does not hold, an address that looks like an existing
+    account's new one, or a derived handle two addresses want. Every entry is an
+    address the file asks to onboard and this run did not, so the CLI counts them
+    as uncreatable and exits non-zero.
     """
     notices: tuple[str, ...] = ()
     """One message per address that needs nothing done but is worth reporting.
@@ -1029,6 +1104,44 @@ def sso_email_roster(
     return roster
 
 
+def derive_username(address: str) -> str:
+    """Fold an email address into a username the registry will accept.
+
+    Every character outside ``[a-z0-9_]`` becomes ``_`` and the result is
+    truncated to ``USERNAME_MAX_LENGTH``, so ``alice@example.com`` becomes
+    ``alice_example_com``. The result always satisfies ``USERNAME_PATTERN``: the
+    fold leaves only characters the grammar allows, ``USERNAME_FALLBACK_PREFIX``
+    supplies the leading letter when the fold does not, and truncation cannot
+    remove it.
+
+    **The domain is folded in, not discarded.** A handle built from the local
+    part alone reads better, but ``alice@example.com`` and
+    ``alice@contractor.example`` would then derive one username, and a catalog
+    with an outside collaborator is exactly where this flag gets used. Only one
+    account can hold a handle, so that collision costs one of the two people
+    their account; keeping the domain costs some readability instead.
+
+    The mapping is deterministic and total, and is *not* injective: folding maps
+    ``a.b@x.com`` and ``a+b@x.com`` to ``a_b_x_com``, and truncation maps any two
+    addresses agreeing on their first 64 folded characters together. Collisions
+    are therefore detected in ``plan_user_creations`` against both the server's
+    usernames and the rest of the roster, and refused there rather than papered
+    over with a disambiguating suffix — a suffix would make the handle depend on
+    what else happened to be in the file, so the same person would get a
+    different name depending on the order the roster was written in.
+
+    quiltx picks the name rather than letting the registry derive ``email[:64]``
+    because ``quilt3.admin.users.create`` requires ``name``. The account is still
+    found by email when its owner first logs in through SSO, so the handle is an
+    administrative label rather than the identity: it shows up in the admin UI
+    and in ``--yaml`` captures, and does not decide who the account belongs to.
+    """
+    folded = re.sub(r"[^a-z0-9_]", "_", address.strip().lower())
+    if not folded[:1].isalpha():
+        folded = f"{USERNAME_FALLBACK_PREFIX}{folded}"
+    return folded[:USERNAME_MAX_LENGTH]
+
+
 def plan_user_creations(
     config: AclConfig,
     current: CurrentState,
@@ -1039,9 +1152,17 @@ def plan_user_creations(
 
     An address that any account already answers for is left alone, so a repeat
     run creates nobody. Existence is decided by the same resolution ``users:``
-    keys get: email first, then username. Email has to come first here because
-    the derived username is truncated to ``USERNAME_MAX_LENGTH``, so a long
-    address is not its own account's name and only the email index can find it.
+    keys get — username first, then a unique email match — but for a roster it is
+    almost always the email index that finds the account: ``derive_username``
+    folds the address rather than copying it, so an account quiltx created is not
+    named after its own address, and an SSO self-registration is named after its
+    address only until ``USERNAME_MAX_LENGTH`` cuts it off.
+
+    Existence is not identity. quiltx never edits an account's email, so an
+    address no account holds may still be a person who already has one under
+    their old address; ``_accounts_sharing_a_local_part`` catches the tractable
+    form of that and refuses, because a second account splits one person's roles
+    across two logins.
 
     When several roles name the same person the last declaration becomes the
     active role and the earlier ones become extra roles. The generated SSO
@@ -1062,10 +1183,13 @@ def plan_user_creations(
     permissions it confers are IAM-backed and therefore reported as undetermined
     by the downgrade analysis.
 
-    The derived username must also be one the registry would accept, and in
-    practice none is: see ``USERNAME_PATTERN``. Such an address becomes a
-    ``warnings`` entry and no ``creations`` entry, so the caller reports it and
-    exits non-zero without the registry ever being asked.
+    ``derive_username`` is deterministic but not injective, so the handle it
+    picks is checked twice before anything is created: against the server's
+    usernames, and against the rest of the roster. Either clash refuses the
+    address — a ``warnings`` entry and no ``creations`` entry, so the caller
+    reports it and exits non-zero without the registry being asked. Refusing is
+    the point: the alternative is one person silently getting the account and the
+    other silently not, and the mail that went out cannot be recalled.
     """
     state = desired_state or _build_desired_acl_state(config)
     roster = sso_email_roster(config, desired_state=state)
@@ -1079,6 +1203,11 @@ def plan_user_creations(
     existing: list[str] = []
     warnings: list[str] = []
     notices: list[str] = []
+    # Two passes, because a handle two roster addresses both want is a fact
+    # about the roster as a whole: deciding it while walking the addresses would
+    # give the first-written address the account and refuse the second, so who
+    # gets onboarded would depend on the order the file happens to be in.
+    candidates: list[tuple[str, list[str], str]] = []
     for address, roles in roster.items():
         held, held_notice = _roster_address_is_held(
             address, users_by_name, users_by_email
@@ -1098,33 +1227,54 @@ def plan_user_creations(
                 "address."
             )
             continue
-        name = address[:USERNAME_MAX_LENGTH]
-        if USERNAME_PATTERN.match(name) is None:
-            # In practice every address lands here: the grammar forbids '@'.
-            # Refuse before the registry is contacted rather than send N
-            # creations it will reject — each one would be a round trip whose
-            # only possible outcome is InvalidUserNameError.
+        # Identity before naming: whether this is a new person is a question
+        # about the address and the server, so it is settled here rather than in
+        # the handle pass, and an address refused here never competes for a
+        # handle it was not going to get.
+        renamed = _accounts_sharing_a_local_part(address, current.users)
+        if renamed:
             warnings.append(
-                f"Roster address '{address}' derives username '{name}', which the "
-                "registry rejects: an admin-supplied username must match "
-                f"{USERNAME_PATTERN.pattern}. quiltx has no mapping from an email "
-                "address to a conforming handle, so no account was created; "
-                "create this account by hand."
+                f"Roster address '{address}' has no account, but its local part "
+                f"'{_address_local_part(address)}' is already used by "
+                f"{_quote_user_identities(renamed)}; not created. quiltx cannot "
+                "tell a changed address from a different person with a similar "
+                "one, and it never edits an account's email, so creating here "
+                "would split one person's roles across two logins and mail a "
+                "welcome that cannot be recalled. Set the existing account's "
+                "email to this address if it is the same person, or create the "
+                "account by hand if it is not."
+            )
+            continue
+        candidates.append((address, roles, derive_username(address)))
+
+    claimants: dict[str, list[str]] = {}
+    for address, _roles, name in candidates:
+        claimants.setdefault(name, []).append(address)
+
+    for address, roles, name in candidates:
+        rivals = [other for other in claimants[name] if other != address]
+        if rivals:
+            # One warning per address rather than one per handle: each of these
+            # is an address the file asked to onboard and this run did not, and
+            # the caller counts warnings to say how many that was.
+            warnings.append(
+                f"Roster address '{address}' derives username '{name}', which is "
+                f"also derived by {_quote_addresses(rivals)}; not created. A "
+                "username belongs to one account, so quiltx will not decide "
+                "which of these addresses gets it: create these accounts by hand."
             )
             continue
         collision = users_by_name.get(name)
         if collision is not None:
-            # Only reachable through truncation, and only when it cut the '@'
-            # off: an untruncated address that is some account's username
-            # resolves above, and one still holding its '@' fails the grammar.
-            # The registry would reject the duplicate name, so refuse the one
-            # address and keep going.
+            # A different account already holds the handle; the same account
+            # holding it resolved as held above. The registry would reject the
+            # duplicate, so refuse this address and keep going.
             other_email = getattr(collision, "email", None) or "(unknown)"
             warnings.append(
                 f"Roster address '{address}' derives username '{name}', which "
                 f"already belongs to a different account (email {other_email}); "
-                "not created. Create this account by hand, or shorten the "
-                f"address to under {USERNAME_MAX_LENGTH} characters."
+                "not created. Create this account by hand under a name of your "
+                "choosing."
             )
             continue
         *extra_roles, active_role = roles
