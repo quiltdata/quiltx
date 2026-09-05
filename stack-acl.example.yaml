@@ -29,6 +29,28 @@ policies:
     buckets.read:       [quilt-leadership, udp-spec]
     config.default_role: true
 
+  # A floor, not a fallback. Every managed role composes a default policy, so
+  # someone who matched a narrow selector keeps the open buckets instead of
+  # losing them by never reaching config.default_role. It is appended last and
+  # deduped, so a role that already names the policy is unchanged.
+  #
+  # config.synthesize must be false: a ladder rung's sso.<claim> selector names
+  # the audience it is for, and granting that rung to the rungs below it would
+  # hand its buckets to those broader audiences while leaving their synthesized
+  # role names unchanged. Unmanaged roles are out of reach because quiltx never
+  # edits their IAM, so a user whose only role is unmanaged must also match a
+  # managed role's selector; that combination is reported as a nonfatal notice,
+  # not a warning, so it never fails an apply. A default policy the server does
+  # not hold blocks every managed role, and the apply stops right there: no role
+  # is created, updated or deleted and no policy is deleted, rather than tearing
+  # down the old state with the new state unreachable. Captures never re-emit the
+  # flag; each role's composed config.policies already lists the policy.
+  #
+  # general:
+  #   config.synthesize:     false
+  #   config.default_policy: true
+  #   buckets.read:          [quilt-open]
+
 ## Roles
 
 # Each static role composes only the explicitly specified policies and/or grants.
@@ -53,3 +75,82 @@ roles:
   # Those fields do not modify IAM permissions.
   ReadWriteQuiltBucket:
     config.unmanaged:   true
+
+## Buckets
+
+# Optional per-bucket registration options for buckets this file declares. A key
+# here references the bucket on its own, so a bucket can be registered before
+# any role or policy grants access to it.
+#
+# config.no_preflight: true registers the bucket through GraphQL only, leaving
+# its AWS setup alone. Use it for a bucket owned by another account that was
+# already prepared owner-side with `quiltx bucket prepare`: the SNS topic exists
+# and the catalog's control account already holds the grant, but the identity
+# applying this file is a catalog admin rather than the bucket owner, so it
+# cannot read or write the bucket's policy. Without the flag, preflight fails and
+# the bucket never registers. The CLI's global --no-preflight says the same thing
+# for every new bucket in one run and is forgotten afterwards; declared here, the
+# next plain apply behaves the same way.
+#
+# Captures do not re-emit this block: the registry records no per-bucket
+# registration mode, so re-add the flag by hand when replaying a capture against
+# a catalog that has yet to register such a bucket.
+#
+# buckets:
+#   sierra-general:
+#     config.no_preflight: true
+
+## Users
+
+# Entries reconcile the active role, ordered extra roles, and admin status of
+# accounts that already exist. This block never creates an account: a key that
+# matches nothing is reported and skipped. Onboarding is opt-in and command-line
+# only (`--create-and-email-users`, described below). Nothing ever deletes one.
+#
+# Each key is resolved against the server: an exact username match first, then
+# a unique case-insensitive email match. Both shapes appear in one file because
+# the registry derives an SSO self-registration's username from its email while
+# admin-created accounts use a `^[a-z][a-z0-9_]*$` handle, so an email key is
+# safe either way. A key that names an account always means that account, even
+# when someone else holds that string as their email; the clash is a warning
+# naming both, so rekey the entry if the other account was meant. A key that
+# names no account and is the email of two, or two keys resolving to the same
+# account, is a fatal error naming the conflict. A key that matches nothing is
+# reported and skipped. Run `quiltx catalog acl` with no config file to list
+# each account's username and email.
+#
+# Onboarding has no config key. `quiltx catalog acl --create-and-email-users`
+# creates an account for every sso.email address above with no existing user,
+# giving it the role its nesting implies. The admin API requires a username, so
+# quiltx folds the address into one the registry accepts (`^[a-z][a-z0-9_]*$`):
+# alice@example.com -> alice_example_com. That handle is only a label; first SSO
+# login matches the account by email. Two addresses that fold to one handle, or a
+# handle another account already holds, are reported and skipped rather than
+# resolved by guesswork. So is an address whose local part an existing account
+# already uses, because quiltx never edits an account's email and cannot tell a
+# changed address from a different person with a similar one — set the existing
+# account's email instead. It is CLI-only because creation mails a
+# welcome and password-reset link that cannot be recalled, so no config file
+# should be able
+# to send it; the addresses are printed before the prompt, --dry-run mails
+# nobody, and a run creating more than ten accounts is refused without
+# --max-created-users. sso.hd and sso.groups name no individual, so only
+# sso.email can create anyone. An address is skipped when a role it names is not
+# on the server when the account would be created: --dry-run counts the roles
+# this file declares, but a real run asks the server what actually landed, so a
+# failed role create costs only its own addresses. A config.unmanaged role that
+# does not exist is skipped either way, since quiltx never creates one; an
+# unmanaged role that does exist is created into, with permissions this tool
+# reports as undetermined because they live in IAM.
+
+users:
+
+  # Admin-created account, keyed by its handle.
+  alice:
+    role:               exec
+    extra_roles:        [internal_public]
+    admin:              true
+
+  # SSO self-registration, keyed by email.
+  bob@example.com:
+    role:               internal_public

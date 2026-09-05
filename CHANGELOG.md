@@ -8,6 +8,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-01
+
+### Fixed
+
+- Resolve `users:` keys by username or email
+  ([#104](https://github.com/quiltdata/quiltx/issues/104)). Keys were matched
+  against `user.name` only, and `user.name` is not one thing: the registry
+  derives it from `email[:64]` for accounts that self-registered through SSO,
+  while an admin-created account must satisfy `^[a-z][a-z0-9_]*$`, so an email
+  is not a legal value there. One captured ACL therefore mixes both shapes with
+  nothing marking which is which, and writing someone's email when their account
+  is under a handle produced a nonfatal notice and silently skipped the grant.
+  Each key now resolves by exact username first, then by a unique
+  case-insensitive email match. Precedence decides, so a key that names an
+  account still means that account even when a *different* account holds it as an
+  email; the clash is a warning naming both, because refusing it would reject
+  `--yaml`'s own captures, which key every entry by `user.name`. A key that names
+  no account and is the email of two, or two keys resolving to one account, is a
+  hard error naming the conflict rather than a guess about who was meant.
+  Everything downstream — the `set_role`/`set_admin` call, downgrade analysis,
+  verbose output — now uses the resolved server username, so an email-keyed entry
+  that reduces access is reported instead of being read as "no entry".
+
+### Added
+
+- `config.default_policy: true` on a policy, the floor every managed role stands
+  on ([#105](https://github.com/quiltdata/quiltx/issues/105)).
+  `config.default_role` cannot express this: it is a fallback the registry
+  applies only when an authenticated user's claims matched no mapping, so a
+  *specific* grant costs a user the general one. Whoever is named in a narrow
+  role's `sso.email` matches that mapping, never reaches the default role, and
+  loses the open buckets unless every narrow role repeats the general policy —
+  in one real config, twelve hand-maintained `extra_roles` entries expressing a
+  single intent. A default policy composes into the roles a user already
+  matched, so it grants the same permissions without adding a role to anyone's
+  set; a baseline *role* would have changed which role each user lands on and put
+  an extra entry in every user's role switcher. Composition is
+  client-side codegen appended after the policy ladder is built, so synthesized
+  role names are unchanged, and it is deduped, so a role that already names the
+  policy stays a no-op. The flag requires `config.synthesize: false`, because
+  granting a ladder rung to the rungs below it would hand its buckets to
+  audiences its own `sso.<claim>` selector excludes. Unmanaged roles are out of
+  reach — quiltx never edits their IAM — and that combination is reported as a
+  nonfatal notice naming both, not a warning: it explains what a declaration
+  means rather than reporting anything wrong, so it does not affect the exit
+  code (see the `NONFATAL:` entry under Changed).
+- Per-bucket `config.no_preflight` under a new top-level `buckets:` block
+  ([#96](https://github.com/quiltdata/quiltx/issues/96)). A bucket owned by
+  another account and already prepared owner-side with `quiltx bucket prepare`
+  cannot be preflighted by the catalog admin applying the ACL, so the add failed
+  and the bucket was never registered; `sierra-general` on open.quiltdata.com
+  needed two attempts and the global flag. That flag is all-or-nothing and lives
+  outside the file, so the next plain apply or CI job hit the same wall.
+  Declaring the bucket keeps the fact with the bucket. A `buckets:` key counts as
+  a reference on its own, so a bucket can be registered before any grant names
+  it, and `--no-preflight` remains a global override. Captures do not re-emit
+  the block — the registry records no per-bucket registration mode — which is
+  documented where the capture is.
+- `--create-and-email-users`, which creates accounts for `sso.email` addresses
+  that have none ([#106](https://github.com/quiltdata/quiltx/issues/106)).
+  `users:` entries only ever apply to accounts that already exist, so an ACL
+  file could not onboard anyone: granting a role to someone who has never logged
+  in needed an out-of-band invite first. Creation is driven from `sso.email`
+  rather than `users:` because that roster is keyed by a field that can only be
+  an email (no ambiguity to resolve) and the role is implied by nesting, so the
+  role assigned at creation and the role the SSO mapping grants are the same
+  declaration and cannot drift — a `users:`-assigned role would be overwritten
+  on first SSO login anyway. `quilt3.admin.users.create` requires `name`, so
+  quiltx cannot use the registry's own `email[:64]` derivation and must supply a
+  handle matching `^[a-z][a-z0-9_]*$`; `derive_username` folds the whole address
+  (`alice@example.com` -> `alice_example_com`). The domain is folded in rather
+  than dropped because a local-part handle maps `alice@example.com` and
+  `alice@contractor.example` onto one name, and only one account can hold it — a
+  catalog with an outside collaborator is exactly where this flag gets used. The
+  handle is an administrative label, not the identity: first SSO login reconciles
+  against the pre-created account by email. Folding is not injective (`.` and `+`
+  both become `_`, and 64 characters is a hard cap), so the handle is checked
+  against the server's usernames *and* against the rest of the roster, and any
+  clash refuses those addresses instead of picking a winner or appending a
+  suffix — a suffix would make someone's username depend on what else was in the
+  file. There is deliberately no config key:
+  the registry mails a welcome and password-reset link as part of creating an
+  account, with no suppress flag, so the first apply would be the irreversible
+  one. The flag is named for that side effect, prints every address before
+  asking, and refuses more than `--max-created-users` (default 10) in one run. An
+  address is skipped when a role it names is absent from the server at the moment
+  of creation, since the registry rejects such a creation and quiltx cannot
+  control whether the welcome mail goes out before it fails. Which roles count as
+  present differs by caller on purpose: `--dry-run` has applied nothing, so it
+  includes the roles the file declares, while the real run — which happens after
+  the apply — asks only the refreshed server state, because a managed role whose
+  create failed is still in the desired state. An unmanaged role that does exist
+  is created into, because its selector grants it at first login regardless.
+- A `users:` key that stopped resolving because the account's address changed is
+  a warning naming the suspected account, not a silent skip
+  ([#119](https://github.com/quiltdata/quiltx/issues/119)). Same root cause as the
+  roster refusal below, and it had none of the same reporting: the key missed both
+  the username and the email index, so the entry was dropped with a nonfatal
+  notice while the roster path exited non-zero for the identical condition. That
+  matters because a `users:` entry is what pins which of several matched roles is
+  the *active* one under `union_roles: true`; when the pin silently stops applying,
+  the account keeps whatever it last had, which is the drift the pin exists to
+  prevent. The remedy names both routes, since unlike a roster address a `users:`
+  key can be rewritten: rekey the entry, or set the account's email. A key naming
+  nobody recognisable stays a notice, so a captured config with an entry for a
+  since-deleted account still does not fail a run with nothing to fix.
+- A run with nothing to apply now exits non-zero if it reported a warning. The
+  early return for an unchanged config skipped the exit-code decision entirely, so
+  the same warning failed a run that had work to do and passed one that did not —
+  a config whose only problem needed no changes to fix reported success. Notices
+  are unaffected on this path as on every other.
+- An address that looks like an existing account's new one is refused rather than
+  onboarded twice. quiltx never calls `quilt3.admin.users.set_email`, so an
+  address no account holds is either a new person or somebody whose address
+  changed, and an operator edits a roster *because* it changed. Neither existing
+  guard catches it: the duplicate-account notice needs two accounts sharing one
+  email, and the handle check compares folded addresses, so
+  `robbyqbutler@protonmail.com`, `robbyqbutler@pm.me` and an account named
+  `robbyqbutler` are three distinct strings. Observed on open.quiltdata.com,
+  where a real run would have created and mailed a second account silently,
+  leaving the person's roles on the new account and their login on the old one.
+  An address whose local part an existing account already uses — as its username
+  or in its own address — is now a warning naming both records and no creation.
+  This treats `alice@example.com` and `alice@partner.example` as *possibly* one
+  person while the handle derivation treats them as two, which is consistent
+  rather than contradictory: one refuses to silently merge two people, the other
+  refuses to silently split one, and both resolve to reporting instead of
+  guessing.
+
+### Changed
+
+- A default policy the server does not hold now stops the apply and names itself
+  as the cause ([#110](https://github.com/quiltdata/quiltx/issues/110)).
+  Composing into every managed role makes one policy a dependency of all of them,
+  so a failed create turned into one `unknown policy` line per role — including
+  roles that never named it — and the run diagnosed the symptom. Worse, it kept
+  going: role deletes and policy deletes run after the role loops, so a run that
+  could create no role still deleted the roles and policies the file drops,
+  tearing down working access with the replacement provably unreachable. Apply now
+  checks the floor between the policy phase and the role phase and returns there:
+  nothing is created, updated or deleted below that point, the policy changes that
+  did land stay, and a `!! DEFAULT POLICY MISSING` block names the policy and the
+  roles it blocked, with the same sentence in the warning list. The roles are left
+  unchanged rather than created without the floor, which would grant less than the
+  file asks for. An ordinary missing policy still costs only the roles that named
+  it.
+- The note that default policies do not reach unmanaged roles is a notice, not a
+  warning. The CLI exits 1 on any warning, so a config of the shape
+  `stack-acl.example.yaml` documents — a default policy beside a
+  `config.unmanaged: true` role — reported failure on every `--yes` run that had
+  work to do, with the note as the only "warning" and every call successful. It
+  prints as `NONFATAL:` and no longer affects the exit code. Same for a roster
+  address two accounts already answer for: it needs nothing done and is already
+  counted as onboarded, so it was also being counted a second time as
+  uncreatable.
+- The GraphQL-only bucket list is printed on a real apply, not only under
+  `--dry-run`, so a `--yes` CI log records which buckets skipped local AWS
+  bucket-owner setup and which flag or file entry put them in that mode.
+- A bucket that does not get registered is now loud. The failure was a warning
+  among warnings, after which every dependent policy failed, drift detection
+  printed a reset and a reapply, and the run ended on a generic
+  `Done with N warning(s).` — the first cause scrolled past. Apply now prints a
+  `!! BUCKET REGISTRATION FAILED` block naming each bucket and reason, and the
+  command re-reads the catalog afterwards and exits non-zero for any bucket it
+  still does not hold, so an add that returns cleanly without registering is
+  caught too.
+
 ## [0.21.0] - 2026-08-29
 
 ### Changed
