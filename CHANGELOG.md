@@ -51,7 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   granting a ladder rung to the rungs below it would hand its buckets to
   audiences its own `sso.<claim>` selector excludes. Unmanaged roles are out of
   reach — quiltx never edits their IAM — and that combination is reported as a
-  warning naming both.
+  nonfatal notice naming both, not a warning: it explains what a declaration
+  means rather than reporting anything wrong, so it does not affect the exit
+  code (see the `NONFATAL:` entry under Changed).
 - Per-bucket `config.no_preflight` under a new top-level `buckets:` block
   ([#96](https://github.com/quiltdata/quiltx/issues/96)). A bucket owned by
   another account and already prepared owner-side with `quiltx bucket prepare`
@@ -91,10 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account, with no suppress flag, so the first apply would be the irreversible
   one. The flag is named for that side effect, prints every address before
   asking, and refuses more than `--max-created-users` (default 10) in one run. An
-  address is skipped when a role it names is unmanaged and absent from the server,
-  since quiltx never creates one and the registry would reject the account after
-  the mail had gone out; an unmanaged role that does exist is created into,
-  because its selector grants it at first login regardless.
+  address is skipped when a role it names is absent from the server at the moment
+  of creation, since the registry rejects such a creation and quiltx cannot
+  control whether the welcome mail goes out before it fails. Which roles count as
+  present differs by caller on purpose: `--dry-run` has applied nothing, so it
+  includes the roles the file declares, while the real run — which happens after
+  the apply — asks only the refreshed server state, because a managed role whose
+  create failed is still in the desired state. An unmanaged role that does exist
+  is created into, because its selector grants it at first login regardless.
 - An address that looks like an existing account's new one is refused rather than
   onboarded twice. quiltx never calls `quilt3.admin.users.set_email`, so an
   address no account holds is either a new person or somebody whose address

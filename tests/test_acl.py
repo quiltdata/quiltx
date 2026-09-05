@@ -5620,7 +5620,7 @@ roles:
     assert "Roster address 'legacy@example.com'" in warning
     assert "names role(s) LegacyIam" in warning
     assert "the server does not hold" in warning
-    assert "Unmanaged roles are never created" in warning
+    assert "never creates a config.unmanaged role" in warning
 
 
 def test_plan_user_creations_creates_into_an_existing_unmanaged_role() -> None:
@@ -5655,11 +5655,18 @@ roles:
     )
 
 
-def test_plan_user_creations_allows_a_managed_role_this_run_creates() -> None:
-    """A dry run must not report a missing role that the same apply creates."""
+def test_plan_user_creations_allows_a_planned_role_when_asked_to() -> None:
+    """A dry run must not report a missing role that the same apply creates.
+
+    Nothing has been applied at dry-run time, so on a fresh catalog every managed
+    role the file declares is absent from the server; without
+    `include_planned_roles` the dry run would flag every address.
+    """
     config = _roster_config()
 
-    plan = acl.plan_user_creations(config, _empty_current_state())
+    plan = acl.plan_user_creations(
+        config, _empty_current_state(), include_planned_roles=True
+    )
 
     assert plan.warnings == ()
     assert [creation.role for creation in plan.creations] == [
@@ -5667,6 +5674,27 @@ def test_plan_user_creations_allows_a_managed_role_this_run_creates() -> None:
         "Analysts",
         "Analysts",
     ]
+
+
+def test_plan_user_creations_refuses_a_planned_role_the_server_lacks() -> None:
+    """The post-apply default: only the server says which roles landed.
+
+    `plan_user_creations` runs again after `apply_acl`, and a managed role whose
+    create *failed* is still in the desired state. Trusting it there would send a
+    creation naming a role the registry does not have — and the welcome mail is
+    not something quiltx can take back if the registry sends it before failing.
+    So the real run reads availability from the refreshed server state only.
+    """
+    config = _roster_config()
+
+    plan = acl.plan_user_creations(config, _empty_current_state())
+
+    assert plan.creations == ()
+    assert len(plan.warnings) == 3
+    warning = plan.warnings[0]
+    assert "names role(s) leads_public" in warning
+    assert "the server does not hold and nothing in this run will create" in warning
+    assert "its create failed earlier in this run" in warning
 
 
 def test_plan_user_creations_truncates_derived_username_to_64_characters() -> None:
@@ -5986,6 +6014,37 @@ def test_acl_tool_dry_run_names_the_accounts_it_would_create(
     assert "- lead@example.com -> user lead_example_com, roles leads_public" in out
     assert "cannot be recalled" in out
     assert "cannot be created" not in out
+
+
+def test_acl_tool_does_not_create_against_a_role_that_did_not_land(
+    monkeypatch, capsys
+) -> None:
+    """The real run reads role availability from the server, not from the plan.
+
+    `Analysts` is missing from the state the CLI re-reads after applying, which is
+    what a failed role create looks like from here. The desired state still holds
+    it, so a planner trusting that would call `users.create` naming a role the
+    registry does not have. The addresses on the role that *did* land are still
+    onboarded — one broken role must not cost the rest of the roster.
+    """
+    config = _roster_config()
+    pending = _current_state_for_config(config)
+    pending.managed_roles.pop("Analysts")
+    pending.all_roles.pop("Analysts")
+    _, create_calls = _install_roster_run(monkeypatch, config=config, current=pending)
+
+    result = acl_tool.main(["config.yml", "--yes", "--create-and-email-users"])
+
+    captured = capsys.readouterr()
+    created_roles = [args[2] for args, _kwargs in create_calls]
+    assert "Analysts" not in created_roles
+    assert created_roles == ["leads_public"]
+    assert result == 1
+    for address in ("alice@example.com", "bob@example.com"):
+        assert (
+            f"Roster address '{address}' names role(s) Analysts, which the server "
+            "does not hold and nothing in this run will create"
+        ) in captured.err
 
 
 def test_acl_tool_creates_the_handles_the_plan_derived(monkeypatch, capsys) -> None:

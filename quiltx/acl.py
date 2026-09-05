@@ -1147,6 +1147,7 @@ def plan_user_creations(
     current: CurrentState,
     *,
     desired_state: _DesiredAclState | None = None,
+    include_planned_roles: bool = False,
 ) -> UserCreationPlan:
     """Work out which roster addresses have no account yet.
 
@@ -1170,18 +1171,29 @@ def plan_user_creations(
     last-matching role at first login, so the account starts where its own first
     login would have left it instead of somewhere a re-login would move it.
 
-    An address is only created when every role its roster entry names will exist:
-    the registry rejects a creation naming a role it does not hold, and the mail
-    is sent by the creation, so attempting one that cannot succeed is worse than
-    skipping it. The available set is the one ``compute_diff`` uses for ``users:``
-    entries — managed roles this file declares, plus unmanaged roles the server
-    already holds — so a dry run does not report a missing role that the same run
-    creates, while a ``config.unmanaged: true`` role that does not exist is
-    refused, since quiltx never creates one. An *existing* unmanaged role is
-    creatable into on purpose: its selector would grant it at first login anyway,
-    so pre-creating the account changes nothing about who ends up holding it. The
-    permissions it confers are IAM-backed and therefore reported as undetermined
-    by the downgrade analysis.
+    An address is only created when every role its roster entry names exists: the
+    registry rejects a creation naming a role it does not hold, and whether it
+    mails the welcome before failing is not under quiltx's control, so the
+    attempt is not worth making.
+
+    *include_planned_roles* is what "exists" means, and the two callers need
+    different answers. A dry run has applied nothing, so every managed role the
+    file declares may still be absent; counting only server roles there would
+    report a missing role for every address on a fresh catalog. It therefore
+    passes ``True`` and uses the same available set ``compute_diff`` uses for
+    ``users:`` entries: managed roles this file declares plus unmanaged roles the
+    server already holds. **The real run must not.** It is called after
+    ``apply_acl`` with a refreshed state, and a managed role whose create *failed*
+    is still in ``state.role_updates`` — trusting the plan there would send a
+    creation naming a role the registry does not have. So it defaults to ``False``
+    and asks the server, which is the only party that knows what landed.
+
+    A ``config.unmanaged: true`` role that does not exist is refused either way,
+    since quiltx never creates one. An *existing* unmanaged role is creatable into
+    on purpose: its selector would grant it at first login anyway, so pre-creating
+    the account changes nothing about who ends up holding it. The permissions it
+    confers are IAM-backed and therefore reported as undetermined by the
+    downgrade analysis.
 
     ``derive_username`` is deterministic but not injective, so the handle it
     picks is checked twice before anything is created: against the server's
@@ -1193,7 +1205,9 @@ def plan_user_creations(
     """
     state = desired_state or _build_desired_acl_state(config)
     roster = sso_email_roster(config, desired_state=state)
-    available_roles = set(state.role_updates) | set(current.all_roles)
+    available_roles = set(current.all_roles)
+    if include_planned_roles:
+        available_roles |= set(state.role_updates)
     users_by_name = {
         str(user.name): user for user in current.users if getattr(user, "name", None)
     }
@@ -1222,9 +1236,12 @@ def plan_user_creations(
             warnings.append(
                 f"Roster address '{address}' names role(s) "
                 f"{', '.join(unavailable)}, which the server does not hold and "
-                "this file does not create; not created. Unmanaged roles are "
-                "never created by quiltx, so create the role first or drop the "
-                "address."
+                "nothing in this run will create; not created. The registry "
+                "rejects a creation naming a role it does not have, and whether "
+                "it mails the welcome before failing is not under quiltx's "
+                "control, so the attempt is not made. quiltx never creates a "
+                f"{CONFIG_UNMANAGED_KEY} role; a role this file declares being "
+                "missing here means its create failed earlier in this run."
             )
             continue
         # Identity before naming: whether this is a new person is a question

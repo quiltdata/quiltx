@@ -330,8 +330,15 @@ def _print_user_creation_notices(plan: acl_lib.UserCreationPlan) -> None:
 def _print_user_creation_dry_run(
     desired: acl_lib.AclConfig, current: acl_lib.CurrentState
 ) -> None:
-    """Name the accounts a real run would create, and therefore mail."""
-    plan = acl_lib.plan_user_creations(desired, current)
+    """Name the accounts a real run would create, and therefore mail.
+
+    ``include_planned_roles`` because nothing has been applied: a managed role
+    this file declares is going to exist by the time the real run reaches
+    creation, so reporting it as missing here would flag every address on a fresh
+    catalog. The real run in ``_create_and_email_users`` deliberately does not
+    pass it.
+    """
+    plan = acl_lib.plan_user_creations(desired, current, include_planned_roles=True)
     print()
     if plan.creations:
         acl_lib.print_user_creations(plan, dry_run=True)
@@ -365,6 +372,11 @@ def _create_and_email_users(
 
     The addresses are printed before the prompt because the welcome mail is sent
     by the creation itself: after this returns there is nothing left to confirm.
+
+    Role availability is read from *current* alone — no ``include_planned_roles``.
+    A managed role whose create failed is still in the desired state, so trusting
+    the plan here would name a role the registry does not have in a creation it
+    cannot take back.
     """
     plan = acl_lib.plan_user_creations(desired, current)
     warnings = list(plan.warnings)

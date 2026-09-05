@@ -103,7 +103,9 @@ roles:
 ## Users
 
 # Entries reconcile the active role, ordered extra roles, and admin status of
-# accounts that already exist; quiltx never creates or deletes users.
+# accounts that already exist. This block never creates an account: a key that
+# matches nothing is reported and skipped. Onboarding is opt-in and command-line
+# only (`--create-and-email-users`, described below). Nothing ever deletes one.
 #
 # Each key is resolved against the server: an exact username match first, then
 # a unique case-insensitive email match. Both shapes appear in one file because
@@ -133,8 +135,11 @@ roles:
 # to send it; the addresses are printed before the prompt, --dry-run mails
 # nobody, and a run creating more than ten accounts is refused without
 # --max-created-users. sso.hd and sso.groups name no individual, so only
-# sso.email can create anyone. An address is skipped when a role it names is
-# unmanaged and absent from the server, since quiltx never creates one; an
+# sso.email can create anyone. An address is skipped when a role it names is not
+# on the server when the account would be created: --dry-run counts the roles
+# this file declares, but a real run asks the server what actually landed, so a
+# failed role create costs only its own addresses. A config.unmanaged role that
+# does not exist is skipped either way, since quiltx never creates one; an
 # unmanaged role that does exist is created into, with permissions this tool
 # reports as undetermined because they live in IAM.
 

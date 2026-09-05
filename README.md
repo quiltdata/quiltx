@@ -373,7 +373,11 @@ reference the bucket cannot be applied and are reported too:
 ### Users
 
 `users:` reconciles the active role, ordered extra roles, and admin status of
-accounts that already exist. quiltx never creates or deletes users.
+accounts that already exist. The `users:` block itself never creates or deletes
+an account — a key that matches nothing is reported and skipped. Onboarding is a
+separate, opt-in command-line step; see
+[Creating users from sso.email rosters](#creating-users-from-ssoemail-rosters).
+Nothing in quiltx ever deletes a user.
 
 ```yaml
 users:
@@ -476,11 +480,16 @@ direction: `alice@example.com` and `alice@partner.example` get separate handles
 but trigger this warning, because merging two people and splitting one person are
 both worse than asking.
 
-An address is only created when every role it names will exist. Roles this file
-declares are fine, including ones the same run creates. A `config.unmanaged: true`
-role that the server does not hold is not: quiltx never creates one, so the
-registry would reject the account after the mail had already gone out. That
-address is reported and skipped. An unmanaged role that *does* exist is created
+An address is only created when every role it names exists at that moment. The
+registry rejects a creation naming a role it does not have, and whether it mails
+the welcome before failing is not something quiltx controls, so the attempt is
+not made. `--dry-run` counts the roles this file declares, since nothing has been
+applied yet and a fresh catalog would otherwise flag everybody. A real run does
+not: it happens after the apply and asks the server what actually landed, so a
+role whose creation failed takes only its own addresses down with it rather than
+turning into a creation the registry will refuse. A `config.unmanaged: true` role
+the server does not hold is refused either way, because quiltx never creates one.
+That address is reported and skipped. An unmanaged role that *does* exist is created
 into, because its selector would grant it at first login anyway — note that its
 permissions are IAM-backed, so the downgrade analysis reports that account's
 access as undetermined rather than enumerating it.

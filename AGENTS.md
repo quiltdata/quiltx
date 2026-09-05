@@ -217,13 +217,20 @@ address, and an SSO self-registration is only until `USERNAME_MAX_LENGTH` cuts i
 off. Multi-role: last declaration is active, earlier ones are extra roles,
 matching `union_roles: true` and the last-matching first-login pick.
 
-An address is only created when every role it names will exist. The available set
-is the one `compute_diff` uses for `users:` entries — managed roles the file
-declares plus unmanaged roles the server already holds — so a dry run does not
-report a missing role that the same run creates, while a `config.unmanaged: true`
-role absent from the server is refused with a `warnings` entry naming the address
-and the role, since quiltx never creates one and the registry would reject the
-creation after the mail had gone out. An *existing* unmanaged role is creatable
+An address is only created when every role it names exists, and
+`include_planned_roles` is what "exists" means. The dry-run reader passes `True`
+and gets the set `compute_diff` uses for `users:` entries — managed roles the file
+declares plus unmanaged roles the server already holds — because nothing has been
+applied yet, so a fresh catalog would otherwise flag every address.
+`_create_and_email_users` must **not** pass it, and the parameter defaults to
+`False` for that reason: it runs after `apply_acl` against a refreshed state, and
+a managed role whose create *failed* is still in `state.role_updates`, so trusting
+the plan there sends a creation naming a role the registry does not have. The
+default is the strict one because forgetting it costs a spurious dry-run warning,
+while the reverse costs an irreversible creation attempt. A `config.unmanaged:
+true` role absent from the server is refused either way with a `warnings` entry
+naming the address and the role, since quiltx never creates one. An *existing*
+unmanaged role is creatable
 into on purpose: its selector grants it at first login anyway, so pre-creating
 changes nothing about who holds it. The permissions are IAM-backed, so the
 downgrade analysis reports that account's access as undetermined.
