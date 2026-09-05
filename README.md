@@ -480,6 +480,29 @@ direction: `alice@example.com` and `alice@partner.example` get separate handles
 but trigger this warning, because merging two people and splitting one person are
 both worse than asking.
 
+No quiltx command performs that email change yet, and since the refusal is fatal
+you need it to clear the run. Use the `quilt3` admin API directly:
+
+```python
+from quilt3 import admin
+
+admin.users.set_email("robbyqbutler", "robbyqbutler@pm.me")
+```
+
+The first argument is the account's current username, which the warning prints,
+and `quiltx catalog acl` with no config file lists every account's username and
+email. After that the roster address resolves normally and the run is clean.
+Tracked in [#117](https://github.com/quiltdata/quiltx/issues/117), which proposes
+declaring the change in the file instead.
+
+The same signal applies to `users:` keys. A key that resolved when it was written
+and stopped resolving because the account moved is a warning naming the suspected
+account, not a silent skip — unlike a roster address, a `users:` key can also be
+rewritten, so either rekeying the entry or changing the account's email clears it.
+A key naming nobody recognisable stays a nonfatal notice, so a captured config
+carrying an entry for a since-deleted account does not fail a run with nothing to
+fix.
+
 An address is only created when every role it names exists at that moment. The
 registry rejects a creation naming a role it does not have, and whether it mails
 the welcome before failing is not something quiltx controls, so the attempt is

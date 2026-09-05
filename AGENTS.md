@@ -178,6 +178,16 @@ passes, `claimants`, so the outcome does not depend on the order the file is
 written in), and any clash refuses those addresses. No disambiguating suffix: it
 would make somebody's username depend on what else happened to be in the file.
 
+`compute_diff` consults the same helper for an unresolved `users:` key (#119):
+candidates mean a warning naming them via `_quote_user_identities`, none keeps the
+old nonfatal notice, so only the rename case is fatal and a captured entry for a
+deleted account still does not fail a clean run. The `users:` message offers
+rekeying as well as `set_email`, because a key can be rewritten and a roster
+address cannot. Note `_run`'s no-changes early return is `return 1 if
+diff.warnings else 0`: without that, a warning on an otherwise-reconciled config
+printed and then exited 0, which is exactly the #119 case (the pin is the only
+thing naming the person, so there is nothing else to apply).
+
 Existence is not identity. quiltx never calls `quilt3.admin.users.set_email`, so
 an address no account holds may be a person who already has one under their old
 address — which is *why* an operator edits a roster. Neither older guard catches

@@ -800,9 +800,27 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
             diff.warnings.append(f"Configured user {resolved.collision}")
         current_user = resolved.user
         if current_user is None:
-            diff.notices.append(
-                f"Configured user '{name}' does not exist on the server; skipping."
-            )
+            # A key that resolved when it was written and stopped resolving is
+            # not the same event as a key that never named anybody, and only the
+            # first one hides a change the author did not make. The roster path
+            # refuses the identical condition, so this cannot stay a notice while
+            # that one exits non-zero.
+            recognisable = _accounts_sharing_a_local_part(name, current.users)
+            if recognisable:
+                diff.warnings.append(
+                    f"Configured user '{name}' does not exist on the server, but "
+                    f"its local part '{_address_local_part(name)}' is already "
+                    f"used by {_quote_user_identities(recognisable)}; skipping. "
+                    "quiltx never edits an account's email, so this is either "
+                    "that account under a new address or a different person: "
+                    "rekey this entry to the account's current username or "
+                    "email, or set the account's email to this address if it "
+                    "changed."
+                )
+            else:
+                diff.notices.append(
+                    f"Configured user '{name}' does not exist on the server; skipping."
+                )
             continue
         server_name = str(current_user.name)
         first_key = keys_by_server_name.get(server_name)

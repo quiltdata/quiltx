@@ -183,7 +183,13 @@ def _run(stack: stack_lib.Catalog, args: argparse.Namespace) -> int:
         # otherwise reconciled must not short-circuit it: that is exactly the
         # state a first apply leaves behind before anyone has been onboarded.
         if not diff.has_changes() and not args.create_and_email_users:
-            return 0
+            # A warning is something a human has to act on, so it decides the
+            # exit code here too. Without this, the same warning failed a run
+            # that had work to do and passed one that did not — so a config with
+            # nothing to apply and a real problem in it reported success. Only
+            # `warnings`: a `notices` entry explains what a declaration means and
+            # never affects the exit code, on this path or any other.
+            return 1 if diff.warnings else 0
 
         if args.dry_run:
             _print_no_preflight_notice(diff, no_preflight=no_preflight, dry_run=True)

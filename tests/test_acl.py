@@ -3161,6 +3161,69 @@ def test_default_policy_skips_unmanaged_roles_with_a_notice() -> None:
     )
 
 
+_RECONCILED_WITH_USER_KEY = """
+policies:
+  public:
+    sso.hd: [example.com]
+    buckets.read: [bucket-a]
+    config.default_role: true
+roles:
+  Analysts:
+    sso.hd: [example.com]
+    config.policies: [public]
+users:
+  {key}:
+    role: Analysts
+"""
+
+
+def _install_reconciled_user_key_run(monkeypatch, *, key: str) -> None:
+    """A config with nothing to apply whose only content is one `users:` key."""
+    config = acl.parse_acl_config_text(_RECONCILED_WITH_USER_KEY.format(key=key))
+    current = _current_state_for_config(config)
+    _add_user(current, "robbyqbutler", "Analysts", email="robbyqbutler@protonmail.com")
+    _install_acl_tool_stack(monkeypatch, _fake_stack())
+    monkeypatch.setattr(acl_tool.acl_lib, "parse_acl_config", lambda _path: config)
+    monkeypatch.setattr(acl_tool.acl_lib, "fetch_current_state", lambda _stack: current)
+
+
+def test_acl_tool_reconciled_config_exits_one_on_a_warning(monkeypatch, capsys) -> None:
+    """A warning decides the exit code even when there is nothing to apply.
+
+    The no-changes early return used to short-circuit before the exit code was
+    computed, so the same warning failed a run that had work to do and passed one
+    that did not. That is the case #119 is about: the pin is the only thing naming
+    the person, so the config is otherwise reconciled and the run reported
+    success while silently not applying the pin.
+    """
+    _install_reconciled_user_key_run(monkeypatch, key="robbyqbutler@pm.me")
+
+    result = acl_tool.main(["config.yml", "--yes"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "local part 'robbyqbutler' is already used by" in (
+        captured.out + captured.err
+    )
+
+
+def test_acl_tool_reconciled_config_exits_zero_on_a_notice(monkeypatch, capsys) -> None:
+    """The other half of the same invariant: a notice never fails a run.
+
+    A key naming nobody recognisable is still a skip, not a failure — otherwise a
+    captured config carrying an entry for a since-deleted account would fail runs
+    with nothing to fix.
+    """
+    _install_reconciled_user_key_run(monkeypatch, key="nobody@example.com")
+
+    result = acl_tool.main(["config.yml", "--yes"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "does not exist on the server" in captured.out + captured.err
+    assert "already used by" not in captured.out + captured.err
+
+
 def test_acl_tool_default_policy_unmanaged_notice_exits_zero(
     monkeypatch, capsys
 ) -> None:
@@ -4783,6 +4846,35 @@ def test_user_block_matches_email_case_insensitively() -> None:
     diff = acl.compute_diff(desired, current)
 
     assert [update.name for update in diff.users_to_update] == ["alice"]
+
+
+def test_user_block_warns_when_a_key_looks_like_a_changed_address() -> None:
+    """A key that stopped resolving is not a key that never named anybody.
+
+    The roster path refuses this exact condition, so `users:` cannot report it as
+    a nonfatal notice. Unlike a roster address the key *can* be rewritten, so the
+    remedy names both routes: rekey the entry, or set the account's email.
+    """
+    roles = _roles_for_user_tests()
+    current = _current_state_for_config(acl.AclConfig(policies=[], roles=roles))
+    _add_user(current, "robbyqbutler", "Old", email="robbyqbutler@protonmail.com")
+    desired = acl.AclConfig(
+        policies=[],
+        roles=roles,
+        users={"robbyqbutler@pm.me": acl.AclUserConfig(role="New")},
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.users_to_update == []
+    assert diff.notices == []
+    assert len(diff.warnings) == 1
+    warning = diff.warnings[0]
+    assert "Configured user 'robbyqbutler@pm.me' does not exist" in warning
+    assert "local part 'robbyqbutler' is already used by" in warning
+    assert "'robbyqbutler' (email robbyqbutler@protonmail.com)" in warning
+    assert "rekey this entry" in warning
+    assert "set the account's email to this address" in warning
 
 
 def test_user_block_notices_key_matching_neither_name_nor_email() -> None:

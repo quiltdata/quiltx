@@ -101,6 +101,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the apply — asks only the refreshed server state, because a managed role whose
   create failed is still in the desired state. An unmanaged role that does exist
   is created into, because its selector grants it at first login regardless.
+- A `users:` key that stopped resolving because the account's address changed is
+  a warning naming the suspected account, not a silent skip
+  ([#119](https://github.com/quiltdata/quiltx/issues/119)). Same root cause as the
+  roster refusal below, and it had none of the same reporting: the key missed both
+  the username and the email index, so the entry was dropped with a nonfatal
+  notice while the roster path exited non-zero for the identical condition. That
+  matters because a `users:` entry is what pins which of several matched roles is
+  the *active* one under `union_roles: true`; when the pin silently stops applying,
+  the account keeps whatever it last had, which is the drift the pin exists to
+  prevent. The remedy names both routes, since unlike a roster address a `users:`
+  key can be rewritten: rekey the entry, or set the account's email. A key naming
+  nobody recognisable stays a notice, so a captured config with an entry for a
+  since-deleted account still does not fail a run with nothing to fix.
+- A run with nothing to apply now exits non-zero if it reported a warning. The
+  early return for an unchanged config skipped the exit-code decision entirely, so
+  the same warning failed a run that had work to do and passed one that did not —
+  a config whose only problem needed no changes to fix reported success. Notices
+  are unaffected on this path as on every other.
 - An address that looks like an existing account's new one is refused rather than
   onboarded twice. quiltx never calls `quilt3.admin.users.set_email`, so an
   address no account holds is either a new person or somebody whose address
