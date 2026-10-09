@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `bucket prepare` now prepares a bucket that a Quilt catalog already registered,
+  instead of refusing it
+  ([#128](https://github.com/quiltdata/quiltx/issues/128)). The registry wires a
+  bucket to its own `<bucket>-QuiltNotifications-<uuid>` topic, under either a
+  random configuration id or `QuiltBucketNotifications`. `prepare` accepted only
+  its own `quilt-<bucket>-notifications` topic, so it called the registry's topic
+  "unverified" or "overlapping" and told the operator to remove a notification
+  the first catalog depends on. When that topic is the bucket's only object
+  create/delete destination, unfiltered, in the bucket's account and region,
+  `prepare` now grants on it. The notification configuration is left unchanged.
+  The topic gains only the accumulating `QuiltCrossAccountSNSAccess` statement,
+  and the bucket policy gains `QuiltCrossAccountAccess` as usual. Any other
+  overlapping destination is still refused. `bucket revoke` does not yet look
+  for a registry topic, so it withdraws the bucket grant but leaves the topic
+  grant in place.
+
 ## [0.22.0] - 2026-09-01
 
 ### Fixed

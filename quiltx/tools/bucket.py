@@ -1801,7 +1801,7 @@ def _sns_topic_source(bucket_name: str, sns_topic_arn: str) -> str:
     topic_name = sns_topic_arn.rsplit(":", 1)[-1]
     if topic_name == bucket_lib._sns_topic_name(bucket_name):
         return "reuse quiltx SNS topic"
-    if topic_name.startswith(f"{bucket_name}-QuiltNotifications-"):
+    if topic_name.startswith(bucket_lib._registry_topic_prefix(bucket_name)):
         return "reuse Quilt SNS topic"
     return "reuse existing SNS topic"
 

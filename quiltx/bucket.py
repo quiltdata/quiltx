@@ -745,6 +745,67 @@ def build_bucket_notification_configuration(
     return notification_config
 
 
+def _registry_topic_arn(
+    notification_config: Mapping[str, Any],
+    bucket: str,
+    region: str,
+    owning_account: str,
+) -> str | None:
+    """Return the topic a Quilt registry already publishes this bucket's events to.
+
+    A catalog's "Add bucket" adopts or creates ``<bucket>-QuiltNotifications-<uuid>``
+    and wires it for unfiltered ``ObjectCreated:*`` + ``ObjectRemoved:*``, under
+    either the ``QuiltBucketNotifications`` id or a random one. Such a topic is
+    the bucket's working Quilt destination, so preparation for another stack
+    should grant on it rather than demand its removal (issue #128).
+
+    Only the unambiguous case qualifies: exactly one configuration touches
+    object create/delete events, it is an unfiltered SNS topic carrying both
+    wildcards, and the topic lives in the bucket's account and region under the
+    registry's name for this bucket. The name is the provenance check: an
+    arbitrary topic wired the same way is still refused as unverified.
+    """
+    canonical_topic_arn = (
+        f"arn:aws:sns:{region}:{owning_account}:{_sns_topic_name(bucket)}"
+    )
+    overlapping: list[tuple[str, Mapping[str, Any]]] = []
+    for key in (
+        "TopicConfigurations",
+        "QueueConfigurations",
+        "LambdaFunctionConfigurations",
+    ):
+        for config in notification_config.get(key, []):
+            families = _object_event_families(config.get("Events", []))
+            if families & {"ObjectCreated", "ObjectRemoved"}:
+                overlapping.append((key, config))
+    if len(overlapping) != 1:
+        return None
+    key, config = overlapping[0]
+    topic_arn = config.get("TopicArn")
+    if key != "TopicConfigurations" or not topic_arn or config.get("Filter"):
+        return None
+    if topic_arn == canonical_topic_arn:
+        return None
+    if not set(BUCKET_NOTIFICATION_EVENTS) <= set(config.get("Events", [])):
+        return None
+    arn_parts = str(topic_arn).split(":")
+    if (
+        len(arn_parts) != 6
+        or arn_parts[2] != "sns"
+        or arn_parts[3] != region
+        or arn_parts[4] != owning_account
+        or not arn_parts[5].startswith(_registry_topic_prefix(bucket))
+    ):
+        return None
+    return str(topic_arn)
+
+
+def _registry_topic_prefix(bucket: str) -> str:
+    # Mirrors the registry's create_topic(Name=f"{prefix}-QuiltNotifications-{uuid}")
+    # with prefix = bucket.replace(".", "_").
+    return f"{bucket.replace('.', '_')}-QuiltNotifications-"
+
+
 def _sns_policy_if_topic_exists(
     sns_topic_arn: str, sns_client: Any
 ) -> tuple[bool, dict[str, Any] | None]:
@@ -884,6 +945,22 @@ def build_bucket_preparation_plan(
     existing_notifications = get_bucket_notification_configuration(
         bucket, s3_client=s3_client
     )
+    registry_topic_arn = _registry_topic_arn(
+        existing_notifications, bucket, region, owning_account
+    )
+    if registry_topic_arn is not None:
+        return _build_registry_topic_preparation_plan(
+            bucket,
+            region,
+            owning_account,
+            principal_list=principal_list,
+            sns_topic_arn=registry_topic_arn,
+            existing_bucket_policy=existing_bucket_policy,
+            bucket_policy=bucket_policy,
+            existing_notifications=existing_notifications,
+            sns_client=sns_client,
+        )
+
     existing_topic_arn = _existing_notification_topic(existing_notifications)
     canonical_topic_arn = (
         f"arn:aws:sns:{region}:{owning_account}:{_sns_topic_name(bucket)}"
@@ -934,6 +1011,92 @@ def build_bucket_preparation_plan(
         principal_list,
     )
 
+    return _preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        principal_list=principal_list,
+        sns_topic_arn=sns_topic_arn,
+        bucket_policy=bucket_policy,
+        sns_policy=sns_policy,
+        notification_configuration=notification_configuration,
+        existing_bucket_policy=existing_bucket_policy,
+        existing_sns_policy=existing_sns_policy,
+        existing_notifications=existing_notifications,
+        topic_exists=topic_exists,
+    )
+
+
+def _build_registry_topic_preparation_plan(
+    bucket: str,
+    region: str,
+    owning_account: str,
+    *,
+    principal_list: tuple[str, ...],
+    sns_topic_arn: str,
+    existing_bucket_policy: dict[str, Any] | None,
+    bucket_policy: dict[str, Any],
+    existing_notifications: dict[str, Any],
+    sns_client: Any,
+) -> BucketPreparationPlan:
+    """Plan grants on the topic a Quilt registry already wired to *bucket*.
+
+    The notification configuration is left exactly as it is, and the topic
+    policy only gains the accumulating subscribe statement: the registry's own
+    publish statement already lets S3 deliver, and the bucket-marker publish
+    statement belongs to topics quiltx created.
+    """
+    topic_exists, existing_sns_policy = _sns_policy_if_topic_exists(
+        sns_topic_arn, sns_client
+    )
+    if not topic_exists:
+        raise NotificationConflictError(
+            f"bucket {bucket} publishes object events to missing SNS topic "
+            f"{sns_topic_arn}; remove the stale notification or recreate that "
+            "topic before preparing"
+        )
+    policy = dict(
+        existing_sns_policy
+        if existing_sns_policy is not None
+        else _build_default_sns_owner_policy(sns_topic_arn, owning_account)
+    )
+    policy["Statement"] = _merge_policy_statements(
+        policy.get("Statement"),
+        _build_sns_topic_subscribe_policy_statement(sns_topic_arn, principal_list),
+    )
+    return _preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        principal_list=principal_list,
+        sns_topic_arn=sns_topic_arn,
+        bucket_policy=bucket_policy,
+        sns_policy=policy,
+        notification_configuration=_copy_notification_configuration(
+            existing_notifications
+        ),
+        existing_bucket_policy=existing_bucket_policy,
+        existing_sns_policy=existing_sns_policy,
+        existing_notifications=existing_notifications,
+        topic_exists=topic_exists,
+    )
+
+
+def _preparation_plan(
+    bucket: str,
+    region: str,
+    owning_account: str,
+    *,
+    principal_list: tuple[str, ...],
+    sns_topic_arn: str,
+    bucket_policy: dict[str, Any],
+    sns_policy: dict[str, Any],
+    notification_configuration: dict[str, Any],
+    existing_bucket_policy: dict[str, Any] | None,
+    existing_sns_policy: dict[str, Any] | None,
+    existing_notifications: dict[str, Any],
+    topic_exists: bool,
+) -> BucketPreparationPlan:
     return BucketPreparationPlan(
         bucket=bucket,
         region=region,
@@ -1012,13 +1175,18 @@ def _assert_bucket_preparation_is_current(
     if changed:
         _raise_preparation_drift(*changed)
 
-    _validate_retained_notification_destinations(
-        current_notifications,
-        plan.sns_topic_arn,
-        sns_client=sns_client,
-        sqs_client=sqs_client,
-        lambda_client=lambda_client,
-    )
+    # Retained destinations matter only to the notification write: S3 rejects a
+    # configuration naming a missing queue or topic. A plan that leaves
+    # notifications alone (e.g. one adopting the registry's topic) must not fail
+    # on an unrelated destination it will never rewrite.
+    if plan.notification_configuration_changed:
+        _validate_retained_notification_destinations(
+            current_notifications,
+            plan.sns_topic_arn,
+            sns_client=sns_client,
+            sqs_client=sqs_client,
+            lambda_client=lambda_client,
+        )
 
 
 def apply_bucket_preparation(
