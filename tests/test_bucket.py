@@ -704,6 +704,277 @@ def test_prepare_plan_rejects_unverified_quilt_notification_topic() -> None:
     sns_stubber.deactivate()
 
 
+# The registry names topics after the bucket with dots replaced by underscores.
+_REGISTRY_TOPIC = (
+    "arn:aws:sns:us-east-1:111122223333:"
+    "my_bucket-QuiltNotifications-0b31b694-dbc3-4256-8d7a-6661960ac1fc"
+)
+
+
+def _registry_topic_policy(topic_arn: str = _REGISTRY_TOPIC) -> dict[str, Any]:
+    # What the registry's subscribe_to_bucket_notifications writes on create.
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "AllowBucketToPushNotificationEffect",
+                "Effect": "Allow",
+                "Principal": {"Service": "s3.amazonaws.com"},
+                "Action": "sns:Publish",
+                "Resource": topic_arn,
+                "Condition": {"ArnLike": {"aws:SourceArn": "arn:aws:s3:*:*:my.bucket"}},
+            }
+        ],
+    }
+
+
+def _registry_notifications(
+    config_id: str, topic_arn: str = _REGISTRY_TOPIC, **extra: Any
+) -> dict[str, Any]:
+    return {
+        "TopicConfigurations": [
+            {
+                "Id": config_id,
+                "TopicArn": topic_arn,
+                "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+                **extra,
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "config_id",
+    [
+        # A topic the registry created itself gets a random configuration id ...
+        "ZDVkYThjNzQtY2E4OS00NmQ2LTllZjktYTdkNDZmOTQyMTJj",
+        # ... and one an earlier tool wired may carry quiltx's own id.
+        "QuiltBucketNotifications",
+    ],
+)
+def test_prepare_adopts_registry_topic_and_leaves_notifications_alone(
+    config_id: str,
+) -> None:
+    bucket = "my.bucket"
+    region = "us-east-1"
+    owning_account = "111122223333"
+    principal = "arn:aws:iam::123456789012:root"
+    other_stack = "arn:aws:iam::444455556666:role/QuiltDataAccessRole"
+    bucket_policy_0 = {
+        "Version": "2012-10-17",
+        "Statement": [{"Sid": "PublicRead", "Effect": "Allow"}],
+    }
+    # The topic already grants a first stack; the second must accumulate.
+    sns_policy_0 = _registry_topic_policy()
+    sns_policy_0["Statement"].append(
+        {
+            "Sid": bucket_lib.SNS_SUBSCRIBE_POLICY_SID,
+            "Effect": "Allow",
+            "Principal": {"AWS": other_stack},
+            "Action": ["sns:GetTopicAttributes", "sns:Subscribe"],
+            "Resource": _REGISTRY_TOPIC,
+        }
+    )
+    notifications = _registry_notifications(config_id)
+
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+
+    def queue_baseline() -> None:
+        s3_stubber.add_response(
+            "get_bucket_policy",
+            {"Policy": json.dumps(bucket_policy_0)},
+            {"Bucket": bucket},
+        )
+        s3_stubber.add_response(
+            "get_bucket_notification_configuration", notifications, {"Bucket": bucket}
+        )
+        sns_stubber.add_response(
+            "get_topic_attributes",
+            {"Attributes": {"Policy": json.dumps(sns_policy_0)}},
+            {"TopicArn": _REGISTRY_TOPIC},
+        )
+
+    queue_baseline()  # plan
+    queue_baseline()  # apply: baseline recheck before the first write
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        owning_account,
+        principals=[principal],
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+
+    assert plan.sns_topic_arn == _REGISTRY_TOPIC
+    assert plan.topic_exists is True
+    assert plan.notification_configuration_changed is False
+    assert plan.notification_configuration == notifications
+    assert plan.sns_policy["Statement"][0] == sns_policy_0["Statement"][0]
+    # Only the subscribe grant is added; the bucket-marker publish statement
+    # belongs to topics quiltx created.
+    assert (
+        bucket_lib._find_policy_statement(
+            plan.sns_policy, bucket_lib.SNS_PUBLISH_POLICY_SID
+        )
+        is None
+    )
+    subscribe = bucket_lib._find_policy_statement(
+        plan.sns_policy, bucket_lib.SNS_SUBSCRIBE_POLICY_SID
+    )
+    assert subscribe is not None
+    assert sorted(subscribe["Principal"]["AWS"]) == sorted([other_stack, principal])
+    grant = bucket_lib._find_policy_statement(
+        plan.bucket_policy, bucket_lib.QUILT_POLICY_SID
+    )
+    assert grant is not None
+    assert grant["Principal"] == {"AWS": principal}
+    assert bucket_lib._find_policy_statement(plan.bucket_policy, "PublicRead")
+
+    # Apply writes both grants and never the notification configuration.
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {"Policy": json.dumps(sns_policy_0)}},
+        {"TopicArn": _REGISTRY_TOPIC},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": _REGISTRY_TOPIC,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(plan.sns_policy),
+        },
+    )
+    s3_stubber.add_response(
+        "get_bucket_policy", {"Policy": json.dumps(bucket_policy_0)}, {"Bucket": bucket}
+    )
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {"Bucket": bucket, "Policy": json.dumps(plan.bucket_policy)},
+    )
+    bucket_lib.apply_bucket_preparation(
+        plan, s3_client=s3_client, sns_client=sns_client
+    )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+@pytest.mark.parametrize(
+    ("notifications", "match"),
+    [
+        pytest.param(
+            _registry_notifications("r", Filter={"Key": {"FilterRules": []}}),
+            "overlaps",
+            id="filtered",
+        ),
+        pytest.param(
+            _registry_notifications(
+                "r",
+                topic_arn=_REGISTRY_TOPIC.replace("111122223333", "999988887777"),
+            ),
+            "overlaps",
+            id="other-account",
+        ),
+        pytest.param(
+            {
+                **_registry_notifications("r"),
+                "QueueConfigurations": [
+                    {
+                        "Id": "audit",
+                        "QueueArn": "arn:aws:sqs:us-east-1:111122223333:audit",
+                        "Events": ["s3:ObjectRemoved:*"],
+                    }
+                ],
+            },
+            "overlaps",
+            id="second-destination",
+        ),
+    ],
+)
+def test_prepare_refuses_registry_topic_when_not_unambiguous(
+    notifications: dict[str, Any], match: str
+) -> None:
+    s3_client = _client("s3", region_name="us-east-1")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        expected_params={"Bucket": "my.bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        notifications,
+        {"Bucket": "my.bucket"},
+    )
+    s3_stubber.activate()
+    sns_client = _client("sns", region_name="us-east-1")
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.NotificationConflictError, match=match):
+        bucket_lib.build_bucket_preparation_plan(
+            "my.bucket",
+            "us-east-1",
+            "111122223333",
+            control_account_id="123456789012",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
+def test_prepare_refuses_missing_registry_topic() -> None:
+    s3_client = _client("s3", region_name="us-east-1")
+    s3_stubber = Stubber(s3_client)
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        expected_params={"Bucket": "my.bucket"},
+    )
+    s3_stubber.add_response(
+        "get_bucket_notification_configuration",
+        _registry_notifications("r"),
+        {"Bucket": "my.bucket"},
+    )
+    s3_stubber.activate()
+    sns_client = _client("sns", region_name="us-east-1")
+    sns_stubber = Stubber(sns_client)
+    sns_stubber.add_client_error(
+        "get_topic_attributes",
+        service_error_code="NotFound",
+        expected_params={"TopicArn": _REGISTRY_TOPIC},
+    )
+    sns_stubber.activate()
+
+    with pytest.raises(bucket_lib.NotificationConflictError, match="missing SNS topic"):
+        bucket_lib.build_bucket_preparation_plan(
+            "my.bucket",
+            "us-east-1",
+            "111122223333",
+            control_account_id="123456789012",
+            s3_client=s3_client,
+            sns_client=sns_client,
+        )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
 def test_prepare_plan_rejects_stale_quilt_topic_before_writes() -> None:
     stale_topic = "arn:aws:sns:us-west-2:111122223333:quilt-bucket-notifications"
     s3_client = _client("s3", region_name="us-west-2")
