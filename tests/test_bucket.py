@@ -869,6 +869,92 @@ def test_prepare_adopts_registry_topic_and_leaves_notifications_alone(
     sns_stubber.deactivate()
 
 
+def test_prepare_registry_topic_ignores_unrelated_destinations_it_never_writes() -> (
+    None
+):
+    """An unrelated SQS notification neither blocks adoption nor needs a client.
+
+    ``add_bucket`` applies without an SQS or Lambda client, and a plan that
+    leaves notifications untouched has no reason to validate their destinations.
+    """
+    bucket = "my.bucket"
+    region = "us-east-1"
+    notifications = _registry_notifications("r")
+    notifications["QueueConfigurations"] = [
+        {
+            "Id": "restores",
+            "QueueArn": "arn:aws:sqs:us-east-1:111122223333:deleted-queue",
+            "Events": ["s3:ObjectRestore:Completed"],
+        }
+    ]
+
+    s3_client = _client("s3", region_name=region)
+    s3_stubber = Stubber(s3_client)
+    sns_client = _client("sns", region_name=region)
+    sns_stubber = Stubber(sns_client)
+    for _ in range(2):  # plan, then the apply baseline recheck
+        s3_stubber.add_client_error(
+            "get_bucket_policy",
+            service_error_code="NoSuchBucketPolicy",
+            expected_params={"Bucket": bucket},
+        )
+        s3_stubber.add_response(
+            "get_bucket_notification_configuration", notifications, {"Bucket": bucket}
+        )
+        sns_stubber.add_response(
+            "get_topic_attributes",
+            {"Attributes": {"Policy": json.dumps(_registry_topic_policy())}},
+            {"TopicArn": _REGISTRY_TOPIC},
+        )
+    s3_stubber.activate()
+    sns_stubber.activate()
+
+    plan = bucket_lib.build_bucket_preparation_plan(
+        bucket,
+        region,
+        "111122223333",
+        control_account_id="123456789012",
+        s3_client=s3_client,
+        sns_client=sns_client,
+    )
+    assert plan.sns_topic_arn == _REGISTRY_TOPIC
+    assert plan.notification_configuration_changed is False
+
+    sns_stubber.add_response(
+        "get_topic_attributes",
+        {"Attributes": {"Policy": json.dumps(_registry_topic_policy())}},
+        {"TopicArn": _REGISTRY_TOPIC},
+    )
+    sns_stubber.add_response(
+        "set_topic_attributes",
+        {},
+        {
+            "TopicArn": _REGISTRY_TOPIC,
+            "AttributeName": "Policy",
+            "AttributeValue": json.dumps(plan.sns_policy),
+        },
+    )
+    s3_stubber.add_client_error(
+        "get_bucket_policy",
+        service_error_code="NoSuchBucketPolicy",
+        expected_params={"Bucket": bucket},
+    )
+    s3_stubber.add_response(
+        "put_bucket_policy",
+        {},
+        {"Bucket": bucket, "Policy": json.dumps(plan.bucket_policy)},
+    )
+    # No sqs_client: validating the queue would raise ValueError.
+    bucket_lib.apply_bucket_preparation(
+        plan, s3_client=s3_client, sns_client=sns_client
+    )
+
+    s3_stubber.assert_no_pending_responses()
+    sns_stubber.assert_no_pending_responses()
+    s3_stubber.deactivate()
+    sns_stubber.deactivate()
+
+
 @pytest.mark.parametrize(
     ("notifications", "match"),
     [

@@ -1175,13 +1175,18 @@ def _assert_bucket_preparation_is_current(
     if changed:
         _raise_preparation_drift(*changed)
 
-    _validate_retained_notification_destinations(
-        current_notifications,
-        plan.sns_topic_arn,
-        sns_client=sns_client,
-        sqs_client=sqs_client,
-        lambda_client=lambda_client,
-    )
+    # Retained destinations matter only to the notification write: S3 rejects a
+    # configuration naming a missing queue or topic. A plan that leaves
+    # notifications alone (e.g. one adopting the registry's topic) must not fail
+    # on an unrelated destination it will never rewrite.
+    if plan.notification_configuration_changed:
+        _validate_retained_notification_destinations(
+            current_notifications,
+            plan.sns_topic_arn,
+            sns_client=sns_client,
+            sqs_client=sqs_client,
+            lambda_client=lambda_client,
+        )
 
 
 def apply_bucket_preparation(
