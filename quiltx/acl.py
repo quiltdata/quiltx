@@ -551,6 +551,26 @@ def parse_acl_config_text(text: str) -> AclConfig:
                     f"{CONFIG_UNMANAGED_KEY} is true: an unmanaged role's "
                     "permissions live outside the registry and are never modified"
                 )
+            # Fixed per code review (quilt-specs changes/access-code-signup#quiltx-work):
+            # apply_acl has no path that applies these to an unmanaged role, so parsing
+            # them silently would accept a config that can never take effect. Unlike the
+            # IAM-backed fields above, these have no permanent reason to stay forbidden --
+            # the gap is apply_acl's registry-call wiring (named elsewhere in this change),
+            # not an architectural one -- so this is a parse-time error rather than a
+            # permanent exclusion in `forbidden`.
+            # default_bucket excluded: it's a plain registry-side column with no IAM
+            # involvement and no apply-side gap specific to unmanaged roles, unlike the
+            # signup.*/access_code fields this check actually targets.
+            dead_signup_keys = sorted(
+                (ROLE_SIGNUP_KEYS - {CONFIG_DEFAULT_BUCKET_KEY}) & set(value)
+            )
+            if dead_signup_keys:
+                raise ValueError(
+                    f"roles.{name} cannot set {', '.join(dead_signup_keys)} when "
+                    f"{CONFIG_UNMANAGED_KEY} is true: nothing yet applies these fields "
+                    "to an unmanaged role, so this would parse as valid but never take "
+                    "effect"
+                )
         policy_refs = _coerce_string_list(
             value.get(CONFIG_POLICIES_KEY, []), f"roles.{name}.{CONFIG_POLICIES_KEY}"
         )
@@ -4096,13 +4116,22 @@ def _parse_role_signup_fields(
                 "role name (no alphanumeric characters); set it explicitly"
             )
 
+    # Fixed per code review: a blank or whitespace-only title/description round-tripped
+    # unchanged into the model (unlike default_bucket/access_code/signup_page, which
+    # reject or strip it). Both fields are optional, so a blank value is normalized to
+    # None -- the same as never setting the key -- rather than treated as a distinct
+    # error case the way a malformed access_code is.
     signup_title = value.get(SIGNUP_TITLE_KEY)
     if signup_title is not None and not isinstance(signup_title, str):
         raise ValueError(f"roles.{role_name}.{SIGNUP_TITLE_KEY} must be a string")
+    signup_title = signup_title.strip() or None if signup_title is not None else None
 
     signup_description = value.get(SIGNUP_DESCRIPTION_KEY)
     if signup_description is not None and not isinstance(signup_description, str):
         raise ValueError(f"roles.{role_name}.{SIGNUP_DESCRIPTION_KEY} must be a string")
+    signup_description = (
+        signup_description.strip() or None if signup_description is not None else None
+    )
 
     return default_bucket, access_code, signup_page, signup_title, signup_description
 
@@ -4113,8 +4142,11 @@ def _validate_access_codes_unique(roles: dict[str, AclStaticRole]) -> None:
     two roles may share a code value as long as their pages differ. Pages
     themselves must be unique across roles, since the URL segment is what a
     visitor actually reaches."""
+    # Declaration order, not alphabetical (fixed per code review): `roles` preserves
+    # YAML order, and the error below names whichever role is seen second as the
+    # duplicate -- sorting would let a later-declared role claim to be the original.
     pages_seen: dict[str, str] = {}
-    for name, role in sorted(roles.items()):
+    for name, role in roles.items():
         if role.signup_page is None:
             continue
         existing = pages_seen.get(role.signup_page)

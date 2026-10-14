@@ -510,6 +510,88 @@ roles:
     assert config.roles["RoleD"].access_code == "SAMECODE"
 
 
+# Fixes from the code-review pass on quilt-specs changes/access-code-signup#quiltx-work.
+
+
+def test_parse_acl_config_rejects_signup_fields_on_unmanaged_role(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  SomeUnmanagedRole:
+    config.unmanaged: true
+    config.access_code: CODE_X
+    signup.page: deadpage
+""")
+
+    with pytest.raises(ValueError, match="never take effect"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_allows_default_bucket_on_unmanaged_role(
+    tmp_path: Path,
+) -> None:
+    """default_bucket is a plain registry-side field with no IAM involvement, so it
+    stays allowed on an unmanaged role -- only the signup.* fields (dead until
+    apply_acl's registry-call wiring exists) are rejected there."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  SomeUnmanagedRole:
+    config.unmanaged: true
+    config.default_bucket: some-bucket
+""")
+
+    config = acl.parse_acl_config(config_path)
+
+    assert config.roles["SomeUnmanagedRole"].default_bucket == "some-bucket"
+
+
+def test_parse_acl_config_normalizes_blank_signup_title_and_description(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  RoleE:
+    config.access_code: CODE_E
+    signup.page: pagee
+    signup.title: "   "
+    signup.description: ""
+""")
+
+    config = acl.parse_acl_config(config_path)
+    role = config.roles["RoleE"]
+
+    assert role.signup_title is None
+    assert role.signup_description is None
+
+
+def test_parse_acl_config_duplicate_page_error_names_the_first_declared_role(
+    tmp_path: Path,
+) -> None:
+    """Role declaration order, not alphabetical: ZRole is declared before ARole, so
+    the error must name ZRole as the original and ARole as the duplicate."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  ZRole:
+    config.access_code: CODE_Z
+    signup.page: samepage
+  ARole:
+    config.access_code: CODE_A
+    signup.page: samepage
+""")
+
+    with pytest.raises(ValueError, match="roles.ARole.*already used by role 'ZRole'"):
+        acl.parse_acl_config(config_path)
+
+
 def test_policy_role_alias_is_normalized_and_propagated(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
