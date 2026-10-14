@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A role can declare `config.default_bucket`, `signup.access_code`, `signup.page`, `signup.title` and `signup.description` in the ACL file (quilt-specs `changes/access-code-signup`). `catalog acl` reconciles them on managed roles, writes them (and nothing else) to unmanaged roles that declare them, and captures re-emit them. Applying them needs a registry and quilt3 that expose role signup pages; a file that never uses them works with older ones ([#130](https://github.com/quiltdata/quiltx/pull/130))
+- A role can declare `config.default_bucket`, `signup.access_code`, `signup.page`, `signup.title` and `signup.description` in the ACL file (quilt-specs `changes/access-code-signup`). `catalog acl` reconciles them on managed roles, writes them (and nothing else) to unmanaged roles that declare them, and captures re-emit them. `signup.page` is rejected at parse time, matching the registry, if it is empty, made only of dots, or not a single URL path segment. Applying them needs a registry and quilt3 that expose role signup pages; a file that never uses them works with older ones ([#130](https://github.com/quiltdata/quiltx/pull/130))
 
 ### Fixed
 
