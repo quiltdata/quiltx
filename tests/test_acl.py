@@ -491,6 +491,46 @@ roles:
         acl.parse_acl_config(config_path)
 
 
+def test_parse_acl_config_rejects_oversized_signup_fields(tmp_path: Path) -> None:
+    """access_code/title cap at 200 chars, description at 2000 -- matching the registry's
+    VARCHAR(200) columns (and, for the unbounded TEXT description, a sane bound against a
+    value that renders on the public, unauthenticated /signup/<page> page)."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text(f"""
+policies: {{}}
+roles:
+  BigCode:
+    signup.access_code: "{"x" * 201}"
+    signup.page: bigcode
+""")
+    with pytest.raises(ValueError, match="access_code must be 200 characters or fewer"):
+        acl.parse_acl_config(config_path)
+
+    config_path.write_text(f"""
+policies: {{}}
+roles:
+  BigTitle:
+    signup.access_code: CODE
+    signup.page: bigtitle
+    signup.title: "{"x" * 201}"
+""")
+    with pytest.raises(ValueError, match="title must be 200 characters or fewer"):
+        acl.parse_acl_config(config_path)
+
+    config_path.write_text(f"""
+policies: {{}}
+roles:
+  BigDescription:
+    signup.access_code: CODE
+    signup.page: bigdescription
+    signup.description: "{"x" * 2001}"
+""")
+    with pytest.raises(
+        ValueError, match="description must be 2000 characters or fewer"
+    ):
+        acl.parse_acl_config(config_path)
+
+
 def test_parse_acl_config_allows_shared_access_code_on_different_pages(
     tmp_path: Path,
 ) -> None:

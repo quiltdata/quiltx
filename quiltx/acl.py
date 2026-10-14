@@ -4289,6 +4289,11 @@ def _parse_role_signup_fields(
             f"roles.{role_name}.{SIGNUP_ACCESS_CODE_KEY} must be a non-empty string"
         )
     access_code = access_code.strip()
+    if len(access_code) > 200:
+        raise ValueError(
+            f"roles.{role_name}.{SIGNUP_ACCESS_CODE_KEY} must be 200 characters or fewer "
+            "(the registry's access_code column is VARCHAR(200))"
+        )
 
     signup_page = value.get(SIGNUP_PAGE_KEY)
     if signup_page is not None:
@@ -4321,6 +4326,11 @@ def _parse_role_signup_fields(
     if signup_title is not None and not isinstance(signup_title, str):
         raise ValueError(f"roles.{role_name}.{SIGNUP_TITLE_KEY} must be a string")
     signup_title = signup_title.strip() or None if signup_title is not None else None
+    if signup_title is not None and len(signup_title) > 200:
+        raise ValueError(
+            f"roles.{role_name}.{SIGNUP_TITLE_KEY} must be 200 characters or fewer "
+            "(the registry's title column is VARCHAR(200))"
+        )
 
     signup_description = value.get(SIGNUP_DESCRIPTION_KEY)
     if signup_description is not None and not isinstance(signup_description, str):
@@ -4328,6 +4338,14 @@ def _parse_role_signup_fields(
     signup_description = (
         signup_description.strip() or None if signup_description is not None else None
     )
+    # The registry's description column is unbounded TEXT; capped here anyway since this
+    # renders on the public, unauthenticated /signup/<page> page -- an admin typo or a
+    # templated value ballooning in from an external config source shouldn't silently
+    # produce an oversized public page with no validation catching it.
+    if signup_description is not None and len(signup_description) > 2000:
+        raise ValueError(
+            f"roles.{role_name}.{SIGNUP_DESCRIPTION_KEY} must be 2000 characters or fewer"
+        )
 
     return default_bucket, access_code, signup_page, signup_title, signup_description
 
