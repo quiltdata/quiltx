@@ -403,7 +403,7 @@ policies: {}
 roles:
   BenchTalkRole:
     config.default_bucket: quilt-benchtalk
-    config.access_code: BENCHTALK26
+    signup.access_code: BENCHTALK26
     signup.page: benchtalk
     signup.title: Can you do real science from your phone?
     signup.description: Five minutes of your attention.
@@ -427,7 +427,7 @@ def test_parse_acl_config_defaults_signup_page_to_kebab_role_name(
 policies: {}
 roles:
   VirRole:
-    config.access_code: VIR-PILOT-2026
+    signup.access_code: VIR-PILOT-2026
 """)
 
     config = acl.parse_acl_config(config_path)
@@ -465,7 +465,7 @@ roles:
     signup.title: Should not be allowed
 """)
 
-    with pytest.raises(ValueError, match="without config.access_code"):
+    with pytest.raises(ValueError, match="without signup.access_code"):
         acl.parse_acl_config(config_path)
 
 
@@ -475,10 +475,10 @@ def test_parse_acl_config_rejects_duplicate_signup_page(tmp_path: Path) -> None:
 policies: {}
 roles:
   RoleA:
-    config.access_code: CODE_A
+    signup.access_code: CODE_A
     signup.page: samepage
   RoleB:
-    config.access_code: CODE_B
+    signup.access_code: CODE_B
     signup.page: samepage
 """)
 
@@ -497,10 +497,10 @@ def test_parse_acl_config_allows_shared_access_code_on_different_pages(
 policies: {}
 roles:
   RoleC:
-    config.access_code: SAMECODE
+    signup.access_code: SAMECODE
     signup.page: pagec
   RoleD:
-    config.access_code: SAMECODE
+    signup.access_code: SAMECODE
     signup.page: paged
 """)
 
@@ -522,7 +522,7 @@ policies: {}
 roles:
   SomeUnmanagedRole:
     config.unmanaged: true
-    config.access_code: CODE_X
+    signup.access_code: CODE_X
     signup.page: deadpage
 """)
 
@@ -558,7 +558,7 @@ def test_parse_acl_config_normalizes_blank_signup_title_and_description(
 policies: {}
 roles:
   RoleE:
-    config.access_code: CODE_E
+    signup.access_code: CODE_E
     signup.page: pagee
     signup.title: "   "
     signup.description: ""
@@ -581,10 +581,10 @@ def test_parse_acl_config_duplicate_page_error_names_the_first_declared_role(
 policies: {}
 roles:
   ZRole:
-    config.access_code: CODE_Z
+    signup.access_code: CODE_Z
     signup.page: samepage
   ARole:
-    config.access_code: CODE_A
+    signup.access_code: CODE_A
     signup.page: samepage
 """)
 

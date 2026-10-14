@@ -27,13 +27,13 @@ ACL_ENTRY_KEYS = {
 # roles-only: default_bucket has nothing to do with signup; access_code and
 # signup.* turn on a role's own /signup/<page> landing page.
 CONFIG_DEFAULT_BUCKET_KEY = "config.default_bucket"
-CONFIG_ACCESS_CODE_KEY = "config.access_code"
+SIGNUP_ACCESS_CODE_KEY = "signup.access_code"
 SIGNUP_PAGE_KEY = "signup.page"
 SIGNUP_TITLE_KEY = "signup.title"
 SIGNUP_DESCRIPTION_KEY = "signup.description"
 ROLE_SIGNUP_KEYS = {
     CONFIG_DEFAULT_BUCKET_KEY,
-    CONFIG_ACCESS_CODE_KEY,
+    SIGNUP_ACCESS_CODE_KEY,
     SIGNUP_PAGE_KEY,
     SIGNUP_TITLE_KEY,
     SIGNUP_DESCRIPTION_KEY,
@@ -4055,7 +4055,7 @@ def _kebab_case(name: str) -> str:
 
     quilt-specs changes/access-code-signup#quiltx-work: ``signup.page``
     defaults to the role name, lowercased and kebab-cased, when a role
-    declares ``config.access_code`` but no explicit page.
+    declares ``signup.access_code`` but no explicit page.
     """
     folded = re.sub(r"[^a-z0-9]+", "-", name.strip().lower())
     return folded.strip("-")
@@ -4068,7 +4068,7 @@ def _parse_role_signup_fields(
 
     quilt-specs changes/access-code-signup#quiltx-work. ``config.default_bucket``
     is general-purpose and valid with or without an access code. The
-    ``signup.*`` keys require ``config.access_code`` to be set on the same
+    ``signup.*`` keys require ``signup.access_code`` to be set on the same
     role; any of them present without it is a parse error, matching the ACL
     file's declarative style (nothing is implicitly half-configured).
 
@@ -4084,20 +4084,20 @@ def _parse_role_signup_fields(
             )
         default_bucket = default_bucket.strip()
 
-    access_code = value.get(CONFIG_ACCESS_CODE_KEY)
+    access_code = value.get(SIGNUP_ACCESS_CODE_KEY)
     signup_keys_present = ROLE_SIGNUP_KEYS & set(value) - {CONFIG_DEFAULT_BUCKET_KEY}
     if access_code is None:
         if signup_keys_present:
             raise ValueError(
                 f"roles.{role_name} sets {', '.join(sorted(signup_keys_present))} "
-                f"without {CONFIG_ACCESS_CODE_KEY}: any signup.* key requires an "
+                f"without {SIGNUP_ACCESS_CODE_KEY}: any signup.* key requires an "
                 "access code to turn the page on"
             )
         return default_bucket, None, None, None, None
 
     if not isinstance(access_code, str) or not access_code.strip():
         raise ValueError(
-            f"roles.{role_name}.{CONFIG_ACCESS_CODE_KEY} must be a non-empty string"
+            f"roles.{role_name}.{SIGNUP_ACCESS_CODE_KEY} must be a non-empty string"
         )
     access_code = access_code.strip()
 
