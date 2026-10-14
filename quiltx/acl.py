@@ -31,7 +31,7 @@ SIGNUP_ACCESS_CODE_KEY = "signup.access_code"
 SIGNUP_PAGE_KEY = "signup.page"
 SIGNUP_TITLE_KEY = "signup.title"
 SIGNUP_DESCRIPTION_KEY = "signup.description"
-SIGNUP_PAGE_RE = re.compile(r"^[A-Za-z0-9._~-]{1,200}$")
+SIGNUP_PAGE_RE = re.compile(r"^(?!\.{1,2}$)[A-Za-z0-9._~-]{1,200}$")
 ROLE_SIGNUP_KEYS = {
     CONFIG_DEFAULT_BUCKET_KEY,
     SIGNUP_ACCESS_CODE_KEY,
