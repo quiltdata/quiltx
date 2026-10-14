@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +113,20 @@ class AclPolicy:
 
 
 @dataclass(frozen=True)
+class AclRoleSignup:
+    """A role's access-code signup page (quilt-specs changes/access-code-signup).
+
+    The registry stores it one-to-one with the role; quiltx reconciles it as
+    part of the role, next to ``config.default_bucket``.
+    """
+
+    page: str
+    access_code: str
+    title: str | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True)
 class AclStaticRole:
     name: str
     sso: dict[str, list[str]] = field(default_factory=dict)
@@ -144,6 +158,18 @@ class AclStaticRole:
     when ``access_code`` is set and this is omitted."""
     signup_title: str | None = None
     signup_description: str | None = None
+
+    @property
+    def signup(self) -> AclRoleSignup | None:
+        """The role's signup page, or ``None`` when it declares no access code."""
+        if self.access_code is None or self.signup_page is None:
+            return None
+        return AclRoleSignup(
+            page=self.signup_page,
+            access_code=self.access_code,
+            title=self.signup_title,
+            description=self.signup_description,
+        )
 
 
 @dataclass(frozen=True)
@@ -203,6 +229,8 @@ class PolicyUpdate:
 class RoleUpdate:
     name: str
     policy_titles: list[str]
+    default_bucket: str | None = None
+    signup: AclRoleSignup | None = None
 
 
 @dataclass(frozen=True)
@@ -270,6 +298,10 @@ class AclDiff:
     policies_to_delete: list[str] = field(default_factory=list)
     roles_to_create: list[RoleUpdate] = field(default_factory=list)
     roles_to_update: list[RoleUpdate] = field(default_factory=list)
+    unmanaged_roles_to_update: list[RoleUpdate] = field(default_factory=list)
+    """Unmanaged roles whose declared ``config.default_bucket`` / ``signup.*``
+    differ from the server. Only those two fields are ever written to an
+    unmanaged role; its name, ARN and IAM permissions stay untouched."""
     roles_to_delete: list[str] = field(default_factory=list)
     sso_config_text: str | None = None
     sso_is_create: bool = False
@@ -314,6 +346,7 @@ class AclDiff:
                 self.policies_to_delete,
                 self.roles_to_create,
                 self.roles_to_update,
+                self.unmanaged_roles_to_update,
                 self.roles_to_delete,
                 self.users_to_update,
                 self.sso_needs_update,
@@ -377,6 +410,9 @@ class _DesiredAclState:
     apply in which every call succeeded.
     """
     unmanaged_role_names: frozenset[str] = frozenset()
+    unmanaged_role_updates: dict[str, RoleUpdate] = field(default_factory=dict)
+    """Unmanaged roles that declare ``config.default_bucket`` or ``signup.*``;
+    the only fields quiltx reconciles on them."""
 
     def all_role_names(self) -> set[str]:
         """Every role the config addresses, managed or reference-only."""
@@ -550,26 +586,6 @@ def parse_acl_config_text(text: str) -> AclConfig:
                     f"roles.{name} cannot set {', '.join(forbidden)} when "
                     f"{CONFIG_UNMANAGED_KEY} is true: an unmanaged role's "
                     "permissions live outside the registry and are never modified"
-                )
-            # Fixed per code review (quilt-specs changes/access-code-signup#quiltx-work):
-            # apply_acl has no path that applies these to an unmanaged role, so parsing
-            # them silently would accept a config that can never take effect. Unlike the
-            # IAM-backed fields above, these have no permanent reason to stay forbidden --
-            # the gap is apply_acl's registry-call wiring (named elsewhere in this change),
-            # not an architectural one -- so this is a parse-time error rather than a
-            # permanent exclusion in `forbidden`.
-            # default_bucket excluded: it's a plain registry-side column with no IAM
-            # involvement and no apply-side gap specific to unmanaged roles, unlike the
-            # signup.*/access_code fields this check actually targets.
-            dead_signup_keys = sorted(
-                (ROLE_SIGNUP_KEYS - {CONFIG_DEFAULT_BUCKET_KEY}) & set(value)
-            )
-            if dead_signup_keys:
-                raise ValueError(
-                    f"roles.{name} cannot set {', '.join(dead_signup_keys)} when "
-                    f"{CONFIG_UNMANAGED_KEY} is true: nothing yet applies these fields "
-                    "to an unmanaged role, so this would parse as valid but never take "
-                    "effect"
                 )
         policy_refs = _coerce_string_list(
             value.get(CONFIG_POLICIES_KEY, []), f"roles.{name}.{CONFIG_POLICIES_KEY}"
@@ -748,6 +764,87 @@ def fetch_current_state(stack: stack_lib.Catalog) -> CurrentState:
     )
 
 
+def _current_role_signup(role: Any) -> AclRoleSignup | None:
+    """The signup page a server role carries, as the ACL model, or ``None``.
+
+    ``getattr`` throughout: a quilt3 that predates the fields returns roles
+    without them, and such a registry has nothing to reconcile.
+    """
+    signup = getattr(role, "signup", None)
+    if signup is None:
+        return None
+    return AclRoleSignup(
+        page=signup.page,
+        access_code=signup.access_code,
+        title=getattr(signup, "title", None) or None,
+        description=getattr(signup, "description", None) or None,
+    )
+
+
+def _role_signup_fields_differ(current_role: Any, update: RoleUpdate) -> bool:
+    return (
+        getattr(current_role, "default_bucket", None) != update.default_bucket
+        or _current_role_signup(current_role) != update.signup
+    )
+
+
+def _quilt3_role_signup(signup: AclRoleSignup | None) -> Any:
+    """The quilt3 admin value for a signup page, built at the call boundary.
+
+    Imported lazily so quiltx still imports, parses and diffs against a quilt3
+    that predates role signup pages; only applying one needs the newer client.
+    """
+    if signup is None:
+        return None
+    try:
+        from quilt3.admin.types import RoleSignup
+    except ImportError as exc:  # pragma: no cover - depends on installed quilt3
+        raise RuntimeError(
+            "the installed quilt3 has no role signup support; upgrade quilt3 "
+            "before applying signup.* on a role"
+        ) from exc
+    return RoleSignup(
+        page=signup.page,
+        access_code=signup.access_code,
+        title=signup.title,
+        description=signup.description,
+    )
+
+
+def _role_signup_kwargs(update: RoleUpdate, current_role: Any | None) -> dict[str, Any]:
+    """``default_bucket`` / ``signup`` keyword arguments for quilt3's role calls.
+
+    The registry keeps both fields when the keys are omitted and clears them on
+    an explicit null, and quilt3's ``update_*`` always sends what it is given,
+    so the desired values go through verbatim. Omitted entirely when neither the
+    config nor the server carries them, so an ACL that never uses the feature
+    keeps working with a quilt3 that has no such keyword arguments.
+    """
+    desired_blank = update.default_bucket is None and update.signup is None
+    current_blank = current_role is None or (
+        getattr(current_role, "default_bucket", None) is None
+        and getattr(current_role, "signup", None) is None
+    )
+    if desired_blank and current_blank:
+        return {}
+    return {
+        "default_bucket": update.default_bucket,
+        "signup": _quilt3_role_signup(update.signup),
+    }
+
+
+def _role_passthrough_kwargs(current_role: Any) -> dict[str, Any]:
+    """Keyword arguments that re-send a server role's own signup fields, for
+    policy-only updates that must not clear them."""
+    update = RoleUpdate(
+        name=current_role.name,
+        policy_titles=[],
+        default_bucket=getattr(current_role, "default_bucket", None),
+        signup=_current_role_signup(current_role),
+    )
+    return _role_signup_kwargs(update, current_role)
+
+
 def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     """Compute the actions required to reconcile ACL state."""
     desired_state = _build_desired_acl_state(desired)
@@ -790,6 +887,11 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
     desired_role_names = desired_state.all_role_names()
     for name in sorted(desired_state.unmanaged_role_names):
         if name in current.unmanaged_roles:
+            signup_update = desired_state.unmanaged_role_updates.get(name)
+            if signup_update is not None and _role_signup_fields_differ(
+                current.unmanaged_roles[name], signup_update
+            ):
+                diff.unmanaged_roles_to_update.append(signup_update)
             continue
         if name in current.managed_roles:
             diff.warnings.append(
@@ -813,14 +915,16 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         desired_policy_titles_for_role = list(role_update.policy_titles)
         if current_role is None:
             diff.roles_to_create.append(
-                RoleUpdate(name=name, policy_titles=desired_policy_titles_for_role)
+                replace(role_update, policy_titles=desired_policy_titles_for_role)
             )
             continue
 
         current_policy_titles = sorted(policy.title for policy in current_role.policies)
-        if current_policy_titles != sorted(desired_policy_titles_for_role):
+        if current_policy_titles != sorted(
+            desired_policy_titles_for_role
+        ) or _role_signup_fields_differ(current_role, role_update):
             diff.roles_to_update.append(
-                RoleUpdate(name=name, policy_titles=desired_policy_titles_for_role)
+                replace(role_update, policy_titles=desired_policy_titles_for_role)
             )
 
     diff.roles_to_delete = sorted(
@@ -2244,6 +2348,7 @@ def current_state_as_acl_yaml_with_warnings(
         if policy_names:
             entry[CONFIG_POLICIES_KEY] = policy_names
             referenced_policy_names.update(policy_names)
+        entry.update(_role_signup_entry_fields(role))
         role_entries[name] = entry
 
     policy_names_to_emit = {
@@ -2287,6 +2392,7 @@ def current_state_as_acl_yaml_with_warnings(
         registration_field = BUILTIN_BUCKET_REGISTRATION_FIELDS.get(name)
         if registration_field is not None and unrepresented_buckets:
             entry[registration_field] = unrepresented_buckets
+        entry.update(_role_signup_entry_fields(current.unmanaged_roles[name]))
         role_entries[name] = entry
 
     sso_notes, selectors, admin_roles, sso_default_role = _acl_sso_fields(
@@ -2374,6 +2480,23 @@ def current_state_as_acl_yaml_with_warnings(
         lines.append("# not captured:")
         lines.extend(f"# - {note}" for note in _dedupe_preserve_order(notes))
     return "\n".join(lines) + "\n", risk_warnings
+
+
+def _role_signup_entry_fields(role: Any) -> dict[str, Any]:
+    """The ``config.default_bucket`` / ``signup.*`` keys a server role replays to."""
+    fields: dict[str, Any] = {}
+    default_bucket = getattr(role, "default_bucket", None)
+    if default_bucket:
+        fields[CONFIG_DEFAULT_BUCKET_KEY] = default_bucket
+    signup = _current_role_signup(role)
+    if signup is not None:
+        fields[SIGNUP_ACCESS_CODE_KEY] = signup.access_code
+        fields[SIGNUP_PAGE_KEY] = signup.page
+        if signup.title:
+            fields[SIGNUP_TITLE_KEY] = signup.title
+        if signup.description:
+            fields[SIGNUP_DESCRIPTION_KEY] = signup.description
+    return fields
 
 
 def _acl_bucket_fields(policy: Any) -> tuple[list[str], list[str], list[str]]:
@@ -2540,6 +2663,10 @@ def _role_as_dict(role: Any, *, managed: bool, is_default: bool) -> dict[str, An
         "arn": _json_value(getattr(role, "arn", None)),
         "managed": managed,
         "default": is_default,
+        "default_bucket": getattr(role, "default_bucket", None),
+        "signup": (
+            None if (signup := _current_role_signup(role)) is None else asdict(signup)
+        ),
         "policies": None if policies is None else [policy.title for policy in policies],
         "permissions": (
             None
@@ -3003,7 +3130,9 @@ def apply_acl(
         _print_apply_step(f"create role {role.name}", verbose=verbose)
         try:
             policy_ids = _resolve_policy_ids(role.policy_titles, known_policies)
-            stack.admin.roles.create_managed(role.name, policies=policy_ids)
+            stack.admin.roles.create_managed(
+                role.name, policies=policy_ids, **_role_signup_kwargs(role, None)
+            )
         except KeyError as exc:
             missing = exc.args[0]
             warnings.append(f"Role '{role.name}' skipped: unknown policy {missing!r}")
@@ -3025,7 +3154,10 @@ def apply_acl(
             existing = current.managed_roles.get(role.name)
             role_ref = existing.id if existing is not None else role.name
             stack.admin.roles.update_managed(
-                role_ref, name=role.name, policies=policy_ids
+                role_ref,
+                name=role.name,
+                policies=policy_ids,
+                **_role_signup_kwargs(role, existing),
             )
         except KeyError as exc:
             missing = exc.args[0]
@@ -3038,6 +3170,26 @@ def apply_acl(
             print(f"  ! role {role.name}: {detail}", file=sys.stderr)
             continue
         print(f"  ~ role {role.name}")
+
+    for role in diff.unmanaged_roles_to_update:
+        _print_apply_step(f"update unmanaged role {role.name}", verbose=verbose)
+        existing = current.unmanaged_roles[role.name]
+        try:
+            # Name and ARN are re-sent as they are: only the signup fields change.
+            stack.admin.roles.update_unmanaged(
+                existing.id,
+                name=existing.name,
+                arn=existing.arn,
+                **_role_signup_kwargs(role, existing),
+            )
+        except Exception as exc:
+            detail = format_exception(exc)
+            warnings.append(
+                f"Unmanaged role '{role.name}' signup fields could not be updated: {detail}"
+            )
+            print(f"  ! role {role.name}: {detail}", file=sys.stderr)
+            continue
+        print(f"  ~ role {role.name} (signup fields)")
 
     if diff.default_role_needs_update and diff.default_role_name is not None:
         default_role_name = diff.default_role_name
@@ -3504,6 +3656,7 @@ def detach_policies_from_roles(
                 role.id,
                 name=role_name,
                 policies=surviving_policy_ids,
+                **_role_passthrough_kwargs(role),
             )
             print(f"  ~ role {role_name} (detached deleted policies)")
         except Exception as exc:
@@ -3824,12 +3977,20 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
 
     static_roles: list[_ResolvedStaticRole] = []
     unmanaged_role_names: set[str] = set()
+    unmanaged_role_updates: dict[str, RoleUpdate] = {}
     for role in config.roles.values():
         if role.unmanaged:
             # Reference only: no policies, no role_updates entry, so the role is
             # never created, updated, or deleted. SSO selectors and the default
             # role may still point at it.
             unmanaged_role_names.add(role.name)
+            if role.default_bucket is not None or role.signup is not None:
+                unmanaged_role_updates[role.name] = RoleUpdate(
+                    name=role.name,
+                    policy_titles=[],
+                    default_bucket=role.default_bucket,
+                    signup=role.signup,
+                )
             static_roles.append(
                 _ResolvedStaticRole(
                     name=role.name,
@@ -3874,7 +4035,10 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         )
         static_roles.append(resolved_role)
         role_updates[role.name] = RoleUpdate(
-            name=role.name, policy_titles=policy_titles
+            name=role.name,
+            policy_titles=policy_titles,
+            default_bucket=role.default_bucket,
+            signup=role.signup,
         )
         for claim, values in role.sso.items():
             for value in values:
@@ -3898,8 +4062,8 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         # never a rung to its name. Appending last and deduping leaves a role
         # that already lists the policy unchanged, so a replay stays a no-op.
         role_updates = {
-            name: RoleUpdate(
-                name=name,
+            name: replace(
+                update,
                 policy_titles=_dedupe_preserve_order(
                     [*update.policy_titles, *default_policy_titles]
                 ),
@@ -3945,6 +4109,7 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
         warnings=warnings,
         notices=notices,
         unmanaged_role_names=frozenset(unmanaged_role_names),
+        unmanaged_role_updates=unmanaged_role_updates,
     )
 
 
