@@ -288,9 +288,13 @@ roles:
 ```
 
 `signup.access_code` turns the page on; any other `signup.*` key without it is
-an error. Pages must be unique across roles; codes need not be, since a code
-only works on its own page. `config.default_bucket` is general-purpose: it is
-where the role's users land after login, with or without a signup page.
+an error. `signup.page` is one URL path segment and defaults to the role name
+kebab-cased (`BenchTalkRole` → `bench-talk-role`). Pages must be unique across
+roles; codes need not be, since a code only works on its own page.
+`config.default_bucket` is general-purpose: it is where the role's users land
+after login, with or without a signup page. A managed role must be able to read
+it (its own `buckets.*`, one of its policies, or a default policy), or the file
+is rejected.
 
 Both reconcile like any other role field. A managed role that drops them from
 the file has them cleared on the server. Unmanaged roles may declare them too;

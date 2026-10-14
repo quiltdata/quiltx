@@ -31,6 +31,7 @@ SIGNUP_ACCESS_CODE_KEY = "signup.access_code"
 SIGNUP_PAGE_KEY = "signup.page"
 SIGNUP_TITLE_KEY = "signup.title"
 SIGNUP_DESCRIPTION_KEY = "signup.description"
+SIGNUP_PAGE_RE = re.compile(r"^[A-Za-z0-9._~-]{1,200}$")
 ROLE_SIGNUP_KEYS = {
     CONFIG_DEFAULT_BUCKET_KEY,
     SIGNUP_ACCESS_CODE_KEY,
@@ -621,7 +622,8 @@ def parse_acl_config_text(text: str) -> AclConfig:
         if entry.default_role:
             default_role_sources.append(f"roles.{name}")
 
-    _validate_access_codes_unique(roles)
+    _validate_signup_pages_unique(roles)
+    _validate_default_buckets_readable(roles, policies)
 
     users: dict[str, AclUserConfig] = {}
     for name, value in raw_users.items():
@@ -781,29 +783,39 @@ def _current_role_signup(role: Any) -> AclRoleSignup | None:
     )
 
 
-def _role_signup_fields_differ(current_role: Any, update: RoleUpdate) -> bool:
-    return (
-        getattr(current_role, "default_bucket", None) != update.default_bucket
-        or _current_role_signup(current_role) != update.signup
-    )
+def _role_signup_fields_differ(
+    current_role: Any, update: RoleUpdate, *, declared_only: bool = False
+) -> bool:
+    """Whether the server's fields differ from the entry's. With ``declared_only``
+    (unmanaged roles) a field the entry leaves out is not compared."""
+    if (not declared_only or update.default_bucket is not None) and getattr(
+        current_role, "default_bucket", None
+    ) != update.default_bucket:
+        return True
+    return (not declared_only or update.signup is not None) and _current_role_signup(
+        current_role
+    ) != update.signup
 
 
-def _quilt3_role_signup(signup: AclRoleSignup | None) -> Any:
-    """The quilt3 admin value for a signup page, built at the call boundary.
-
-    Imported lazily so quiltx still imports, parses and diffs against a quilt3
-    that predates role signup pages; only applying one needs the newer client.
-    """
-    if signup is None:
-        return None
+def _quilt3_role_signup_type() -> Any:
+    """quilt3's ``RoleSignup``, imported lazily so quiltx still imports, parses
+    and diffs against a quilt3 that predates role signup pages; only applying
+    ``config.default_bucket`` or ``signup.*`` needs the newer client."""
     try:
         from quilt3.admin.types import RoleSignup
     except ImportError as exc:  # pragma: no cover - depends on installed quilt3
         raise RuntimeError(
             "the installed quilt3 has no role signup support; upgrade quilt3 "
-            "before applying signup.* on a role"
+            "before applying config.default_bucket or signup.* on a role"
         ) from exc
-    return RoleSignup(
+    return RoleSignup
+
+
+def _quilt3_role_signup(signup: AclRoleSignup | None) -> Any:
+    """The quilt3 admin value for a signup page, built at the call boundary."""
+    if signup is None:
+        return None
+    return _quilt3_role_signup_type()(
         page=signup.page,
         access_code=signup.access_code,
         title=signup.title,
@@ -811,14 +823,21 @@ def _quilt3_role_signup(signup: AclRoleSignup | None) -> Any:
     )
 
 
-def _role_signup_kwargs(update: RoleUpdate, current_role: Any | None) -> dict[str, Any]:
+def _role_signup_kwargs(
+    update: RoleUpdate, current_role: Any | None, *, declared_only: bool = False
+) -> dict[str, Any]:
     """``default_bucket`` / ``signup`` keyword arguments for quilt3's role calls.
 
     The registry keeps both fields when the keys are omitted and clears them on
-    an explicit null, and quilt3's ``update_*`` always sends what it is given,
-    so the desired values go through verbatim. Omitted entirely when neither the
-    config nor the server carries them, so an ACL that never uses the feature
-    keeps working with a quilt3 that has no such keyword arguments.
+    an explicit null, and quilt3 (#5470) leaves out whatever it is not given, so
+    the desired values go through verbatim: a managed role's file entry is the
+    whole truth, and a dropped field is sent as ``None``. With ``declared_only``
+    (unmanaged roles) only the fields the entry declares are sent, so a
+    reference-only entry that adds ``config.default_bucket`` cannot delete a
+    signup page quiltx does not manage. Omitted entirely when neither the config
+    nor the server carries the fields, so an ACL that never uses the feature
+    keeps working with a quilt3 that has no such keyword arguments; one that
+    does on such a quilt3 gets a clear error instead of a ``TypeError``.
     """
     desired_blank = update.default_bucket is None and update.signup is None
     current_blank = current_role is None or (
@@ -827,22 +846,13 @@ def _role_signup_kwargs(update: RoleUpdate, current_role: Any | None) -> dict[st
     )
     if desired_blank and current_blank:
         return {}
-    return {
-        "default_bucket": update.default_bucket,
-        "signup": _quilt3_role_signup(update.signup),
-    }
-
-
-def _role_passthrough_kwargs(current_role: Any) -> dict[str, Any]:
-    """Keyword arguments that re-send a server role's own signup fields, for
-    policy-only updates that must not clear them."""
-    update = RoleUpdate(
-        name=current_role.name,
-        policy_titles=[],
-        default_bucket=getattr(current_role, "default_bucket", None),
-        signup=_current_role_signup(current_role),
-    )
-    return _role_signup_kwargs(update, current_role)
+    _quilt3_role_signup_type()
+    kwargs: dict[str, Any] = {}
+    if not declared_only or update.default_bucket is not None:
+        kwargs["default_bucket"] = update.default_bucket
+    if not declared_only or update.signup is not None:
+        kwargs["signup"] = _quilt3_role_signup(update.signup)
+    return kwargs
 
 
 def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
@@ -889,7 +899,7 @@ def compute_diff(desired: AclConfig, current: CurrentState) -> AclDiff:
         if name in current.unmanaged_roles:
             signup_update = desired_state.unmanaged_role_updates.get(name)
             if signup_update is not None and _role_signup_fields_differ(
-                current.unmanaged_roles[name], signup_update
+                current.unmanaged_roles[name], signup_update, declared_only=True
             ):
                 diff.unmanaged_roles_to_update.append(signup_update)
             continue
@@ -2136,6 +2146,8 @@ def print_diff(
         print(f"+ role {role.name}")
     for role in diff.roles_to_update:
         print(f"~ role {role.name}")
+    for role in diff.unmanaged_roles_to_update:
+        print(f"~ role {role.name} (unmanaged: default_bucket / signup only)")
     for name in diff.roles_to_delete:
         print(f"- role {name}")
 
@@ -3180,7 +3192,7 @@ def apply_acl(
                 existing.id,
                 name=existing.name,
                 arn=existing.arn,
-                **_role_signup_kwargs(role, existing),
+                **_role_signup_kwargs(role, existing, declared_only=True),
             )
         except Exception as exc:
             detail = format_exception(exc)
@@ -3652,11 +3664,13 @@ def detach_policies_from_roles(
 
         try:
             _print_apply_step(f"detach policies from role {role_name}", verbose=verbose)
+            # No default_bucket/signup here: quilt3 leaves unspecified fields out of the
+            # input and the registry keeps them, so this cannot revert what the role update
+            # loop wrote earlier in the same apply.
             stack.admin.roles.update_managed(
                 role.id,
                 name=role_name,
                 policies=surviving_policy_ids,
-                **_role_passthrough_kwargs(role),
             )
             print(f"  ~ role {role_name} (detached deleted policies)")
         except Exception as exc:
@@ -4222,7 +4236,10 @@ def _kebab_case(name: str) -> str:
     defaults to the role name, lowercased and kebab-cased, when a role
     declares ``signup.access_code`` but no explicit page.
     """
-    folded = re.sub(r"[^a-z0-9]+", "-", name.strip().lower())
+    split = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "-", name.strip()
+    )
+    folded = re.sub(r"[^a-z0-9]+", "-", split.lower())
     return folded.strip("-")
 
 
@@ -4250,7 +4267,14 @@ def _parse_role_signup_fields(
         default_bucket = default_bucket.strip()
 
     access_code = value.get(SIGNUP_ACCESS_CODE_KEY)
-    signup_keys_present = ROLE_SIGNUP_KEYS & set(value) - {CONFIG_DEFAULT_BUCKET_KEY}
+    if SIGNUP_ACCESS_CODE_KEY in value and access_code is None:
+        raise ValueError(
+            f"roles.{role_name}.{SIGNUP_ACCESS_CODE_KEY} must be a non-empty string"
+        )
+    signup_keys_present = ROLE_SIGNUP_KEYS & set(value) - {
+        CONFIG_DEFAULT_BUCKET_KEY,
+        SIGNUP_ACCESS_CODE_KEY,
+    }
     if access_code is None:
         if signup_keys_present:
             raise ValueError(
@@ -4273,6 +4297,13 @@ def _parse_role_signup_fields(
                 f"roles.{role_name}.{SIGNUP_PAGE_KEY} must be a non-empty string"
             )
         signup_page = signup_page.strip()
+        # One URL path segment: the registry and the catalog both route on it, and
+        # the registry rejects anything else (same pattern as its SIGNUP_PAGE_RE).
+        if not SIGNUP_PAGE_RE.match(signup_page):
+            raise ValueError(
+                f"roles.{role_name}.{SIGNUP_PAGE_KEY} {signup_page!r} must be a single "
+                "URL path segment (letters, digits, '.', '_', '~', '-')"
+            )
     else:
         signup_page = _kebab_case(role_name)
         if not signup_page:
@@ -4301,12 +4332,40 @@ def _parse_role_signup_fields(
     return default_bucket, access_code, signup_page, signup_title, signup_description
 
 
-def _validate_access_codes_unique(roles: dict[str, AclStaticRole]) -> None:
-    """Access codes are scoped to their own page (changes/access-code-signup),
-    so uniqueness is enforced on ``signup_page``, not on the code itself --
-    two roles may share a code value as long as their pages differ. Pages
-    themselves must be unique across roles, since the URL segment is what a
-    visitor actually reaches."""
+def _validate_default_buckets_readable(
+    roles: dict[str, AclStaticRole], policies: list[AclPolicy]
+) -> None:
+    """A managed role's ``config.default_bucket`` must be one the role can read:
+    its own ``buckets.*`` grants, its named policies' grants, or a default
+    policy's. Otherwise users land on a bucket they get AccessDenied on, and
+    the registry (a foreign key to its bucket table) refuses one it has never
+    registered. Unmanaged roles are skipped: their grants live in IAM, which
+    quiltx cannot see (the spec asks for a notice there, not an error)."""
+    policy_buckets = {
+        policy.name: set(policy.read) | set(policy.read_write) for policy in policies
+    }
+    default_policy_buckets: set[str] = set()
+    for policy in policies:
+        if policy.default_policy:
+            default_policy_buckets |= policy_buckets[policy.name]
+    for name, role in roles.items():
+        if role.default_bucket is None or role.unmanaged:
+            continue
+        readable = set(role.read) | set(role.read_write) | default_policy_buckets
+        for title in role.policies:
+            readable |= policy_buckets.get(title, set())
+        if role.default_bucket not in readable:
+            raise ValueError(
+                f"roles.{name}.{CONFIG_DEFAULT_BUCKET_KEY} '{role.default_bucket}' is "
+                "not a bucket this role can read: grant it in the role's buckets.* "
+                "or in one of its policies"
+            )
+
+
+def _validate_signup_pages_unique(roles: dict[str, AclStaticRole]) -> None:
+    """Pages must be unique across roles: the URL segment is what a visitor
+    reaches. Codes need not be (changes/access-code-signup): a code only works
+    on its own page."""
     # Declaration order, not alphabetical (fixed per code review): `roles` preserves
     # YAML order, and the error below names whichever role is seen second as the
     # duplicate -- sorting would let a later-declared role claim to be the original.
@@ -4428,7 +4487,9 @@ def _print_verbose_state(
         )
 
     created_roles = {role.name for role in diff.roles_to_create}
-    updated_roles = {role.name for role in diff.roles_to_update}
+    updated_roles = {role.name for role in diff.roles_to_update} | {
+        role.name for role in diff.unmanaged_roles_to_update
+    }
     for synth_role in desired_state.synthesized_roles:
         prefix = _diff_prefix(synth_role.name, created_roles, updated_roles)
         sources = ", ".join(synth_role.source_policies)
@@ -4449,6 +4510,12 @@ def _print_verbose_state(
             print(f"    inline policy: {role.inline_policy_title}")
         if role.is_admin:
             print("    admin: true")
+        static_role = desired.roles.get(role.name)
+        if static_role is not None:
+            if static_role.default_bucket is not None:
+                print(f"    default_bucket: {static_role.default_bucket}")
+            if static_role.signup is not None:
+                print(f"    signup: page {static_role.signup.page}, access code set")
 
     updated_users = {user.name for user in diff.users_to_update}
     current_user_names = (
