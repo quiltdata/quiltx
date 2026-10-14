@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A role can declare `config.default_bucket`, `config.access_code`, and `signup.*` in the ACL file, parsed and validated against the registry's new role-owned signup pages; `apply_acl` and ACL capture do not yet round-trip them (tracked follow-up) ([#130](https://github.com/quiltdata/quiltx/pull/130))
+
 ### Fixed
 
 - `bucket prepare` now prepares a bucket that a Quilt catalog already registered,
