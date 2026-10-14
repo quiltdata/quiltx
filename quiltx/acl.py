@@ -23,6 +23,21 @@ ACL_ENTRY_KEYS = {
     "config.default_role",
     "config.is_admin",
 }
+# quilt-specs changes/access-code-signup#quiltx-work. General-purpose,
+# roles-only: default_bucket has nothing to do with signup; access_code and
+# signup.* turn on a role's own /signup/<page> landing page.
+CONFIG_DEFAULT_BUCKET_KEY = "config.default_bucket"
+CONFIG_ACCESS_CODE_KEY = "config.access_code"
+SIGNUP_PAGE_KEY = "signup.page"
+SIGNUP_TITLE_KEY = "signup.title"
+SIGNUP_DESCRIPTION_KEY = "signup.description"
+ROLE_SIGNUP_KEYS = {
+    CONFIG_DEFAULT_BUCKET_KEY,
+    CONFIG_ACCESS_CODE_KEY,
+    SIGNUP_PAGE_KEY,
+    SIGNUP_TITLE_KEY,
+    SIGNUP_DESCRIPTION_KEY,
+}
 USER_ENTRY_KEYS = {"role", "extra_roles", "admin"}
 CONFIG_NO_PREFLIGHT_KEY = "config.no_preflight"
 BUCKET_ENTRY_KEYS = {CONFIG_NO_PREFLIGHT_KEY}
@@ -116,6 +131,19 @@ class AclStaticRole:
     QuiltStack bucket roles may also carry their matching ``buckets.*`` field
     as a registration reference; it never changes the role's IAM permissions.
     """
+    default_bucket: str | None = None
+    """Where this role's users land after signup/login (quilt-specs
+    changes/access-code-signup). General-purpose; unrelated to signup."""
+    access_code: str | None = None
+    """Required to turn on this role's own ``/signup/<page>`` landing page.
+
+    Any other ``signup.*`` key on a role without this is a parse error.
+    """
+    signup_page: str | None = None
+    """The URL segment. Defaults to the role name, lowercased and kebab-cased,
+    when ``access_code`` is set and this is omitted."""
+    signup_title: str | None = None
+    signup_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -535,6 +563,9 @@ def parse_acl_config_text(text: str) -> AclConfig:
             raise ValueError(
                 f"Role '{name}' references unknown policies: {', '.join(missing)}"
             )
+        default_bucket, access_code, signup_page, signup_title, signup_description = (
+            _parse_role_signup_fields(value, name)
+        )
         roles[name] = AclStaticRole(
             name=name,
             sso=entry.sso,
@@ -544,10 +575,17 @@ def parse_acl_config_text(text: str) -> AclConfig:
             default_role=entry.default_role,
             is_admin=bool(entry.is_admin),
             unmanaged=unmanaged,
+            default_bucket=default_bucket,
+            access_code=access_code,
+            signup_page=signup_page,
+            signup_title=signup_title,
+            signup_description=signup_description,
         )
         role_names.add(name)
         if entry.default_role:
             default_role_sources.append(f"roles.{name}")
+
+    _validate_access_codes_unique(roles)
 
     users: dict[str, AclUserConfig] = {}
     for name, value in raw_users.items():
@@ -3928,6 +3966,8 @@ def _validate_acl_entry_keys(value: dict[str, Any], *, section: str, name: str) 
         )
     if section == "roles":
         allowed_keys.update({CONFIG_POLICIES_KEY, CONFIG_UNMANAGED_KEY})
+        # quilt-specs changes/access-code-signup#quiltx-work
+        allowed_keys.update(ROLE_SIGNUP_KEYS)
     unknown_keys = sorted(
         key for key in value if key not in allowed_keys and not key.startswith("sso.")
     )
@@ -3988,6 +4028,102 @@ def _parse_acl_entry(
         default_role=default_role,
         is_admin=is_admin,
     )
+
+
+def _kebab_case(name: str) -> str:
+    """Fold a role name into a URL-safe default signup page segment.
+
+    quilt-specs changes/access-code-signup#quiltx-work: ``signup.page``
+    defaults to the role name, lowercased and kebab-cased, when a role
+    declares ``config.access_code`` but no explicit page.
+    """
+    folded = re.sub(r"[^a-z0-9]+", "-", name.strip().lower())
+    return folded.strip("-")
+
+
+def _parse_role_signup_fields(
+    value: dict[str, Any], role_name: str
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """Parse a role's ``config.default_bucket`` and ``signup.*`` fields.
+
+    quilt-specs changes/access-code-signup#quiltx-work. ``config.default_bucket``
+    is general-purpose and valid with or without an access code. The
+    ``signup.*`` keys require ``config.access_code`` to be set on the same
+    role; any of them present without it is a parse error, matching the ACL
+    file's declarative style (nothing is implicitly half-configured).
+
+    Returns (default_bucket, access_code, signup_page, signup_title,
+    signup_description) -- all ``None`` when the role declares none of them.
+    """
+    default_bucket = value.get(CONFIG_DEFAULT_BUCKET_KEY)
+    if default_bucket is not None:
+        if not isinstance(default_bucket, str) or not default_bucket.strip():
+            raise ValueError(
+                f"roles.{role_name}.{CONFIG_DEFAULT_BUCKET_KEY} must be a "
+                "non-empty string"
+            )
+        default_bucket = default_bucket.strip()
+
+    access_code = value.get(CONFIG_ACCESS_CODE_KEY)
+    signup_keys_present = ROLE_SIGNUP_KEYS & set(value) - {CONFIG_DEFAULT_BUCKET_KEY}
+    if access_code is None:
+        if signup_keys_present:
+            raise ValueError(
+                f"roles.{role_name} sets {', '.join(sorted(signup_keys_present))} "
+                f"without {CONFIG_ACCESS_CODE_KEY}: any signup.* key requires an "
+                "access code to turn the page on"
+            )
+        return default_bucket, None, None, None, None
+
+    if not isinstance(access_code, str) or not access_code.strip():
+        raise ValueError(
+            f"roles.{role_name}.{CONFIG_ACCESS_CODE_KEY} must be a non-empty string"
+        )
+    access_code = access_code.strip()
+
+    signup_page = value.get(SIGNUP_PAGE_KEY)
+    if signup_page is not None:
+        if not isinstance(signup_page, str) or not signup_page.strip():
+            raise ValueError(
+                f"roles.{role_name}.{SIGNUP_PAGE_KEY} must be a non-empty string"
+            )
+        signup_page = signup_page.strip()
+    else:
+        signup_page = _kebab_case(role_name)
+        if not signup_page:
+            raise ValueError(
+                f"roles.{role_name}.{SIGNUP_PAGE_KEY} could not be derived from the "
+                "role name (no alphanumeric characters); set it explicitly"
+            )
+
+    signup_title = value.get(SIGNUP_TITLE_KEY)
+    if signup_title is not None and not isinstance(signup_title, str):
+        raise ValueError(f"roles.{role_name}.{SIGNUP_TITLE_KEY} must be a string")
+
+    signup_description = value.get(SIGNUP_DESCRIPTION_KEY)
+    if signup_description is not None and not isinstance(signup_description, str):
+        raise ValueError(f"roles.{role_name}.{SIGNUP_DESCRIPTION_KEY} must be a string")
+
+    return default_bucket, access_code, signup_page, signup_title, signup_description
+
+
+def _validate_access_codes_unique(roles: dict[str, AclStaticRole]) -> None:
+    """Access codes are scoped to their own page (changes/access-code-signup),
+    so uniqueness is enforced on ``signup_page``, not on the code itself --
+    two roles may share a code value as long as their pages differ. Pages
+    themselves must be unique across roles, since the URL segment is what a
+    visitor actually reaches."""
+    pages_seen: dict[str, str] = {}
+    for name, role in sorted(roles.items()):
+        if role.signup_page is None:
+            continue
+        existing = pages_seen.get(role.signup_page)
+        if existing is not None:
+            raise ValueError(
+                f"roles.{name}.{SIGNUP_PAGE_KEY} '{role.signup_page}' is already "
+                f"used by role '{existing}'; signup pages must be unique across roles"
+            )
+        pages_seen[role.signup_page] = name
 
 
 def _validate_policy_ladder(policies: list[AclPolicy]) -> None:

@@ -393,6 +393,123 @@ roles:
         acl.parse_acl_config(config_path)
 
 
+# quilt-specs changes/access-code-signup#quiltx-work
+
+
+def test_parse_acl_config_accepts_role_signup_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  BenchTalkRole:
+    config.default_bucket: quilt-benchtalk
+    config.access_code: BENCHTALK26
+    signup.page: benchtalk
+    signup.title: Can you do real science from your phone?
+    signup.description: Five minutes of your attention.
+""")
+
+    config = acl.parse_acl_config(config_path)
+    role = config.roles["BenchTalkRole"]
+
+    assert role.default_bucket == "quilt-benchtalk"
+    assert role.access_code == "BENCHTALK26"
+    assert role.signup_page == "benchtalk"
+    assert role.signup_title == "Can you do real science from your phone?"
+    assert role.signup_description == "Five minutes of your attention."
+
+
+def test_parse_acl_config_defaults_signup_page_to_kebab_role_name(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  VirRole:
+    config.access_code: VIR-PILOT-2026
+""")
+
+    config = acl.parse_acl_config(config_path)
+
+    assert config.roles["VirRole"].signup_page == "virrole"
+
+
+def test_parse_acl_config_accepts_default_bucket_without_access_code(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  PlainRole:
+    config.default_bucket: some-bucket
+""")
+
+    config = acl.parse_acl_config(config_path)
+    role = config.roles["PlainRole"]
+
+    assert role.default_bucket == "some-bucket"
+    assert role.access_code is None
+    assert role.signup_page is None
+
+
+def test_parse_acl_config_rejects_signup_key_without_access_code(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  BadRole:
+    signup.title: Should not be allowed
+""")
+
+    with pytest.raises(ValueError, match="without config.access_code"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_duplicate_signup_page(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  RoleA:
+    config.access_code: CODE_A
+    signup.page: samepage
+  RoleB:
+    config.access_code: CODE_B
+    signup.page: samepage
+""")
+
+    with pytest.raises(ValueError, match="is already used by role 'RoleA'"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_allows_shared_access_code_on_different_pages(
+    tmp_path: Path,
+) -> None:
+    """Access codes are scoped to their own page: guessing a code means also
+    knowing the page, so two roles may reuse the same code value as long as
+    their pages differ."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  RoleC:
+    config.access_code: SAMECODE
+    signup.page: pagec
+  RoleD:
+    config.access_code: SAMECODE
+    signup.page: paged
+""")
+
+    config = acl.parse_acl_config(config_path)
+
+    assert config.roles["RoleC"].access_code == "SAMECODE"
+    assert config.roles["RoleD"].access_code == "SAMECODE"
+
+
 def test_policy_role_alias_is_normalized_and_propagated(tmp_path: Path) -> None:
     config_path = tmp_path / "acl.yml"
     config_path.write_text("""
