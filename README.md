@@ -268,6 +268,41 @@ user or selector currently references them. Registered buckets not already
 represented by managed permissions are listed on both built-in roles, so a
 capture can register them when replayed without duplicating explicit grants.
 
+### Access-code signup pages
+
+A role may own a landing page where visitors who know an access code sign up
+straight into the role (requires a registry and quilt3 that expose role signup
+pages):
+
+```yaml
+roles:
+  BenchTalkRole:
+    config.policies: [GeneralUserPolicy]
+    buckets.read_write: [quilt-benchtalk]
+    config.default_bucket: quilt-benchtalk
+    signup.access_code: BENCHTALK26
+    signup.page: benchtalk            # optional; defaults to the role name, kebab-cased
+    signup.title: Can you do real science from your phone?
+    signup.description: |             # optional, Markdown
+      Five minutes of your attention.
+```
+
+`signup.access_code` turns the page on; any other `signup.*` key without it is
+an error. `signup.page` is one URL path segment and defaults to the role name
+kebab-cased (`BenchTalkRole` → `bench-talk-role`). Pages must be unique across
+roles; codes need not be, since a code only works on its own page.
+`config.default_bucket` is general-purpose: it is where the role's users land
+after login, with or without a signup page. A managed role must be able to read
+it (its own `buckets.*`, one of its policies, or a default policy), or the file
+is rejected.
+
+Both reconcile like any other role field. A managed role that drops them from
+the file has them cleared on the server. Unmanaged roles may declare them too;
+they are the only fields quiltx ever writes to an unmanaged role, and an
+unmanaged entry that declares neither leaves the server's values alone.
+Captures re-emit them, access code included, so treat a capture of a stack with
+signup pages as sensitive.
+
 ### Default policies
 
 `config.default_policy: true` marks a policy as the floor every managed role

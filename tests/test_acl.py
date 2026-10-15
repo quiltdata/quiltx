@@ -43,6 +43,9 @@ class FakeRole:
     policies: list[Any] | None
     permissions: list[Any]
     typename__: str = "ManagedRole"
+    arn: str = "arn:aws:iam::000000000000:role/fake"
+    default_bucket: str | None = None
+    signup: Any = None
 
 
 @dataclass
@@ -390,6 +393,251 @@ roles:
 """)
 
     with pytest.raises(ValueError, match="Synthesized role 'internal_public'"):
+        acl.parse_acl_config(config_path)
+
+
+# quilt-specs changes/access-code-signup#quiltx-work
+
+
+def test_parse_acl_config_accepts_role_signup_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  BenchTalkRole:
+    buckets.read_write: [quilt-benchtalk]
+    config.default_bucket: quilt-benchtalk
+    signup.access_code: BENCHTALK26
+    signup.page: benchtalk
+    signup.title: Can you do real science from your phone?
+    signup.description: Five minutes of your attention.
+""")
+
+    config = acl.parse_acl_config(config_path)
+    role = config.roles["BenchTalkRole"]
+
+    assert role.default_bucket == "quilt-benchtalk"
+    assert role.access_code == "BENCHTALK26"
+    assert role.signup_page == "benchtalk"
+    assert role.signup_title == "Can you do real science from your phone?"
+    assert role.signup_description == "Five minutes of your attention."
+
+
+def test_parse_acl_config_defaults_signup_page_to_kebab_role_name(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  VirRole:
+    signup.access_code: VIR-PILOT-2026
+""")
+
+    config = acl.parse_acl_config(config_path)
+
+    assert config.roles["VirRole"].signup_page == "vir-role"
+
+
+def test_parse_acl_config_accepts_default_bucket_without_access_code(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  PlainRole:
+    buckets.read: [some-bucket]
+    config.default_bucket: some-bucket
+""")
+
+    config = acl.parse_acl_config(config_path)
+    role = config.roles["PlainRole"]
+
+    assert role.default_bucket == "some-bucket"
+    assert role.access_code is None
+    assert role.signup_page is None
+
+
+def test_parse_acl_config_rejects_signup_key_without_access_code(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  BadRole:
+    signup.title: Should not be allowed
+""")
+
+    with pytest.raises(ValueError, match="without signup.access_code"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_duplicate_signup_page(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  RoleA:
+    signup.access_code: CODE_A
+    signup.page: samepage
+  RoleB:
+    signup.access_code: CODE_B
+    signup.page: samepage
+""")
+
+    with pytest.raises(ValueError, match="is already used by role 'RoleA'"):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_oversized_signup_fields(tmp_path: Path) -> None:
+    """access_code/title cap at 200 chars, description at 2000 -- matching the registry's
+    VARCHAR(200) columns (and, for the unbounded TEXT description, a sane bound against a
+    value that renders on the public, unauthenticated /signup/<page> page)."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text(f"""
+policies: {{}}
+roles:
+  BigCode:
+    signup.access_code: "{"x" * 201}"
+    signup.page: bigcode
+""")
+    with pytest.raises(ValueError, match="access_code must be 200 characters or fewer"):
+        acl.parse_acl_config(config_path)
+
+    config_path.write_text(f"""
+policies: {{}}
+roles:
+  BigTitle:
+    signup.access_code: CODE
+    signup.page: bigtitle
+    signup.title: "{"x" * 201}"
+""")
+    with pytest.raises(ValueError, match="title must be 200 characters or fewer"):
+        acl.parse_acl_config(config_path)
+
+    config_path.write_text(f"""
+policies: {{}}
+roles:
+  BigDescription:
+    signup.access_code: CODE
+    signup.page: bigdescription
+    signup.description: "{"x" * 2001}"
+""")
+    with pytest.raises(
+        ValueError, match="description must be 2000 characters or fewer"
+    ):
+        acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_allows_shared_access_code_on_different_pages(
+    tmp_path: Path,
+) -> None:
+    """Access codes are scoped to their own page: guessing a code means also
+    knowing the page, so two roles may reuse the same code value as long as
+    their pages differ."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  RoleC:
+    signup.access_code: SAMECODE
+    signup.page: pagec
+  RoleD:
+    signup.access_code: SAMECODE
+    signup.page: paged
+""")
+
+    config = acl.parse_acl_config(config_path)
+
+    assert config.roles["RoleC"].access_code == "SAMECODE"
+    assert config.roles["RoleD"].access_code == "SAMECODE"
+
+
+# Fixes from the code-review pass on quilt-specs changes/access-code-signup#quiltx-work.
+
+
+def test_parse_acl_config_allows_signup_fields_on_unmanaged_role(
+    tmp_path: Path,
+) -> None:
+    """Unmanaged roles may carry them, same as sso.* (quilt-specs
+    changes/access-code-signup#role-property); apply reconciles only these
+    fields on an unmanaged role."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  SomeUnmanagedRole:
+    config.unmanaged: true
+    signup.access_code: CODE_X
+    signup.page: somepage
+""")
+
+    role = acl.parse_acl_config(config_path).roles["SomeUnmanagedRole"]
+
+    assert role.unmanaged
+    assert role.signup == acl.AclRoleSignup(page="somepage", access_code="CODE_X")
+
+
+def test_parse_acl_config_allows_default_bucket_on_unmanaged_role(
+    tmp_path: Path,
+) -> None:
+    """default_bucket is a plain registry-side field with no IAM involvement, so it
+    is allowed on an unmanaged role."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  SomeUnmanagedRole:
+    config.unmanaged: true
+    config.default_bucket: some-bucket
+""")
+
+    config = acl.parse_acl_config(config_path)
+
+    assert config.roles["SomeUnmanagedRole"].default_bucket == "some-bucket"
+
+
+def test_parse_acl_config_normalizes_blank_signup_title_and_description(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  RoleE:
+    signup.access_code: CODE_E
+    signup.page: pagee
+    signup.title: "   "
+    signup.description: ""
+""")
+
+    config = acl.parse_acl_config(config_path)
+    role = config.roles["RoleE"]
+
+    assert role.signup_title is None
+    assert role.signup_description is None
+
+
+def test_parse_acl_config_duplicate_page_error_names_the_first_declared_role(
+    tmp_path: Path,
+) -> None:
+    """Role declaration order, not alphabetical: ZRole is declared before ARole, so
+    the error must name ZRole as the original and ARole as the duplicate."""
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  ZRole:
+    signup.access_code: CODE_Z
+    signup.page: samepage
+  ARole:
+    signup.access_code: CODE_A
+    signup.page: samepage
+""")
+
+    with pytest.raises(ValueError, match="roles.ARole.*already used by role 'ZRole'"):
         acl.parse_acl_config(config_path)
 
 
@@ -6454,3 +6702,530 @@ roles: {{}}
     )
     assert f"Warning: Roster address '{long_address}' derives username" in captured.err
     assert "Done with 1 warning(s)." in captured.err
+
+
+# quilt-specs changes/access-code-signup#quiltx-work: apply and capture.
+
+BENCHTALK_SIGNUP = acl.AclRoleSignup(
+    page="benchtalk",
+    access_code="BENCHTALK26",
+    title="Can you do real science from your phone?",
+    description="Five minutes of your attention.",
+)
+
+
+def _benchtalk_config(**role_fields: Any) -> acl.AclConfig:
+    return acl.AclConfig(
+        policies=[],
+        roles={
+            "BenchTalkRole": acl.AclStaticRole(
+                name="BenchTalkRole",
+                read_write=["quilt-benchtalk"],
+                default_bucket="quilt-benchtalk",
+                access_code="BENCHTALK26",
+                signup_page="benchtalk",
+                signup_title=BENCHTALK_SIGNUP.title,
+                signup_description=BENCHTALK_SIGNUP.description,
+                **role_fields,
+            )
+        },
+    )
+
+
+def test_desired_state_carries_signup_fields_through_default_policies() -> None:
+    config = acl.AclConfig(
+        policies=[
+            acl.AclPolicy(
+                name="Floor", read=["open"], synthesize=False, default_policy=True
+            )
+        ],
+        roles=_benchtalk_config().roles,
+    )
+
+    update = acl._build_desired_acl_state(config).role_updates["BenchTalkRole"]
+
+    assert update.policy_titles == ["BenchTalkRole__inline", "Floor"]
+    assert update.default_bucket == "quilt-benchtalk"
+    assert update.signup == BENCHTALK_SIGNUP
+
+
+def test_compute_diff_creates_role_with_signup_fields() -> None:
+    diff = acl.compute_diff(_benchtalk_config(), _empty_current_state())
+
+    assert diff.roles_to_create == [
+        acl.RoleUpdate(
+            name="BenchTalkRole",
+            policy_titles=["BenchTalkRole__inline"],
+            default_bucket="quilt-benchtalk",
+            signup=BENCHTALK_SIGNUP,
+        )
+    ]
+
+
+def test_compute_diff_updates_role_when_only_signup_fields_change() -> None:
+    desired = _benchtalk_config()
+    current = _current_state_for_config(desired)
+    role = current.managed_roles["BenchTalkRole"]
+    role.default_bucket = "quilt-benchtalk"
+    role.signup = SimpleNamespace(**{**BENCHTALK_SIGNUP.__dict__, "access_code": "OLD"})
+
+    diff = acl.compute_diff(desired, current)
+
+    assert [role.name for role in diff.roles_to_update] == ["BenchTalkRole"]
+    assert diff.roles_to_update[0].signup == BENCHTALK_SIGNUP
+
+
+def test_compute_diff_is_clean_when_signup_fields_match() -> None:
+    desired = _benchtalk_config()
+    current = _current_state_for_config(desired)
+    role = current.managed_roles["BenchTalkRole"]
+    role.default_bucket = "quilt-benchtalk"
+    role.signup = SimpleNamespace(**BENCHTALK_SIGNUP.__dict__)
+
+    assert not acl.compute_diff(desired, current).has_changes()
+
+
+def test_compute_diff_clears_signup_fields_the_config_dropped() -> None:
+    desired = acl.AclConfig(
+        policies=[], roles={"BenchTalkRole": acl.AclStaticRole(name="BenchTalkRole")}
+    )
+    current = _current_state_for_config(desired)
+    current.managed_roles["BenchTalkRole"].signup = SimpleNamespace(
+        **BENCHTALK_SIGNUP.__dict__
+    )
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.roles_to_update == [
+        acl.RoleUpdate(name="BenchTalkRole", policy_titles=[])
+    ]
+
+
+def test_compute_diff_updates_unmanaged_role_signup_fields() -> None:
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            "ReadQuiltBucket": acl.AclStaticRole(
+                name="ReadQuiltBucket",
+                unmanaged=True,
+                default_bucket="quilt-example",
+            )
+        },
+    )
+    current = _current_state_for_config(desired)
+
+    diff = acl.compute_diff(desired, current)
+
+    assert diff.unmanaged_roles_to_update == [
+        acl.RoleUpdate(
+            name="ReadQuiltBucket", policy_titles=[], default_bucket="quilt-example"
+        )
+    ]
+    assert diff.has_changes()
+    assert diff.roles_to_update == []
+
+
+def test_compute_diff_leaves_unmanaged_role_alone_without_signup_fields() -> None:
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            "ReadQuiltBucket": acl.AclStaticRole(name="ReadQuiltBucket", unmanaged=True)
+        },
+    )
+    current = _current_state_for_config(desired)
+    current.unmanaged_roles["ReadQuiltBucket"].default_bucket = "quilt-example"
+
+    assert acl.compute_diff(desired, current).unmanaged_roles_to_update == []
+
+
+@pytest.fixture
+def fake_quilt3_role_signup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The quilt3 value itself is covered by test_quilt3_role_signup_builds_the_admin_value;
+    apply tests must not depend on which quilt3 is installed."""
+    monkeypatch.setattr(acl, "_quilt3_role_signup_type", lambda: SimpleNamespace)
+
+
+def _signup_call_fields(signup: Any) -> dict[str, Any]:
+    return {
+        "page": signup.page,
+        "access_code": signup.access_code,
+        "title": signup.title,
+        "description": signup.description,
+    }
+
+
+def test_apply_acl_passes_signup_fields_to_role_create_and_update(
+    fake_quilt3_role_signup: None,
+) -> None:
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+    stack = _fake_stack(
+        roles=SimpleNamespace(
+            create_managed=lambda *a, **k: calls.append(("create", a, k)),
+            update_managed=lambda *a, **k: calls.append(("update", a, k)),
+            list=lambda: [],
+        ),
+        policies=SimpleNamespace(list=lambda: []),
+    )
+    current = _current_state_for_config(
+        acl.AclConfig(
+            policies=[], roles={"Existing": acl.AclStaticRole(name="Existing")}
+        )
+    )
+    diff = acl.AclDiff(
+        roles_to_create=[
+            acl.RoleUpdate(
+                name="BenchTalkRole",
+                policy_titles=[],
+                default_bucket="quilt-benchtalk",
+                signup=BENCHTALK_SIGNUP,
+            )
+        ],
+        roles_to_update=[acl.RoleUpdate(name="Existing", policy_titles=[])],
+    )
+
+    warnings = acl.apply_acl(stack, diff, current)
+
+    assert warnings == []
+    assert [c[0] for c in calls] == ["create", "update"]
+    create_kwargs = calls[0][2]
+    assert create_kwargs["default_bucket"] == "quilt-benchtalk"
+    assert _signup_call_fields(create_kwargs["signup"]) == BENCHTALK_SIGNUP.__dict__
+    # A role with no signup fields on either side sends none, so an older
+    # quilt3 without the keyword arguments keeps working.
+    assert set(calls[1][2]) == {"name", "policies"}
+
+
+def test_apply_acl_sends_explicit_nulls_to_clear_signup_fields(
+    fake_quilt3_role_signup: None,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    stack = _fake_stack(
+        roles=SimpleNamespace(
+            update_managed=lambda *a, **k: calls.append(k), list=lambda: []
+        ),
+        policies=SimpleNamespace(list=lambda: []),
+    )
+    current = _current_state_for_config(
+        acl.AclConfig(
+            policies=[], roles={"Existing": acl.AclStaticRole(name="Existing")}
+        )
+    )
+    current.managed_roles["Existing"].signup = SimpleNamespace(
+        **BENCHTALK_SIGNUP.__dict__
+    )
+    diff = acl.AclDiff(
+        roles_to_update=[acl.RoleUpdate(name="Existing", policy_titles=[])]
+    )
+
+    acl.apply_acl(stack, diff, current)
+
+    assert calls == [
+        {"name": "Existing", "policies": [], "default_bucket": None, "signup": None}
+    ]
+
+
+def test_apply_acl_updates_unmanaged_role_signup_fields_only(
+    fake_quilt3_role_signup: None,
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    stack = _fake_stack(
+        roles=SimpleNamespace(
+            update_unmanaged=lambda *a, **k: calls.append((a, k)), list=lambda: []
+        ),
+        policies=SimpleNamespace(list=lambda: []),
+    )
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            "ReadQuiltBucket": acl.AclStaticRole(
+                name="ReadQuiltBucket", unmanaged=True, default_bucket="quilt-example"
+            )
+        },
+    )
+    current = _current_state_for_config(desired)
+    diff = acl.compute_diff(desired, current)
+
+    warnings = acl.apply_acl(stack, diff, current)
+
+    assert warnings == []
+    existing = current.unmanaged_roles["ReadQuiltBucket"]
+    assert calls == [
+        (
+            (existing.id,),
+            {
+                "name": "ReadQuiltBucket",
+                "arn": existing.arn,
+                "default_bucket": "quilt-example",
+            },
+        )
+    ]
+
+
+def test_apply_acl_reports_unmanaged_role_signup_failure(
+    fake_quilt3_role_signup: None,
+) -> None:
+    def fail(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("page taken")
+
+    stack = _fake_stack(
+        roles=SimpleNamespace(update_unmanaged=fail, list=lambda: []),
+        policies=SimpleNamespace(list=lambda: []),
+    )
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            "ReadQuiltBucket": acl.AclStaticRole(
+                name="ReadQuiltBucket", unmanaged=True, default_bucket="quilt-example"
+            )
+        },
+    )
+    current = _current_state_for_config(desired)
+
+    warnings = acl.apply_acl(stack, acl.compute_diff(desired, current), current)
+
+    assert any("ReadQuiltBucket" in w and "page taken" in w for w in warnings)
+
+
+def test_quilt3_role_signup_builds_the_admin_value() -> None:
+    import quilt3.admin.types as quilt3_types
+
+    if not hasattr(quilt3_types, "RoleSignup"):
+        pytest.skip("installed quilt3 predates role signup pages")
+
+    value = acl._quilt3_role_signup(BENCHTALK_SIGNUP)
+
+    assert type(value).__name__ == "RoleSignup"
+    assert _signup_call_fields(value) == BENCHTALK_SIGNUP.__dict__
+    assert acl._quilt3_role_signup(None) is None
+
+
+def test_capture_round_trips_signup_fields(tmp_path: Path) -> None:
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            **_benchtalk_config().roles,
+            "ReadQuiltBucket": acl.AclStaticRole(
+                name="ReadQuiltBucket",
+                unmanaged=True,
+                default_bucket="quilt-example",
+                access_code="OPEN26",
+                signup_page="open",
+            ),
+        },
+    )
+    current = _current_state_for_config(desired)
+    managed = current.managed_roles["BenchTalkRole"]
+    managed.default_bucket = "quilt-benchtalk"
+    managed.signup = SimpleNamespace(**BENCHTALK_SIGNUP.__dict__)
+    unmanaged = current.unmanaged_roles["ReadQuiltBucket"]
+    unmanaged.default_bucket = "quilt-example"
+    unmanaged.signup = SimpleNamespace(
+        page="open", access_code="OPEN26", title="", description=None
+    )
+
+    exported = acl.current_state_as_acl_yaml(
+        current, catalog="example.quiltdata.com", captured_on="2026-10-14"
+    )
+    payload = yaml.safe_load(exported)
+    exported_path = tmp_path / "exported.yml"
+    exported_path.write_text(exported)
+    replay = acl.compute_diff(acl.parse_acl_config(exported_path), current)
+
+    assert payload["roles"]["BenchTalkRole"] == {
+        "buckets.read_write": ["quilt-benchtalk"],
+        "config.default_bucket": "quilt-benchtalk",
+        "signup.access_code": "BENCHTALK26",
+        "signup.page": "benchtalk",
+        "signup.title": BENCHTALK_SIGNUP.title,
+        "signup.description": BENCHTALK_SIGNUP.description,
+    }
+    assert payload["roles"]["ReadQuiltBucket"] == {
+        "config.unmanaged": True,
+        "config.default_bucket": "quilt-example",
+        "signup.access_code": "OPEN26",
+        "signup.page": "open",
+    }
+    assert not replay.has_changes()
+
+
+def test_role_as_dict_includes_signup_fields() -> None:
+    role = FakeRole(
+        id="id-r",
+        name="BenchTalkRole",
+        policies=[],
+        permissions=[],
+        default_bucket="quilt-benchtalk",
+        signup=SimpleNamespace(**BENCHTALK_SIGNUP.__dict__),
+    )
+
+    payload = acl._role_as_dict(role, managed=True, is_default=False)
+
+    assert payload["default_bucket"] == "quilt-benchtalk"
+    assert payload["signup"] == BENCHTALK_SIGNUP.__dict__
+    assert (
+        acl._role_as_dict(
+            FakeRole(id="x", name="Plain", policies=[], permissions=[]),
+            managed=True,
+            is_default=False,
+        )["signup"]
+        is None
+    )
+
+
+def test_parse_acl_config_rejects_page_with_url_separators(tmp_path: Path) -> None:
+    for page in ("team/prod", "team#invite", "has space"):
+        config_path = tmp_path / "acl.yml"
+        config_path.write_text(f"""
+policies: {{}}
+roles:
+  Cohort:
+    signup.access_code: CODE
+    signup.page: "{page}"
+""")
+        with pytest.raises(ValueError, match="single URL path segment"):
+            acl.parse_acl_config(config_path)
+
+
+def test_parse_acl_config_rejects_null_access_code(tmp_path: Path) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies: {}
+roles:
+  Cohort:
+    signup.access_code: null
+""")
+    with pytest.raises(
+        ValueError, match="signup.access_code must be a non-empty string"
+    ):
+        acl.parse_acl_config(config_path)
+
+
+def test_kebab_case_splits_camel_case() -> None:
+    assert acl._kebab_case("BenchTalkRole") == "bench-talk-role"
+    assert acl._kebab_case("VIRPilot2026") == "vir-pilot2026"
+    assert acl._kebab_case("snake_case name") == "snake-case-name"
+
+
+def test_parse_acl_config_rejects_default_bucket_the_role_cannot_read(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "acl.yml"
+    config_path.write_text("""
+policies:
+  Floor:
+    config.synthesize: false
+    config.default_policy: true
+    buckets.read: [floor-bucket]
+  Shared:
+    config.synthesize: false
+    buckets.read: [shared-bucket]
+roles:
+  ViaFloor:
+    config.default_bucket: floor-bucket
+  ViaPolicy:
+    config.policies: [Shared]
+    config.default_bucket: shared-bucket
+  ViaOwnGrant:
+    buckets.read_write: [own-bucket]
+    config.default_bucket: own-bucket
+  Unmanaged:
+    config.unmanaged: true
+    config.default_bucket: somewhere-in-iam
+""")
+    acl.parse_acl_config(config_path)
+
+    config_path.write_text("""
+policies: {}
+roles:
+  Lost:
+    config.default_bucket: not-granted
+""")
+    with pytest.raises(ValueError, match="not a bucket this role can read"):
+        acl.parse_acl_config(config_path)
+
+
+def test_unmanaged_role_sends_only_declared_signup_fields(
+    fake_quilt3_role_signup: None,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    stack = _fake_stack(
+        roles=SimpleNamespace(
+            update_unmanaged=lambda *a, **k: calls.append(k), list=lambda: []
+        ),
+        policies=SimpleNamespace(list=lambda: []),
+    )
+    desired = acl.AclConfig(
+        policies=[],
+        roles={
+            "ReadQuiltBucket": acl.AclStaticRole(
+                name="ReadQuiltBucket", unmanaged=True, default_bucket="quilt-example"
+            )
+        },
+    )
+    current = _current_state_for_config(desired)
+    # The server's page is not declared in the file and must survive.
+    current.unmanaged_roles["ReadQuiltBucket"].signup = SimpleNamespace(
+        **BENCHTALK_SIGNUP.__dict__
+    )
+    diff = acl.compute_diff(desired, current)
+
+    acl.apply_acl(stack, diff, current)
+
+    assert calls == [
+        {
+            "name": "ReadQuiltBucket",
+            "arn": current.unmanaged_roles["ReadQuiltBucket"].arn,
+            "default_bucket": "quilt-example",
+        }
+    ]
+    # And once the server matches the declared field there is nothing to do.
+    current.unmanaged_roles["ReadQuiltBucket"].default_bucket = "quilt-example"
+    assert acl.compute_diff(desired, current).unmanaged_roles_to_update == []
+
+
+def test_detaching_deleted_policies_does_not_touch_signup_fields() -> None:
+    calls: list[dict[str, Any]] = []
+    stack = _fake_stack(
+        roles=SimpleNamespace(update_managed=lambda *a, **k: calls.append(k)),
+    )
+    current = _current_state_for_config(
+        acl.AclConfig(
+            policies=[acl.AclPolicy(name="Old", read=["b"], synthesize=False)],
+            roles={"R": acl.AclStaticRole(name="R", policies=["Old"])},
+        )
+    )
+    current.managed_roles["R"].signup = SimpleNamespace(**BENCHTALK_SIGNUP.__dict__)
+
+    acl.detach_policies_from_roles(stack, {"Old"}, current, {}, roles_to_delete=set())
+
+    assert calls == [{"name": "R", "policies": []}]
+
+
+def test_print_diff_lists_unmanaged_role_signup_updates(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    diff = acl.AclDiff(
+        unmanaged_roles_to_update=[
+            acl.RoleUpdate(name="ReadQuiltBucket", policy_titles=[], default_bucket="b")
+        ]
+    )
+
+    acl.print_diff(diff)
+
+    assert "~ role ReadQuiltBucket (unmanaged" in capsys.readouterr().out
+
+
+def test_role_signup_kwargs_report_missing_quilt3_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_support() -> Any:
+        raise RuntimeError("the installed quilt3 has no role signup support")
+
+    monkeypatch.setattr(acl, "_quilt3_role_signup_type", no_support)
+    update = acl.RoleUpdate(name="R", policy_titles=[], default_bucket="b")
+
+    with pytest.raises(RuntimeError, match="no role signup support"):
+        acl._role_signup_kwargs(update, None)
+    assert (
+        acl._role_signup_kwargs(acl.RoleUpdate(name="R", policy_titles=[]), None) == {}
+    )
