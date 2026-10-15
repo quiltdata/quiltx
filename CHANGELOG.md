@@ -8,9 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-14
+
 ### Added
 
-- A role can declare `config.default_bucket`, `signup.access_code`, `signup.page`, `signup.title` and `signup.description` in the ACL file (quilt-specs `changes/access-code-signup`). `catalog acl` reconciles them on managed roles, writes them (and nothing else) to unmanaged roles that declare them, and captures re-emit them. `signup.page`/`access_code`/`title` are rejected at parse time, matching the registry's column limits, if oversized; `signup.page` is also rejected if empty, made only of dots, or not a single URL path segment. Applying them needs a registry and quilt3 that expose role signup pages; a file that never uses them works with older ones ([#130](https://github.com/quiltdata/quiltx/pull/130))
+- A role can declare `config.default_bucket`, `signup.access_code`, `signup.page`, `signup.title` and `signup.description` in the ACL file (quilt-specs `changes/access-code-signup`). `catalog acl` reconciles them on managed roles, writes them (and nothing else) to unmanaged roles that declare them, and captures re-emit them. `signup.page`/`access_code`/`title` are rejected at parse time, matching the registry's column limits, if oversized; `signup.page` is also rejected if empty, made only of dots, or not a single URL path segment. Applying them needs a registry and quilt3 that expose role signup pages; see Changed for what that means for older registries ([#130](https://github.com/quiltdata/quiltx/pull/130))
+
+### Changed
+
+- Requires `quilt3>=8.1.0a3`, the first quilt3 whose admin client exposes role `default_bucket` and `signup` ([quilt#5470](https://github.com/quiltdata/quilt/pull/5470)). That quilt3 cannot read roles from a registry without role signup pages (enterprise#1219), so `catalog acl` against an older registry fails even when the ACL file uses no `signup.*` keys. Stay on 0.22.0 for those registries, and install it with `quilt3==8.1.0a2` as well, since 0.22.0's `quilt3>=8.1.0a2` would otherwise resolve to 8.1.0a3
 
 ### Fixed
 
