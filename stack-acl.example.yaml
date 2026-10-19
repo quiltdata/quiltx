@@ -55,8 +55,9 @@ policies:
 
 # Each static role composes only the explicitly specified policies and/or grants.
 # Users can match (and have) multiple static and synthetic roles.
-# The last-matching role is selected at first login,
-# the last-used role is selected thereafter.
+# At first login the role of the first matching SSO mapping is selected, and
+# quiltx writes sso.email mappings first, then the policy ladder from its top
+# rung, then the static roles; the last-used role is selected thereafter.
 
 roles:
 

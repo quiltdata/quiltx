@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A re-applied ACL writes the SSO config in rank order — `sso.email` roles, then the policy ladder from its top rung, then other static roles — so a first login, or an account `--create-and-email-users` makes, starts on the first role it matches in that order instead of the bottom rung. Users already active on a lower rung switch once in the catalog's role menu ([#PR](https://github.com/quiltdata/quiltx/pull/PR))
+
 ## [0.23.0] - 2026-10-14
 
 ### Added

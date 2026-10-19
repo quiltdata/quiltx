@@ -23,8 +23,10 @@ A config has exactly two top-level keys: `policies:` and `roles:`.
   (`sso.groups`), the named policies it composes (`config.policies`), any
   inline bucket grants (`buckets.read`, `buckets.read_write`), and
   optional flags (`config.is_admin`). Users may match multiple static and
-  synthetic roles; the last-matching role is selected at first login, and the
-  last-used role thereafter (client-side concern — out of scope).
+  synthetic roles; the role of the first matching SSO mapping is selected at
+  first login, and the last-used role thereafter (client-side concern — out of
+  scope). quiltx writes `sso.email` mappings first, then the ladder from its
+  top rung, then the static roles.
 
 ## Semantic model → Quilt admin API
 
@@ -49,9 +51,9 @@ underscore-joined policy names in reverse index order (e.g.
 comment convention.
 
 Each policy emits **one SSO mapping per listed group**, pointing at *its own*
-synthesized role. Quilt's last-matching-wins rule gives users in more
-privileged groups the wider role automatically — no per-subset enumeration
-needed.
+synthesized role. quiltx writes the ladder's mappings top rung first and Quilt
+activates the first match, which gives users in more privileged groups the
+wider role automatically — no per-subset enumeration needed.
 
 **Safety: the subset property is load-bearing and must be validated, not
 assumed.** If policy i's groups are not a subset of policy j's groups (for

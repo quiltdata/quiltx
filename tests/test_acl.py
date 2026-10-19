@@ -661,8 +661,8 @@ policies:
     assert list(desired.role_updates) == ["public", "executives"]
     assert desired.default_role_name == "executives"
     assert [mapping["roles"] for mapping in sso["mappings"]] == [
-        ["public"],
         ["executives"],
+        ["public"],
     ]
 
 
@@ -710,8 +710,8 @@ def test_build_sso_config_emits_policy_and_static_role_mappings() -> None:
     payload = yaml.safe_load(sso_config)
 
     assert payload["default_role"] == "internal_public"
-    assert payload["mappings"][0]["roles"] == ["public"]
-    assert payload["mappings"][1]["roles"] == ["internal_public"]
+    assert payload["mappings"][0]["roles"] == ["internal_public"]
+    assert payload["mappings"][1]["roles"] == ["public"]
     assert payload["mappings"][2]["roles"] == ["exec"]
     assert payload["mappings"][2]["admin"] is True
 
@@ -752,7 +752,7 @@ roles:
         }
     }
     assert payload["mappings"][1]["schema"]["required"] == ["department"]
-    assert payload["mappings"][2]["schema"]["properties"] == {
+    assert payload["mappings"][0]["schema"]["properties"] == {
         "email": {
             "anyOf": [
                 {"const": "owner@example.com"},
@@ -760,7 +760,115 @@ roles:
             ]
         }
     }
-    assert payload["mappings"][2]["schema"]["required"] == ["email"]
+    assert payload["mappings"][0]["schema"]["required"] == ["email"]
+
+
+def _sso_mapping_rows(
+    config: acl.AclConfig,
+) -> list[tuple[str, str, str, bool | None] | None]:
+    payload = yaml.safe_load(acl.build_sso_config(config) or "")
+    return [acl._decode_acl_sso_mapping(mapping) for mapping in payload["mappings"]]
+
+
+def test_build_sso_config_writes_mappings_in_rank_order() -> None:
+    config = acl.parse_acl_config_text("""
+policies:
+  demo:
+    sso.groups: [Everyone]
+    config.default_role: true
+  employees:
+    name: employees
+    sso.groups: [Employees, Executives]
+  executives:
+    name: executives
+    sso.groups: [Executives]
+    config.is_admin: true
+roles:
+  test:
+    sso.groups: [Employees]
+    config.policies: [demo]
+  automation:
+    sso.email: [bot@example.com]
+    config.policies: [employees]
+""")
+
+    payload = yaml.safe_load(acl.build_sso_config(config) or "")
+
+    assert _sso_mapping_rows(config) == [
+        ("automation", "email", "bot@example.com", None),
+        ("executives", "groups", "Executives", True),
+        ("employees", "groups", "Employees", None),
+        ("employees", "groups", "Executives", None),
+        ("demo", "groups", "Everyone", None),
+        ("test", "groups", "Employees", None),
+    ]
+    assert {key: value for key, value in payload.items() if key != "mappings"} == {
+        "version": "1.0",
+        "union_roles": True,
+        "default_role": "demo",
+    }
+
+
+def test_build_sso_config_ranks_an_email_mapping_ahead_but_not_its_role() -> None:
+    """Naming a person lifts that person's mapping only: the rest of the role's
+    audience keeps its place, so one named contractor cannot pull every
+    ``Everyone`` login down to ``demo``."""
+    config = acl.parse_acl_config_text("""
+policies:
+  demo:
+    sso.groups: [Everyone]
+    sso.email: [contractor@example.com]
+    config.default_role: true
+  executives:
+    name: executives
+    sso.groups: [Executives]
+roles:
+  test:
+    sso.groups: [Employees]
+    sso.email: [tester@example.com]
+    config.policies: [demo]
+  ReadQuiltBucket:
+    config.unmanaged: true
+    sso.groups: [Admins]
+""")
+
+    assert _sso_mapping_rows(config) == [
+        ("demo", "email", "contractor@example.com", None),
+        ("test", "email", "tester@example.com", None),
+        ("executives", "groups", "Executives", None),
+        ("demo", "groups", "Everyone", None),
+        ("test", "groups", "Employees", None),
+        ("ReadQuiltBucket", "groups", "Admins", None),
+    ]
+
+
+def test_build_sso_config_ranks_a_person_on_several_rungs_top_first() -> None:
+    """The ladder makes a person named on a rung repeat on every rung below it."""
+    config = acl.parse_acl_config_text("""
+policies:
+  employees:
+    name: employees
+    sso.groups: [Employees, Executives]
+    sso.email: [alice@example.com]
+    config.default_role: true
+  executives:
+    name: executives
+    sso.groups: [Executives]
+    sso.email: [alice@example.com]
+roles:
+  automation:
+    sso.email: [alice@example.com]
+    config.policies: [employees]
+""")
+
+    assert _sso_mapping_rows(config) == [
+        ("executives", "email", "alice@example.com", None),
+        ("employees", "email", "alice@example.com", None),
+        ("automation", "email", "alice@example.com", None),
+        ("executives", "groups", "Executives", None),
+        ("employees", "groups", "Employees", None),
+        ("employees", "groups", "Executives", None),
+    ]
 
 
 def test_user_block_reconciles_primary_extra_roles_and_admin() -> None:
@@ -1078,10 +1186,10 @@ roles: {}
     assert diff.sso_config_text is not None
     payload = yaml.safe_load(diff.sso_config_text)
 
-    assert payload["mappings"][0]["roles"] == ["public"]
-    assert payload["mappings"][0]["admin"] is True
-    assert payload["mappings"][1]["roles"] == ["internal_public"]
-    assert payload["mappings"][1]["admin"] is False
+    assert payload["mappings"][0]["roles"] == ["internal_public"]
+    assert payload["mappings"][0]["admin"] is False
+    assert payload["mappings"][1]["roles"] == ["public"]
+    assert payload["mappings"][1]["admin"] is True
     assert any(
         "config.is_admin: false" in warning
         and "vetoes" in warning
@@ -6089,8 +6197,9 @@ roles: {{}}
     assert "not created" in warning
 
 
-def test_plan_user_creations_makes_last_matching_role_active() -> None:
-    """One person on several rungs starts where their first login would leave them."""
+def test_plan_user_creations_makes_first_matching_role_active() -> None:
+    """One person in several roles starts where their first login would leave them:
+    on the role of the first SSO mapping naming them."""
     address = "alice@example.com"
     config = acl.parse_acl_config_text(f"""
 policies:
@@ -6113,10 +6222,14 @@ roles:
         acl.UserCreation(
             name="alice_example_com",
             email=address,
-            role="Execs",
-            extra_roles=("public", "Leads"),
+            role="public",
+            extra_roles=("Leads", "Execs"),
         ),
     )
+    first_login_role = next(
+        row[0] for row in _sso_mapping_rows(config) if row and row[2] == address
+    )
+    assert first_login_role == plan.creations[0].role
 
 
 def test_create_roster_users_sends_name_email_and_role() -> None:

@@ -400,6 +400,9 @@ class _DesiredAclState:
     static_roles: list[_ResolvedStaticRole]
     role_updates: dict[str, RoleUpdate]
     sso_mappings: list[_SsoMapping]
+    """In rank order, because a login that keeps no active role gets the first
+    matching mapping: ``sso.email`` mappings, then the rest, each part running
+    the ladder from its top rung, then the other static roles."""
     default_role_name: str | None
     warnings: list[str] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
@@ -1277,9 +1280,10 @@ def sso_email_roster(
     the synthesized policy ladder contributes its roster exactly like a static
     role does, under the role name that will actually exist.
 
-    Roles come back in declaration order, deduped. Addresses are matched
-    case-insensitively and reported under the spelling the file used first, so
-    two spellings of one person are one entry rather than two accounts.
+    Roles come back in ``sso_mappings`` rank order, deduped. Addresses are
+    matched case-insensitively and reported under the spelling that comes first
+    in that order, so two spellings of one person are one entry rather than two
+    accounts.
     """
     state = desired_state or _build_desired_acl_state(config)
     canonical: dict[str, str] = {}
@@ -1355,11 +1359,10 @@ def plan_user_creations(
     form of that and refuses, because a second account splits one person's roles
     across two logins.
 
-    When several roles name the same person the last declaration becomes the
-    active role and the earlier ones become extra roles. The generated SSO
-    config sets ``union_roles: true`` and the catalog activates the
-    last-matching role at first login, so the account starts where its own first
-    login would have left it instead of somewhere a re-login would move it.
+    When several roles name the same person the first of them in the roster
+    becomes the active role and the rest become extra roles. The roster follows
+    the rank order the registry's first match does, so the account starts where
+    its own first login would have left it.
 
     An address is only created when every role its roster entry names exists: the
     registry rejects a creation naming a role it does not hold, and whether it
@@ -1484,7 +1487,7 @@ def plan_user_creations(
                 "choosing."
             )
             continue
-        *extra_roles, active_role = roles
+        active_role, *extra_roles = roles
         creations.append(
             UserCreation(
                 name=name,
@@ -4112,6 +4115,16 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
                 "only role is unmanaged does not receive the default policies and "
                 "must also match a managed role's selector to get them."
             )
+
+    rungs = {role.name: i for i, role in enumerate(synthesized_roles)}
+
+    def rank(mapping: _SsoMapping) -> tuple[int, int, int]:
+        rung = rungs.get(mapping.role_name)
+        within = (0, -rung) if rung is not None else (1, 0)
+        return (0 if mapping.claim == SSO_EMAIL_CLAIM else 1, *within)
+
+    # Stable, so file order holds within a rank.
+    sso_mappings.sort(key=rank)
 
     return _DesiredAclState(
         policy_updates=policy_updates,

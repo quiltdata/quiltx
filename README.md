@@ -230,6 +230,12 @@ and `internal` synthesizes `internal_public`, which cumulatively includes both
 `public` and `internal`. Reordering the policies changes those synthesized role
 names and who receives which cumulative grants.
 
+A login that keeps no active role lands on the role of the first SSO mapping the
+user matches, so quiltx writes the mappings in rank order: `sso.email` selectors,
+then the rest, each part running the policy ladder from its top rung down, then
+the other static roles in file order. A static role matched alongside a ladder
+rung is an extra role.
+
 Policy `config.is_admin` also composes cumulatively for synthesized roles.
 Unset is neutral, `true` grants admin, and an explicit `false` vetoes any prior
 `true` in that generated role and is reported as a warning.
@@ -489,10 +495,10 @@ be in the file.
 An address any account already answers for is never created again, decided by
 the same resolution `users:` keys get: username first, then a unique email match.
 For a roster it is almost always the email that matches, since a folded handle is
-not the address it came from. When several roles name the same person, the last
-declaration becomes the active role and the earlier ones become extra roles,
-matching `union_roles: true` and the last-matching first-login pick. An address
-two accounts already answer for is reported as a nonfatal notice: nothing needs
+not the address it came from. When several roles name the same person, the
+account starts on the one their first login would activate under the SSO
+mappings' rank order, and holds the others as extra roles. An address two
+accounts already answer for is reported as a nonfatal notice: nothing needs
 creating, so it is counted once as already onboarded and does not fail the run,
 while two accounts sharing one address is still worth knowing about.
 
