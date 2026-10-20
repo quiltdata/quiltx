@@ -833,8 +833,8 @@ roles:
 """)
 
     assert _sso_mapping_rows(config) == [
-        ("demo", "email", "contractor@example.com", None),
         ("test", "email", "tester@example.com", None),
+        ("demo", "email", "contractor@example.com", None),
         ("executives", "groups", "Executives", None),
         ("demo", "groups", "Everyone", None),
         ("test", "groups", "Employees", None),
@@ -842,8 +842,9 @@ roles:
     ]
 
 
-def test_build_sso_config_ranks_a_person_on_several_rungs_top_first() -> None:
-    """The ladder makes a person named on a rung repeat on every rung below it."""
+def test_build_sso_config_ranks_a_named_persons_static_role_then_rungs() -> None:
+    """A person named on a static role starts there; named on rungs only, they start
+    on the top one, since the ladder makes them repeat on every rung below."""
     config = acl.parse_acl_config_text("""
 policies:
   employees:
@@ -862,9 +863,9 @@ roles:
 """)
 
     assert _sso_mapping_rows(config) == [
+        ("automation", "email", "alice@example.com", None),
         ("executives", "email", "alice@example.com", None),
         ("employees", "email", "alice@example.com", None),
-        ("automation", "email", "alice@example.com", None),
         ("executives", "groups", "Executives", None),
         ("employees", "groups", "Employees", None),
         ("employees", "groups", "Executives", None),
@@ -5754,7 +5755,7 @@ roles:
     config.policies: [public]
 """)
 
-    assert acl.sso_email_roster(config) == {"Alice@Example.com": ["public", "Leads"]}
+    assert acl.sso_email_roster(config) == {"Alice@Example.com": ["Leads", "public"]}
 
 
 @pytest.mark.parametrize(
@@ -6222,8 +6223,8 @@ roles:
         acl.UserCreation(
             name="alice_example_com",
             email=address,
-            role="public",
-            extra_roles=("Leads", "Execs"),
+            role="Leads",
+            extra_roles=("Execs", "public"),
         ),
     )
     first_login_role = next(

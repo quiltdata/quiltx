@@ -231,10 +231,11 @@ and `internal` synthesizes `internal_public`, which cumulatively includes both
 names and who receives which cumulative grants.
 
 A login that keeps no active role lands on the role of the first SSO mapping the
-user matches, so quiltx writes the mappings in rank order: `sso.email` selectors,
-then the rest, each part running the policy ladder from its top rung down, then
-the other static roles in file order. A static role a user matches only by group,
-alongside a ladder rung, is an extra role.
+user matches, so quiltx writes the mappings in rank order: `sso.email` selectors
+first, static roles before ladder rungs, then the other selectors, ladder rungs
+before static roles. The ladder runs from its top rung down, and ties keep file
+order. A static role a user matches only by group, alongside a ladder rung, is an
+extra role.
 
 Policy `config.is_admin` also composes cumulatively for synthesized roles.
 Unset is neutral, `true` grants admin, and an explicit `false` vetoes any prior

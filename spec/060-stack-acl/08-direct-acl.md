@@ -25,8 +25,8 @@ A config has exactly two top-level keys: `policies:` and `roles:`.
   optional flags (`config.is_admin`). Users may match multiple static and
   synthetic roles; the role of the first matching SSO mapping is selected at
   first login, and the last-used role thereafter (client-side concern — out of
-  scope). quiltx writes `sso.email` mappings first, then the ladder from its
-  top rung, then the static roles.
+  scope). quiltx writes `sso.email` mappings first (static roles before ladder
+  rungs), then the ladder from its top rung, then the static roles.
 
 ## Semantic model → Quilt admin API
 

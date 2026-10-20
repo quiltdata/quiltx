@@ -400,9 +400,7 @@ class _DesiredAclState:
     static_roles: list[_ResolvedStaticRole]
     role_updates: dict[str, RoleUpdate]
     sso_mappings: list[_SsoMapping]
-    """In rank order, because a login that keeps no active role gets the first
-    matching mapping: ``sso.email`` mappings, then the rest, each part running
-    the ladder from its top rung, then the other static roles."""
+    """In declaration order; ``_ranked_sso_mappings`` gives the order logins see."""
     default_role_name: str | None
     warnings: list[str] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
@@ -1280,21 +1278,24 @@ def sso_email_roster(
     the synthesized policy ladder contributes its roster exactly like a static
     role does, under the role name that will actually exist.
 
-    Roles come back in ``sso_mappings`` rank order, deduped. Addresses are
-    matched case-insensitively and reported under the spelling that comes first
-    in that order, so two spellings of one person are one entry rather than two
-    accounts.
+    Roles come back in the order ``build_sso_config`` writes them, deduped, so
+    the first is the one a first login activates. Addresses come back in
+    declaration order, matched case-insensitively and reported under the
+    spelling the file used first, so two spellings of one person are one entry
+    rather than two accounts.
     """
     state = desired_state or _build_desired_acl_state(config)
     canonical: dict[str, str] = {}
     roster: dict[str, list[str]] = {}
     for mapping in state.sso_mappings:
-        if mapping.claim != SSO_EMAIL_CLAIM:
-            continue
-        address = canonical.setdefault(mapping.value.lower(), mapping.value)
-        roles = roster.setdefault(address, [])
-        if mapping.role_name not in roles:
-            roles.append(mapping.role_name)
+        if mapping.claim == SSO_EMAIL_CLAIM:
+            address = canonical.setdefault(mapping.value.lower(), mapping.value)
+            roster.setdefault(address, [])
+    for mapping in _ranked_sso_mappings(state):
+        if mapping.claim == SSO_EMAIL_CLAIM:
+            roles = roster[canonical[mapping.value.lower()]]
+            if mapping.role_name not in roles:
+                roles.append(mapping.role_name)
     return roster
 
 
@@ -2081,6 +2082,24 @@ def _merge_permissions(target: dict[str, str], source: dict[str, str]) -> None:
             target[bucket] = level
 
 
+def _ranked_sso_mappings(state: _DesiredAclState) -> list[_SsoMapping]:
+    """The mappings in rank order, because a login that keeps no active role gets
+    the first matching one: ``sso.email`` mappings of static roles, then of the
+    ladder from its top rung; then the rest of the ladder from its top rung, then
+    the other static roles. Ties keep file order."""
+    rungs = {role.name: i for i, role in enumerate(state.synthesized_roles)}
+
+    def rank(mapping: _SsoMapping) -> tuple[int, int]:
+        rung = rungs.get(mapping.role_name)
+        if mapping.claim == SSO_EMAIL_CLAIM:
+            tier = 0 if rung is None else 1
+        else:
+            tier = 2 if rung is not None else 3
+        return (tier, -(rung or 0))
+
+    return sorted(state.sso_mappings, key=rank)
+
+
 def build_sso_config(config: AclConfig) -> str | None:
     """Translate the flat ACL config into Quilt's schema-based SSO YAML."""
     desired_state = _build_desired_acl_state(config)
@@ -2096,7 +2115,7 @@ def build_sso_config(config: AclConfig) -> str | None:
     if desired_state.default_role_name is not None:
         payload["default_role"] = desired_state.default_role_name
 
-    for mapping in desired_state.sso_mappings:
+    for mapping in _ranked_sso_mappings(desired_state):
         entry: dict[str, Any] = {
             "schema": {
                 "type": "object",
@@ -4115,16 +4134,6 @@ def _build_desired_acl_state(config: AclConfig) -> _DesiredAclState:
                 "only role is unmanaged does not receive the default policies and "
                 "must also match a managed role's selector to get them."
             )
-
-    rungs = {role.name: i for i, role in enumerate(synthesized_roles)}
-
-    def rank(mapping: _SsoMapping) -> tuple[int, int, int]:
-        rung = rungs.get(mapping.role_name)
-        within = (0, -rung) if rung is not None else (1, 0)
-        return (0 if mapping.claim == SSO_EMAIL_CLAIM else 1, *within)
-
-    # Stable, so file order holds within a rank.
-    sso_mappings.sort(key=rank)
 
     return _DesiredAclState(
         policy_updates=policy_updates,
