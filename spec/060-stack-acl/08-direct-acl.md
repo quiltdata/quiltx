@@ -53,7 +53,8 @@ comment convention.
 Each policy emits **one SSO mapping per listed group**, pointing at *its own*
 synthesized role. quiltx writes the ladder's mappings top rung first and Quilt
 activates the first match, which gives users in more privileged groups the
-wider role automatically — no per-subset enumeration needed.
+wider role at a login that keeps no active role — no per-subset enumeration
+needed.
 
 **Safety: the subset property is load-bearing and must be validated, not
 assumed.** If policy i's groups are not a subset of policy j's groups (for
