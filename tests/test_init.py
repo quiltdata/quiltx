@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import importlib.metadata
 import sys
 import types
 
 import pytest
 
 import quiltx
+
+
+def test_version_is_the_installed_release() -> None:
+    assert quiltx.__version__ == importlib.metadata.version("quiltx")
 
 
 def test_get_catalog_config(monkeypatch) -> None:

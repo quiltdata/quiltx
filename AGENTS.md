@@ -304,7 +304,7 @@ Functions for catalog configuration and credentials. Use `from quiltx.config imp
 
 ## Publishing Releases
 
-1. Update `version` in [pyproject.toml](pyproject.toml) and [CHANGELOG.md](CHANGELOG.md)
+1. Update `version` in [pyproject.toml](pyproject.toml), [quiltx/_version.py](quiltx/_version.py) and [CHANGELOG.md](CHANGELOG.md)
 2. Merge to `main`
 
 On each push to `main`, [.github/workflows/publish.yml](.github/workflows/publish.yml)
