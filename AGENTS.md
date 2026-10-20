@@ -224,8 +224,9 @@ Resolution order is username then unique email, the same as a `users:` key, but
 for a roster it is nearly always the email index that hits: `derive_username`
 folds rather than copies, so a quiltx-created account is not named after its own
 address, and an SSO self-registration is only until `USERNAME_MAX_LENGTH` cuts it
-off. Multi-role: last declaration is active, earlier ones are extra roles,
-matching `union_roles: true` and the last-matching first-login pick.
+off. Multi-role: the first role in `_ranked_sso_mappings` order, the order
+`build_sso_config` writes, is active and the rest are extra roles, matching the
+registry's first match at login.
 
 An address is only created when every role it names exists, and
 `include_planned_roles` is what "exists" means. The dry-run reader passes `True`

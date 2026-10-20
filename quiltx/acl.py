@@ -400,6 +400,7 @@ class _DesiredAclState:
     static_roles: list[_ResolvedStaticRole]
     role_updates: dict[str, RoleUpdate]
     sso_mappings: list[_SsoMapping]
+    """In declaration order; ``_ranked_sso_mappings`` gives the order logins see."""
     default_role_name: str | None
     warnings: list[str] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
@@ -1277,20 +1278,24 @@ def sso_email_roster(
     the synthesized policy ladder contributes its roster exactly like a static
     role does, under the role name that will actually exist.
 
-    Roles come back in declaration order, deduped. Addresses are matched
-    case-insensitively and reported under the spelling the file used first, so
-    two spellings of one person are one entry rather than two accounts.
+    Roles come back in the order ``build_sso_config`` writes them, deduped, so
+    the first is the one a first login activates. Addresses come back in
+    declaration order, matched case-insensitively and reported under the
+    spelling the file used first, so two spellings of one person are one entry
+    rather than two accounts.
     """
     state = desired_state or _build_desired_acl_state(config)
     canonical: dict[str, str] = {}
     roster: dict[str, list[str]] = {}
     for mapping in state.sso_mappings:
-        if mapping.claim != SSO_EMAIL_CLAIM:
-            continue
-        address = canonical.setdefault(mapping.value.lower(), mapping.value)
-        roles = roster.setdefault(address, [])
-        if mapping.role_name not in roles:
-            roles.append(mapping.role_name)
+        if mapping.claim == SSO_EMAIL_CLAIM:
+            address = canonical.setdefault(mapping.value.lower(), mapping.value)
+            roster.setdefault(address, [])
+    for mapping in _ranked_sso_mappings(state):
+        if mapping.claim == SSO_EMAIL_CLAIM:
+            roles = roster[canonical[mapping.value.lower()]]
+            if mapping.role_name not in roles:
+                roles.append(mapping.role_name)
     return roster
 
 
@@ -1355,11 +1360,10 @@ def plan_user_creations(
     form of that and refuses, because a second account splits one person's roles
     across two logins.
 
-    When several roles name the same person the last declaration becomes the
-    active role and the earlier ones become extra roles. The generated SSO
-    config sets ``union_roles: true`` and the catalog activates the
-    last-matching role at first login, so the account starts where its own first
-    login would have left it instead of somewhere a re-login would move it.
+    When several roles name the same person the first of them in the roster
+    becomes the active role and the rest become extra roles. The roster follows
+    the rank order the registry's first match does, so the account starts where
+    its own first login would have left it.
 
     An address is only created when every role its roster entry names exists: the
     registry rejects a creation naming a role it does not hold, and whether it
@@ -1484,7 +1488,7 @@ def plan_user_creations(
                 "choosing."
             )
             continue
-        *extra_roles, active_role = roles
+        active_role, *extra_roles = roles
         creations.append(
             UserCreation(
                 name=name,
@@ -2078,6 +2082,24 @@ def _merge_permissions(target: dict[str, str], source: dict[str, str]) -> None:
             target[bucket] = level
 
 
+def _ranked_sso_mappings(state: _DesiredAclState) -> list[_SsoMapping]:
+    """The mappings in rank order, because a login that keeps no active role gets
+    the first matching one: ``sso.email`` mappings of static roles, then of the
+    ladder from its top rung; then the rest of the ladder from its top rung, then
+    the other static roles. Ties keep file order."""
+    rungs = {role.name: i for i, role in enumerate(state.synthesized_roles)}
+
+    def rank(mapping: _SsoMapping) -> tuple[int, int]:
+        rung = rungs.get(mapping.role_name)
+        if mapping.claim == SSO_EMAIL_CLAIM:
+            tier = 0 if rung is None else 1
+        else:
+            tier = 2 if rung is not None else 3
+        return (tier, -(rung or 0))
+
+    return sorted(state.sso_mappings, key=rank)
+
+
 def build_sso_config(config: AclConfig) -> str | None:
     """Translate the flat ACL config into Quilt's schema-based SSO YAML."""
     desired_state = _build_desired_acl_state(config)
@@ -2093,7 +2115,7 @@ def build_sso_config(config: AclConfig) -> str | None:
     if desired_state.default_role_name is not None:
         payload["default_role"] = desired_state.default_role_name
 
-    for mapping in desired_state.sso_mappings:
+    for mapping in _ranked_sso_mappings(desired_state):
         entry: dict[str, Any] = {
             "schema": {
                 "type": "object",
