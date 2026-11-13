@@ -357,7 +357,7 @@ only version bumps trigger a release. Otherwise:
    `python:3.14-alpine` containers on both architectures. [`scripts/check_dist.py`](scripts/check_dist.py)
    fails the run unless that set is exactly right (names, platform tags, contents, versions).
 2. `draft-release` creates a **draft** GitHub release with those files.
-3. `publish` waits for approval of the `pypi` GitHub Environment (the one quiltx already used for PyPI), then tags,
+3. `publish` runs in the `pypi` GitHub Environment (the one quiltx already used for PyPI): it tags,
    publishes the release and uploads to PyPI via trusted publishing.
 4. `verify` ([verify-published.yml](.github/workflows/verify-published.yml)) installs the
    release from PyPI on every platform.
@@ -375,7 +375,7 @@ Only `main` publishes: `check-version` and `publish` are skipped on any other re
 PR and again before the draft and before the upload) also fails if `quiltx/_version.py`
 disagrees with `pyproject.toml`, or an archive's `_version.py` or metadata disagrees with it.
 `./poe bump` keeps the two in step; there is no `./poe tag`, because the publish job tags
-after approval and tagging by hand would make it skip the release.
+the release itself and a tag made by hand would make it skip the release.
 
 ### Recovering a failed release
 

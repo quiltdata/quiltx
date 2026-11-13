@@ -1,9 +1,9 @@
 name: Publish
 
 # On a push to main whose version has not been released: build and check the
-# seven release files, draft the GitHub release, then wait for approval before
-# tagging, promoting the draft and publishing to PyPI. Nothing is published
-# until a reviewer approves the `pypi` environment.
+# seven release files, draft the GitHub release, then tag, promote the draft and
+# publish to PyPI. Publishing runs from main through the repository's existing
+# `pypi` environment (the one the PyPI trusted publisher names).
 #
 # Only main publishes: a run from any other branch (workflow_dispatch) skips
 # every job. A PEP 440 pre-release version (0.24.0a1, 0.24.0b1, 0.24.0rc1) goes
@@ -115,12 +115,12 @@ jobs:
             --draft "$KIND"
           URL=$(gh release view "$TAG" --json url -q .url)
           {
-            echo "## Draft release ready for review"
+            echo "## Draft release created"
             echo
             echo "- Version: \`$VERSION\` (pre-release: $PRERELEASE)"
             echo "- Draft: $URL"
             echo
-            echo "Approve the \`publish\` job to tag, publish the release and upload to PyPI."
+            echo "The \`publish\` job now tags, publishes the release and uploads to PyPI."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The irreversible step, in the repository's existing `pypi` GitHub Environment
