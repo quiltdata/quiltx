@@ -1,10 +1,11 @@
 """The pre-Rust Python implementations, kept verbatim as the parity oracle.
 
-``quiltx.identity.normalize_dns`` and the credential-path and file-store
-lookups in ``quiltx.auth.store`` now call ``quiltx._core``. The functions
-here are the Python they replaced (paths and ``normalize_dns`` from quiltx
-0.23.1; the file I/O from 0.24.0), so ``tests/test_core_parity.py`` can run
-old and new on the same inputs. Nothing under ``quiltx/`` imports this module.
+``quiltx.identity.normalize_dns`` and the credential-path, file-store, and
+keyring-store lookups in ``quiltx.auth.store`` now call ``quiltx._core``. The
+functions here are the Python they replaced (paths and ``normalize_dns`` from
+quiltx 0.23.1; the file I/O from 0.24.0; the keyring get/store/delete/list
+from the #152 merge), so ``tests/test_core_parity.py`` can run old and new on
+the same inputs. Nothing under ``quiltx/`` imports this module.
 """
 
 from __future__ import annotations
@@ -254,3 +255,101 @@ def list_fallback(path: Path) -> list[tuple[str, dict]]:
         if "api_key" in entry:
             results.append((dns, entry))
     return results
+
+
+# ---------------------------------------------------------------------------
+# Keyring-backed store (copied from quiltx.auth.store at the #152 merge, with
+# the keyring object, paths, and use_keyring flag taken as arguments)
+# ---------------------------------------------------------------------------
+
+
+def get(
+    dns: str,
+    *,
+    use_keyring: bool,
+    fallback_path: Path,
+    backend: object | None = None,
+) -> dict | None:
+    if use_keyring:
+        raw = backend.get_password(*keyring_entry(dns))  # type: ignore[union-attr]
+        if raw is None:
+            return None
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(entry, dict) or "api_key" not in entry:
+            return None
+        return entry
+    return get_fallback(fallback_path, dns)
+
+
+def store(
+    dns: str,
+    api_key: str,
+    *,
+    name: str | None = None,
+    expires_at: int | None = None,
+    use_keyring: bool,
+    fallback_path: Path,
+    index_path: Path,
+    backend: object | None = None,
+) -> None:
+    api_key = api_key.strip()
+    if not api_key:
+        raise ValueError("API key is empty")
+    if not api_key.startswith("qk_"):
+        raise ValueError(
+            "API key does not start with 'qk_'. Quilt API keys begin with "
+            "'qk_' — paste the secret shown after creating a key in the "
+            "catalog UI under Profile → API Keys."
+        )
+    payload = {
+        "api_key": api_key,
+        "name": name,
+        "expires_at": expires_at,
+    }
+    if use_keyring:
+        backend.set_password(*keyring_entry(dns), json.dumps(payload))  # type: ignore[union-attr]
+        add_to_index(index_path, dns)
+    else:
+        store_fallback(fallback_path, dns, api_key, name, expires_at)
+
+
+def delete(
+    dns: str,
+    *,
+    use_keyring: bool,
+    fallback_path: Path,
+    index_path: Path,
+    backend: object | None = None,
+) -> None:
+    if use_keyring:
+        import keyring.errors
+
+        try:
+            backend.delete_password(*keyring_entry(dns))  # type: ignore[union-attr]
+        except keyring.errors.PasswordDeleteError:
+            pass
+        remove_from_index(index_path, dns)
+    else:
+        delete_fallback(fallback_path, dns)
+
+
+def catalog_list(
+    *,
+    use_keyring: bool,
+    fallback_path: Path,
+    index_path: Path,
+    backend: object | None = None,
+) -> list[tuple[str, dict]]:
+    if use_keyring:
+        results: list[tuple[str, dict]] = []
+        for dns in read_index(index_path):
+            entry = get(
+                dns, use_keyring=True, fallback_path=fallback_path, backend=backend
+            )
+            if entry is not None:
+                results.append((dns, entry))
+        return results
+    return list_fallback(fallback_path)

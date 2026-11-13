@@ -9,7 +9,8 @@
 //!   messages.
 //! * [`paths`]: the credential store's directory (`platformdirs`-equivalent),
 //!   file paths and keyring entry.
-//! * [`store`]: the 0600 `credentials.json` fallback and the index file.
+//! * [`store`]: the 0600 `credentials.json` fallback, the index file, and the
+//!   public get/store/delete/list including the OS-keyring path.
 
 use std::path::PathBuf;
 
@@ -80,6 +81,7 @@ fn store_op_err(e: store::StoreOpError) -> PyErr {
             PyUnicodeDecodeError::new_err_from_utf8(py, e.as_bytes(), e.utf8_error())
         }),
         store::StoreOpError::Value(msg) => PyValueError::new_err(msg),
+        store::StoreOpError::Py(e) => e,
     }
 }
 
@@ -267,6 +269,143 @@ fn list_fallback(py: Python<'_>, path: PathBuf) -> PyResult<Vec<(String, Py<PyDi
     Ok(out)
 }
 
+/// The production keyring backend: the Python `keyring` package.
+struct PythonKeyring;
+
+impl store::KeyringBackend for PythonKeyring {
+    fn get_password(
+        &self,
+        service: &str,
+        username: &str,
+    ) -> Result<Option<String>, store::StoreOpError> {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<Option<String>> {
+            let keyring = py.import("keyring")?;
+            let value = keyring.call_method1("get_password", (service, username))?;
+            if value.is_none() {
+                Ok(None)
+            } else {
+                Ok(Some(value.extract()?))
+            }
+        })
+        .map_err(store::StoreOpError::Py)
+    }
+
+    fn set_password(
+        &self,
+        service: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), store::StoreOpError> {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            py.import("keyring")?
+                .call_method1("set_password", (service, username, password))?;
+            Ok(())
+        })
+        .map_err(store::StoreOpError::Py)
+    }
+
+    fn delete_password(&self, service: &str, username: &str) -> Result<(), store::StoreOpError> {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let keyring = py.import("keyring")?;
+            match keyring.call_method1("delete_password", (service, username)) {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    let typ = py
+                        .import("keyring.errors")?
+                        .getattr("PasswordDeleteError")?;
+                    if err.is_instance(py, &typ) {
+                        Ok(())
+                    } else {
+                        Err(err)
+                    }
+                }
+            }
+        })
+        .map_err(store::StoreOpError::Py)
+    }
+}
+
+/// Public `get`: OS keyring or the file fallback, chosen by *use_keyring*.
+#[pyfunction]
+fn get_credential(
+    py: Python<'_>,
+    dns: &str,
+    use_keyring: bool,
+    fallback_path: PathBuf,
+    _index_path: PathBuf,
+) -> PyResult<Option<Py<PyDict>>> {
+    match store::get_credential(dns, use_keyring, &fallback_path, &PythonKeyring)
+        .map_err(store_op_err)?
+    {
+        Some(map) => Ok(Some(map_to_py(py, &map)?.unbind())),
+        None => Ok(None),
+    }
+}
+
+/// Public `store`.
+#[pyfunction]
+#[pyo3(signature = (dns, api_key, name, expires_at, use_keyring, fallback_path, index_path))]
+fn store_credential(
+    dns: &str,
+    api_key: &str,
+    name: Option<&str>,
+    expires_at: Option<i64>,
+    use_keyring: bool,
+    fallback_path: PathBuf,
+    index_path: PathBuf,
+) -> PyResult<()> {
+    store::store_credential(
+        dns,
+        api_key,
+        name,
+        expires_at,
+        use_keyring,
+        &fallback_path,
+        &index_path,
+        &PythonKeyring,
+    )
+    .map_err(store_op_err)
+}
+
+/// Public `delete` (idempotent).
+#[pyfunction]
+fn delete_credential(
+    dns: &str,
+    use_keyring: bool,
+    fallback_path: PathBuf,
+    index_path: PathBuf,
+) -> PyResult<()> {
+    store::delete_credential(
+        dns,
+        use_keyring,
+        &fallback_path,
+        &index_path,
+        &PythonKeyring,
+    )
+    .map_err(store_op_err)
+}
+
+/// Public `catalog_list`.
+#[pyfunction]
+fn list_credentials(
+    py: Python<'_>,
+    use_keyring: bool,
+    fallback_path: PathBuf,
+    index_path: PathBuf,
+) -> PyResult<Vec<(String, Py<PyDict>)>> {
+    let mut out = Vec::new();
+    for (dns, entry) in
+        store::list_credentials(use_keyring, &fallback_path, &index_path, &PythonKeyring)
+            .map_err(store_op_err)?
+    {
+        out.push((dns, map_to_py(py, &entry)?.unbind()));
+    }
+    Ok(out)
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
@@ -285,6 +424,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(store_fallback, m)?)?;
     m.add_function(wrap_pyfunction!(delete_fallback, m)?)?;
     m.add_function(wrap_pyfunction!(list_fallback, m)?)?;
+    m.add_function(wrap_pyfunction!(get_credential, m)?)?;
+    m.add_function(wrap_pyfunction!(store_credential, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_credential, m)?)?;
+    m.add_function(wrap_pyfunction!(list_credentials, m)?)?;
     Ok(())
 }
 

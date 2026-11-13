@@ -18,7 +18,6 @@ Username key: canonical DNS (e.g. ``nightly.quilttest.com``)
 from __future__ import annotations
 
 import functools
-import json
 import sys
 from pathlib import Path
 from typing import TypedDict, cast
@@ -126,21 +125,12 @@ def _remove_from_index(dns: str) -> None:
 
 def get(dns: str) -> CredentialEntry | None:
     """Return stored credentials for *dns*, or None if not found."""
-    if _keyring_available():
-        import keyring
-
-        raw = keyring.get_password(*_native.keyring_entry(dns))
-        if raw is None:
-            return None
-        try:
-            entry = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(entry, dict) or "api_key" not in entry:
-            return None
-        return CredentialEntry(**entry)
-    else:
-        return cast(CredentialEntry | None, _native.get_fallback(_fallback_path(), dns))
+    return cast(
+        CredentialEntry | None,
+        _native.get_credential(
+            dns, _keyring_available(), _fallback_path(), _index_path()
+        ),
+    )
 
 
 def store(
@@ -156,61 +146,32 @@ def store(
     ``session.py`` prefix check). Raises ``ValueError`` for malformed input
     so a typo or paste of the wrong string never lands in the keyring.
     """
-    api_key = api_key.strip()
-    if not api_key:
-        raise ValueError("API key is empty")
-    if not api_key.startswith("qk_"):
-        raise ValueError(
-            "API key does not start with 'qk_'. Quilt API keys begin with "
-            "'qk_' — paste the secret shown after creating a key in the "
-            "catalog UI under Profile → API Keys."
-        )
-    payload: CredentialEntry = {
-        "api_key": api_key,
-        "name": name,
-        "expires_at": expires_at,
-    }
-    serialised = json.dumps(payload)
-    if _keyring_available():
-        import keyring
-
-        keyring.set_password(*_native.keyring_entry(dns), serialised)
-        _add_to_index(dns)
-    else:
+    if not _keyring_available():
         _warn_file_fallback()
-        _native.store_fallback(
-            _fallback_path(), dns, api_key, name=name, expires_at=expires_at
-        )
+    _native.store_credential(
+        dns,
+        api_key,
+        name,
+        expires_at,
+        _keyring_available(),
+        _fallback_path(),
+        _index_path(),
+    )
 
 
 def delete(dns: str) -> None:
     """Delete credentials for *dns* (idempotent)."""
-    if _keyring_available():
-        import keyring
-        import keyring.errors
-
-        try:
-            keyring.delete_password(*_native.keyring_entry(dns))
-        except keyring.errors.PasswordDeleteError:
-            pass  # already gone — idempotent
-        _remove_from_index(dns)
-    else:
-        _native.delete_fallback(_fallback_path(), dns)
+    _native.delete_credential(
+        dns, _keyring_available(), _fallback_path(), _index_path()
+    )
 
 
 def catalog_list() -> list[tuple[str, CredentialEntry]]:
     """List known DNS entries as ``(dns, entry)``."""
-    results: list[tuple[str, CredentialEntry]] = []
-    if _keyring_available():
-        for dns in _read_index():
-            entry = get(dns)
-            if entry is not None:
-                results.append((dns, entry))
-    else:
-        return cast(
-            list[tuple[str, CredentialEntry]], _native.list_fallback(_fallback_path())
-        )
-    return results
+    return cast(
+        list[tuple[str, CredentialEntry]],
+        _native.list_credentials(_keyring_available(), _fallback_path(), _index_path()),
+    )
 
 
 def has_credentials(dns: str) -> bool:

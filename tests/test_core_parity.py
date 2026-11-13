@@ -584,6 +584,140 @@ def test_out_of_range_numbers_match_the_oracle(tmp_path: Path) -> None:
         assert rust["x.example.com"]["api_key"] == "qk_x"
 
 
+class MemoryKeyring:
+    """A dict-backed stand-in for the ``keyring`` module."""
+
+    def __init__(self) -> None:
+        self.stored: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.stored.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.stored[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        self.stored.pop((service, username), None)
+
+
+def test_keyring_store_bytes_and_list_match_the_oracle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_kr, new_kr = MemoryKeyring(), MemoryKeyring()
+    old_index, new_index = file_pair(tmp_path, "credentials_index.json")
+    old_fb, new_fb = file_pair(tmp_path, "credentials.json")
+    monkeypatch.setattr("keyring.get_password", new_kr.get_password)
+    monkeypatch.setattr("keyring.set_password", new_kr.set_password)
+    monkeypatch.setattr("keyring.delete_password", new_kr.delete_password)
+    entries = [
+        ("nightly.quilttest.com", "qk_abc", None, None),
+        ("a.example.com", "qk_a", "alice-key", 1_800_000_000),
+    ]
+    for dns, key, name, expires in entries:
+        oracle.store(
+            dns,
+            key,
+            name=name,
+            expires_at=expires,
+            use_keyring=True,
+            fallback_path=old_fb,
+            index_path=old_index,
+            backend=old_kr,
+        )
+        _core.store_credential(dns, key, name, expires, True, new_fb, new_index)
+    assert not old_fb.exists() and not new_fb.exists()
+    assert new_index.read_bytes() == old_index.read_bytes()
+    service = "quiltx"
+    for dns, _, _, _ in entries:
+        assert new_kr.get_password(service, dns) == old_kr.get_password(service, dns)
+    assert _core.list_credentials(True, new_fb, new_index) == oracle.catalog_list(
+        use_keyring=True,
+        fallback_path=old_fb,
+        index_path=old_index,
+        backend=old_kr,
+    )
+    assert _core.get_credential("a.example.com", True, new_fb, new_index) == oracle.get(
+        "a.example.com",
+        use_keyring=True,
+        fallback_path=old_fb,
+        backend=old_kr,
+    )
+    _core.delete_credential("a.example.com", True, new_fb, new_index)
+    oracle.delete(
+        "a.example.com",
+        use_keyring=True,
+        fallback_path=old_fb,
+        index_path=old_index,
+        backend=old_kr,
+    )
+    assert new_index.read_bytes() == old_index.read_bytes()
+    assert new_kr.get_password(service, "a.example.com") is None
+    assert old_kr.get_password(service, "a.example.com") is None
+    _core.delete_credential("a.example.com", True, new_fb, new_index)
+    oracle.delete(
+        "a.example.com",
+        use_keyring=True,
+        fallback_path=old_fb,
+        index_path=old_index,
+        backend=old_kr,
+    )
+
+
+def test_corrupt_keyring_entry_raises_instead_of_looking_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_kr, new_kr = MemoryKeyring(), MemoryKeyring()
+    old_kr.set_password("quiltx", "x.example.com", "not-json")
+    new_kr.set_password("quiltx", "x.example.com", "not-json")
+    fallback, index = tmp_path / "fb.json", tmp_path / "idx.json"
+    monkeypatch.setattr("keyring.get_password", new_kr.get_password)
+    monkeypatch.setattr("keyring.set_password", new_kr.set_password)
+    # Old Python treated corrupt JSON as missing.
+    assert (
+        oracle.get(
+            "x.example.com",
+            use_keyring=True,
+            fallback_path=fallback,
+            backend=old_kr,
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="not valid JSON"):
+        _core.get_credential("x.example.com", True, fallback, index)
+    # A later store must not have already replaced the payload (get does not write).
+    assert new_kr.get_password("quiltx", "x.example.com") == "not-json"
+
+
+def test_keyring_validation_matches_the_oracle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_kr, new_kr = MemoryKeyring(), MemoryKeyring()
+    old_fb, new_fb = file_pair(tmp_path, "credentials.json")
+    old_index, new_index = file_pair(tmp_path, "credentials_index.json")
+    monkeypatch.setattr("keyring.set_password", new_kr.set_password)
+    for key in ("", "   ", "not-a-key"):
+        assert outcome(
+            lambda k=key: oracle.store(
+                "x.example.com",
+                k,
+                use_keyring=True,
+                fallback_path=old_fb,
+                index_path=old_index,
+                backend=old_kr,
+            )
+        ) == outcome(
+            _core.store_credential,
+            "x.example.com",
+            key,
+            None,
+            None,
+            True,
+            new_fb,
+            new_index,
+        )
+        assert not old_kr.stored and not new_kr.stored
+
+
 def test_write_fallback_over_a_looser_file_tightens_the_mode(
     tmp_path: Path,
 ) -> None:
