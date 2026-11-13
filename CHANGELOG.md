@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get` / `store` / `delete` / `catalog_list` now run in Rust (`quiltx._core`), including the OS-keyring path. The OS secret store is still the `keyring` package, so existing entries are unchanged. A corrupt keyring entry (invalid JSON) now raises `ValueError` instead of being treated as missing, so a later store cannot silently replace it. The error names the catalog and how to fix it (`quiltx catalog login --catalog <dns>` or `quiltx catalog forget <dns>`). `catalog_list` skips a corrupt entry and prints a stderr warning that names it
 
 - Registry HTTP (`resolve_registry_url`, `/api/login`, `/api/token`, `apiKeyCreate`, `validate_api_key`) now runs in Rust (`quiltx._core`). The `urllib` transport, `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, and `open_browser` stay in Python. A `config.json` body that is not a JSON object now raises `CatalogAuthError` instead of `AttributeError`, so a later login cannot proceed against the catalog host by mistake
+- `validate_api_key` now raises `CatalogAuthError` on a 200 body that is not a JSON object (`[]`, `null`, a string, a number, `true`, or `""`) instead of treating the key as valid. An unexpected `apiKeyCreate` result redacts `secret` in the error text
 
 ### Fixed
 

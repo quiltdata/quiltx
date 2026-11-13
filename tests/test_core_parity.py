@@ -1033,13 +1033,16 @@ def test_validate_and_bootstrap_match_the_oracle(
     ) == outcome(
         lambda: oracle.validate_api_key("https://catalog.example.com", "qk_bad")
     )
+    from quiltx.auth import registry as quilt_auth
+
     assert outcome(
-        _core.bootstrap_api_key,
-        "https://reg.example.com",
-        "admin",
-        "hunter2",
-        "quiltx-host",
-        365,
+        lambda: quilt_auth.bootstrap_api_key(
+            "https://catalog.example.com",
+            username="admin",
+            password="hunter2",
+            name="quiltx-host",
+            expires_in_days=365,
+        )
     ) == outcome(
         lambda: oracle.bootstrap_api_key(
             "https://catalog.example.com",
@@ -1049,6 +1052,72 @@ def test_validate_and_bootstrap_match_the_oracle(
             expires_in_days=365,
         )
     )
+
+
+def test_validate_rejects_a_non_object_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    from quiltx.auth.registry import CatalogAuthError
+
+    bodies: list[object] = [[], None, "ok", 1, True, ""]
+    for body in bodies:
+        _patch_http(
+            monkeypatch, post_json=lambda url, payload, *, bearer=None, b=body: b
+        )
+        with pytest.raises(
+            CatalogAuthError, match="Unexpected response from"
+        ) as raised:
+            _core.validate_api_key("https://reg.example.com", "qk_test")
+        # The old Python treated a non-object 200 as success (no .get("errors")).
+        # Do not compare with the oracle on this path.
+        assert "https://reg.example.com/graphql" in str(raised.value)
+
+
+def test_error_text_escapes_like_the_oracle(monkeypatch: pytest.MonkeyPatch) -> None:
+    def post_json(url: str, payload: dict, *, bearer: str | None = None):
+        return {"errors": [{"message": 'no\nkey and it\'s "quoted"'}]}
+
+    _patch_http(monkeypatch, post_json=post_json)
+    assert outcome(
+        _core.create_api_key, "https://catalog.example.com", "at", "x", 90
+    ) == outcome(
+        lambda: oracle.create_api_key(
+            "https://catalog.example.com", "at", name="x", expires_in_days=90
+        )
+    )
+
+
+def test_create_api_key_coerces_name_and_expires_in_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth import registry as quilt_auth
+
+    calls: list[dict] = []
+
+    def post_json(url: str, payload: dict, *, bearer: str | None = None):
+        calls.append(payload)
+        return CREATED
+
+    monkeypatch.setattr(quilt_auth, "_post_json", post_json)
+    out = quilt_auth.create_api_key(
+        "https://catalog.example.com",
+        "at-xyz",
+        name=123,  # type: ignore[arg-type]
+        expires_in_days="365",  # type: ignore[arg-type]
+    )
+    assert out["secret"] == "qk_thesecret"
+    assert calls[0]["variables"] == {"input": {"name": "123", "expiresInDays": 365}}
+
+
+def test_non_string_registry_url_matches_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_http(monkeypatch, get=lambda url: {"registryUrl": 123})
+    assert outcome(
+        _core.resolve_registry_url, "https://catalog.example.com"
+    ) == outcome(oracle.resolve_registry_url, "https://catalog.example.com")
+    assert _core.resolve_registry_url("https://catalog.example.com") == "123"
+    _patch_http(monkeypatch, get=lambda url: {"registryUrl": True})
+    assert _core.resolve_registry_url("https://catalog.example.com") == "True"
+    assert oracle.resolve_registry_url("https://catalog.example.com") == "True"
 
 
 # ---------------------------------------------------------------------------

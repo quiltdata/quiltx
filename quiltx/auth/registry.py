@@ -171,7 +171,9 @@ def create_api_key(
     CatalogAuthError on any non-success path (transport, GraphQL errors,
     InvalidInput).
     """
-    return _native.create_api_key(registry_url, access_token, name, expires_in_days)
+    return _native.create_api_key(
+        registry_url, access_token, str(name), int(expires_in_days)
+    )
 
 
 def validate_api_key(catalog_url: str, api_key: str) -> None:

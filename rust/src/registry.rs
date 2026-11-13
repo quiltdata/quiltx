@@ -73,13 +73,43 @@ fn nonempty_python_str(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn python_repr_str(s: &str) -> String {
+    // Same quote rule as Python: double quotes only when the string
+    // contains a single quote and no double quote.
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::new();
+    out.push(quote);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 fn python_repr(value: &Value) -> String {
     match value {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("'{s}'"),
+        Value::String(s) => python_repr_str(s),
         Value::Array(items) => {
             let parts: Vec<String> = items.iter().map(python_repr).collect();
             format!("[{}]", parts.join(", "))
@@ -87,17 +117,41 @@ fn python_repr(value: &Value) -> String {
         Value::Object(map) => {
             let parts: Vec<String> = map
                 .iter()
-                .map(|(k, v)| format!("'{k}': {}", python_repr(v)))
+                .map(|(k, v)| format!("{}: {}", python_repr_str(k), python_repr(v)))
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
     }
 }
 
+/// Replace `secret` values so an unexpected create_api_key result cannot
+/// leak a `qk_` key into an error message or log.
+fn redact_secrets(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (k, v) in map {
+                if k == "secret" {
+                    out.insert(k.clone(), Value::String("<redacted>".into()));
+                } else {
+                    out.insert(k.clone(), redact_secrets(v));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_secrets).collect()),
+        other => other.clone(),
+    }
+}
+
+fn python_repr_redacted(value: &Value) -> String {
+    python_repr(&redact_secrets(value))
+}
+
 fn python_keys_list(value: &Value) -> String {
     match value.as_object() {
         Some(map) => {
-            let parts: Vec<String> = map.keys().map(|k| format!("'{k}'")).collect();
+            let parts: Vec<String> = map.keys().map(|k| python_repr_str(k)).collect();
             format!("[{}]", parts.join(", "))
         }
         None => "[]".into(),
@@ -213,19 +267,17 @@ pub fn create_api_key(
     let Some(result) = data.get("apiKeyCreate") else {
         return Err(RegistryError::Auth(format!(
             "Unexpected GraphQL response from {url}: {}",
-            python_repr(&response)
+            python_repr_redacted(&response)
         )));
     };
     if is_falsy(result) {
         return Err(RegistryError::Auth(format!(
             "Unexpected GraphQL response from {url}: {}",
-            python_repr(&response)
+            python_repr_redacted(&response)
         )));
     }
-    let typename = result
-        .get("__typename")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let typename_value = result.get("__typename");
+    let typename = typename_value.and_then(Value::as_str).unwrap_or("");
     if typename == "APIKeyCreated" {
         let secret = nonempty_python_str(result.get("secret")).ok_or_else(|| {
             RegistryError::Auth("apiKeyCreate succeeded but returned no secret".into())
@@ -252,8 +304,10 @@ pub fn create_api_key(
     }
     Err(RegistryError::Auth(format!(
         "Unexpected apiKeyCreate result type {}: {}",
-        python_repr(&Value::String(typename.to_string())),
-        python_repr(result)
+        typename_value
+            .map(python_repr)
+            .unwrap_or_else(|| "None".into()),
+        python_repr_redacted(result)
     )))
 }
 
@@ -266,7 +320,15 @@ pub fn validate_api_key(
     let url = format!("{}/graphql", rstrip_slash(registry_url));
     let payload = json!({"query": VALIDATE_QUERY, "operationName": "apiKeysList"});
     let response = http.post_json(&url, &payload, Some(api_key))?;
-    if let Some(errors) = response.get("errors") {
+    // Fail closed: a 200 body that is not an object ( [], null, a string,
+    // a number, true, "" ) must not count the key as valid.
+    let Some(obj) = as_object(&response) else {
+        return Err(RegistryError::Auth(format!(
+            "Unexpected response from {url}: {}",
+            python_repr(&response)
+        )));
+    };
+    if let Some(errors) = obj.get("errors") {
         if !is_falsy(errors) {
             return Err(RegistryError::Auth(format!(
                 "Catalog rejected API key: {}",
@@ -275,32 +337,6 @@ pub fn validate_api_key(
         }
     }
     Ok(())
-}
-
-/// Compose login → token → apiKeyCreate against an already-resolved registry.
-pub fn bootstrap_api_key(
-    registry_url: &str,
-    username: &str,
-    password: &str,
-    name: &str,
-    expires_in_days: i64,
-    http: &dyn HttpClient,
-) -> Result<Map<String, Value>, RegistryError> {
-    let refresh = acquire_refresh_token(registry_url, username, password, http)?;
-    let access = exchange_refresh_token_for_access_token(registry_url, &refresh, http)?;
-    create_api_key(registry_url, &access, name, expires_in_days, http)
-}
-
-/// Mint a `qk_` API key from an already-acquired refresh_token.
-pub fn bootstrap_api_key_from_refresh_token(
-    registry_url: &str,
-    refresh_token: &str,
-    name: &str,
-    expires_in_days: i64,
-    http: &dyn HttpClient,
-) -> Result<Map<String, Value>, RegistryError> {
-    let access = exchange_refresh_token_for_access_token(registry_url, refresh_token, http)?;
-    create_api_key(registry_url, &access, name, expires_in_days, http)
 }
 
 fn is_falsy(value: &Value) -> bool {
@@ -607,41 +643,112 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_composes_login_token_and_create() {
-        let http = MemoryHttp::default()
-            .post(
-                "https://reg.example.com/api/login",
-                json!({"refresh_token": "rt"}),
-            )
-            .form(
-                "https://reg.example.com/api/token",
-                json!({"access_token": "at"}),
-            )
-            .post(
-                "https://reg.example.com/graphql",
-                created("qk_realdeal", "quiltx-host", "2027-05-04T00:00:00Z"),
-            );
-        let out = bootstrap_api_key(
-            "https://reg.example.com",
-            "admin",
-            "hunter2",
-            "quiltx-host",
-            365,
-            &http,
-        )
-        .unwrap();
+    fn validate_api_key_rejects_a_non_object_body() {
+        let cases = [
+            json!([]),
+            Value::Null,
+            json!("ok"),
+            json!(1),
+            json!(true),
+            json!(""),
+        ];
+        for body in cases {
+            let http = MemoryHttp::default().post("https://reg.example.com/graphql", body.clone());
+            match validate_api_key("https://reg.example.com", "qk_test", &http) {
+                Err(RegistryError::Auth(msg)) => {
+                    assert!(
+                        msg.starts_with(
+                            "Unexpected response from https://reg.example.com/graphql:"
+                        ),
+                        "{msg}"
+                    );
+                    assert!(
+                        msg.contains(&python_repr(&body)),
+                        "{msg} vs {}",
+                        python_repr(&body)
+                    );
+                }
+                other => panic!("expected Auth error for {body}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn python_repr_escapes_controls_and_quotes_like_python() {
+        assert_eq!(python_repr_str("hello"), "'hello'");
+        assert_eq!(python_repr_str("it's"), "\"it's\"");
+        assert_eq!(python_repr_str("a\"b"), "'a\"b'");
+        assert_eq!(python_repr_str("a'b\"c"), "'a\\'b\"c'");
+        assert_eq!(python_repr_str("line\nbreak"), "'line\\nbreak'");
+        assert_eq!(python_repr_str("tab\there"), "'tab\\there'");
+        assert_eq!(python_repr_str("cr\r"), "'cr\\r'");
+        assert_eq!(python_repr_str("bell\u{07}"), "'bell\\x07'");
+        assert_eq!(python_repr_str("null\u{00}"), "'null\\x00'");
+        assert_eq!(python_repr_str("back\\slash"), "'back\\\\slash'");
+        assert_eq!(python_repr_str(""), "''");
+        assert_eq!(python_repr_str("del\u{7f}"), "'del\\x7f'");
         assert_eq!(
-            out.get("secret"),
-            Some(&Value::String("qk_realdeal".into()))
+            python_repr(&json!({"errors": [{"message": "no\nkey and it's \"quoted\""}]})),
+            "{'errors': [{'message': 'no\\nkey and it\\'s \"quoted\"'}]}"
         );
-        let json_urls: Vec<_> = http
-            .json_calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(u, _, _)| u.rsplit('/').next().unwrap().to_string())
-            .collect();
-        assert_eq!(json_urls, ["login", "graphql"]);
-        assert!(http.form_calls.lock().unwrap()[0].0.ends_with("/api/token"));
+    }
+
+    #[test]
+    fn unexpected_create_result_redacts_the_secret_and_uses_none_for_missing_typename() {
+        let http = MemoryHttp::default().post(
+            "https://catalog.example.com/graphql",
+            json!({"data": {"apiKeyCreate": {"secret": "qk_should_not_leak", "foo": 1}}}),
+        );
+        match create_api_key("https://catalog.example.com", "at", "x", 90, &http) {
+            Err(RegistryError::Auth(msg)) => {
+                assert!(
+                    msg.contains("Unexpected apiKeyCreate result type None:"),
+                    "{msg}"
+                );
+                assert!(!msg.contains("qk_should_not_leak"), "{msg}");
+                assert!(msg.contains("<redacted>"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_text_escapes_newlines_in_graphql_errors() {
+        let http = MemoryHttp::default().post(
+            "https://catalog.example.com/graphql",
+            json!({"errors": [{"message": "no\nkey and it's \"quoted\""}]}),
+        );
+        match create_api_key("https://catalog.example.com", "at", "x", 90, &http) {
+            Err(RegistryError::Auth(msg)) => {
+                assert!(msg.contains("GraphQL errors:"), "{msg}");
+                assert!(
+                    msg.contains("{'message': 'no\\nkey and it\\'s \"quoted\"'}"),
+                    "{msg}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_string_registry_url_is_stringified() {
+        // Current behaviour, not a host / https check: a number or bool is
+        // stringified the way Python's str() would be, then used as the base.
+        let http = MemoryHttp::default().get(
+            "https://catalog.example.com/config.json",
+            json!({"registryUrl": 123}),
+        );
+        assert_eq!(
+            resolve_registry_url("https://catalog.example.com", &http).unwrap(),
+            "123"
+        );
+        let http = MemoryHttp::default().get(
+            "https://catalog.example.com/config.json",
+            json!({"registryUrl": true}),
+        );
+        assert_eq!(
+            resolve_registry_url("https://catalog.example.com", &http).unwrap(),
+            "True"
+        );
     }
 }

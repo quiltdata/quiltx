@@ -175,25 +175,3 @@ def create_api_key(
 def validate_api_key(registry_url: str, api_key: str) -> None:
     """Confirm *api_key* is accepted; *registry_url* is already resolved."""
     _core.validate_api_key(registry_url, api_key)
-
-
-def bootstrap_api_key(
-    registry_url: str,
-    username: str,
-    password: str,
-    name: str,
-    expires_in_days: int,
-) -> dict:
-    """Login → token → apiKeyCreate against an already-resolved registry."""
-    return _core.bootstrap_api_key(
-        registry_url, username, password, name, expires_in_days
-    )
-
-
-def bootstrap_api_key_from_refresh_token(
-    registry_url: str, refresh_token: str, name: str, expires_in_days: int
-) -> dict:
-    """Mint a ``qk_`` key from an already-acquired refresh_token."""
-    return _core.bootstrap_api_key_from_refresh_token(
-        registry_url, refresh_token, name, expires_in_days
-    )

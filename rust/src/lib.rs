@@ -209,48 +209,6 @@ fn validate_api_key(registry_url: &str, api_key: &str) -> PyResult<()> {
     registry::validate_api_key(registry_url, api_key, &PythonHttp).map_err(registry_err)
 }
 
-/// Login → token → apiKeyCreate against an already-resolved registry URL.
-#[pyfunction]
-fn bootstrap_api_key(
-    py: Python<'_>,
-    registry_url: &str,
-    username: &str,
-    password: &str,
-    name: &str,
-    expires_in_days: i64,
-) -> PyResult<Py<PyDict>> {
-    let map = registry::bootstrap_api_key(
-        registry_url,
-        username,
-        password,
-        name,
-        expires_in_days,
-        &PythonHttp,
-    )
-    .map_err(registry_err)?;
-    Ok(map_to_py(py, &map)?.unbind())
-}
-
-/// Mint a ``qk_`` key from an already-acquired refresh_token.
-#[pyfunction]
-fn bootstrap_api_key_from_refresh_token(
-    py: Python<'_>,
-    registry_url: &str,
-    refresh_token: &str,
-    name: &str,
-    expires_in_days: i64,
-) -> PyResult<Py<PyDict>> {
-    let map = registry::bootstrap_api_key_from_refresh_token(
-        registry_url,
-        refresh_token,
-        name,
-        expires_in_days,
-        &PythonHttp,
-    )
-    .map_err(registry_err)?;
-    Ok(map_to_py(py, &map)?.unbind())
-}
-
 fn map_to_py<'py>(py: Python<'py>, map: &Map<String, Value>) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     for (key, value) in map {
@@ -617,8 +575,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(create_api_key, m)?)?;
     m.add_function(wrap_pyfunction!(validate_api_key, m)?)?;
-    m.add_function(wrap_pyfunction!(bootstrap_api_key, m)?)?;
-    m.add_function(wrap_pyfunction!(bootstrap_api_key_from_refresh_token, m)?)?;
     Ok(())
 }
 

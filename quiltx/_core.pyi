@@ -52,13 +52,3 @@ def create_api_key(
     registry_url: str, access_token: str, name: str, expires_in_days: int
 ) -> dict[str, Any]: ...
 def validate_api_key(registry_url: str, api_key: str) -> None: ...
-def bootstrap_api_key(
-    registry_url: str,
-    username: str,
-    password: str,
-    name: str,
-    expires_in_days: int,
-) -> dict[str, Any]: ...
-def bootstrap_api_key_from_refresh_token(
-    registry_url: str, refresh_token: str, name: str, expires_in_days: int
-) -> dict[str, Any]: ...
