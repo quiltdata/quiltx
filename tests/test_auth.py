@@ -330,7 +330,7 @@ def _wrapper_outcome(fn, *args, **kwargs):
 
 @pytest.mark.parametrize("mode", ["cli", "api"])
 @pytest.mark.parametrize("flag", [None, "", "qk_flag", b"qk_flag", 1])
-@pytest.mark.parametrize("env", [None, "", "qk_env"])
+@pytest.mark.parametrize("env", [None, "", " ", "qk_env"])
 @pytest.mark.parametrize(
     "store",
     [

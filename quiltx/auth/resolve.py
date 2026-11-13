@@ -1,9 +1,9 @@
 """API-key resolver for quiltx.
 
-Returns ``(api_key, source)`` given a catalog and context. The ladder
-decision runs in Rust (``quiltx._core.resolve_credentials``); this module
-still reads flags, env, the store, and the TTY, and still runs
-``mint_api_key`` for the interactive path.
+Returns ``(api_key, source)`` given a catalog and context. This module
+reads flags, env, the store, and the TTY, and runs ``mint_api_key`` for
+the interactive path. After those lookups miss, ``quiltx._core.resolve_credentials``
+decides only between a CLI prompt and the headless error.
 
 CLI ladder ([05 §4]):
   1. --api-key flag
@@ -58,7 +58,7 @@ def _no_prompt_active(args: object | None) -> bool:
     return False
 
 
-def _stored_api_key(dns: str, *, skip_keyring: bool) -> object | None:
+def _stored_api_key(dns: str, *, skip_keyring: bool) -> str | None:
     """Read the store only when a flag and env key have already missed.
 
     A missing entry, or a stored ``api_key`` of ``None``, is a miss
@@ -103,7 +103,7 @@ def resolve_cli(
     # 3. Keyring (skipped on retry after auth failure)
     stored_key = _stored_api_key(dns, skip_keyring=skip_keyring)
     if stored_key is not None:
-        return ResolvedCredentials(stored_key, "keyring")  # type: ignore[arg-type]
+        return ResolvedCredentials(stored_key, "keyring")
 
     # 4. Interactive auth flow — only after flag, env, and store missed.
     allow_interactive = not _no_prompt_active(args) and sys.stdin.isatty()
@@ -117,7 +117,9 @@ def resolve_cli(
         "cli",
     )
     if result["status"] == "found":
-        # Unreachable: flag, env, and store already missed.
+        # Dead branch kept for now: the wrappers already returned any
+        # flag, env, or store hit, so Rust only decides need_interactive
+        # versus the headless error.
         return ResolvedCredentials(result["api_key"], result["source"])
 
     if result["rejected"]:
@@ -168,8 +170,10 @@ def resolve_api(
     # 3. Keyring
     stored_key = _stored_api_key(dns, skip_keyring=skip_keyring)
     if stored_key is not None:
-        return ResolvedCredentials(stored_key, "keyring")  # type: ignore[arg-type]
+        return ResolvedCredentials(stored_key, "keyring")
 
+    # Dead found path kept for now: flag, env, and store already missed,
+    # so Rust should only raise the headless CredentialError.
     result = _native.resolve_credentials(
         dns,
         None,
