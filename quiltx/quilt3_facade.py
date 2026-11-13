@@ -38,7 +38,7 @@ def _resolve_registry_for_active_catalog(catalog_url: str) -> str:
     cached = _REGISTRY_URL_CACHE.get(catalog_url)
     if cached is not None:
         return cached
-    from quiltx.quilt_auth import CatalogAuthError, resolve_registry_url
+    from quiltx.auth.registry import CatalogAuthError, resolve_registry_url
 
     try:
         resolved = resolve_registry_url(catalog_url)
@@ -134,88 +134,27 @@ def make_bucket(bucket_uri: str) -> object:
     return quilt3.Bucket(bucket_uri)
 
 
-class CatalogCredentialsError(RuntimeError):
-    """Raised when registry-issued credentials for the active catalog are absent.
+# Registry-issued credentials live in quiltx.auth.session; re-exported so the
+# quilt3 boundary (and every caller of it) stays in one place.
+from quiltx.auth.session import (  # noqa: E402
+    QUILT_CREDENTIALS_METHOD,
+    CatalogCredentialsError,
+    catalog_botocore_session,
+    catalog_sts_account_id,
+)
 
-    Never fall back to the ambient AWS credential chain in this case: the
-    resulting account ID would describe whatever profile happens to be
-    configured locally, not the catalog's control account (issue #91).
-    """
-
-
-# botocore method name reported by quilt3.session.QuiltProvider.
-QUILT_CREDENTIALS_METHOD = "quilt-registry"
-
-
-def _mint_registry_credentials() -> dict[str, str]:
-    """Fetch fresh STS credentials from the active catalog's registry.
-
-    Uses quilt3's authenticated HTTP session (the API key bound by
-    ``Catalog.ensure_auth``) against the registry selected through quilt3's
-    supported context-local resolver. Nothing is written to disk, and no
-    cached or ambient credential source can substitute for this call.
-    """
-    import quilt3.session
-
-    registry_url = quilt3.session.get_registry_url()
-    if not registry_url:
-        raise CatalogCredentialsError("no active catalog registry URL")
-    session = quilt3.session.get_session()
-    response = session.get(f"{registry_url.rstrip('/')}/api/auth/get_credentials")
-    payload = response.json()
-    try:
-        return {
-            "access_key": payload["AccessKeyId"],
-            "secret_key": payload["SecretAccessKey"],
-            "token": payload["SessionToken"],
-            "expiry_time": payload["Expiration"],
-        }
-    except (KeyError, TypeError) as exc:
-        raise CatalogCredentialsError(
-            f"registry {registry_url} returned no usable credentials"
-        ) from exc
-
-
-def catalog_botocore_session() -> Any:
-    """Return a botocore session backed only by registry-issued credentials.
-
-    Raises ``CatalogCredentialsError`` when the active catalog will not mint
-    credentials, or when the resolved credentials did not come from quilt3's
-    ``QuiltProvider``.
-    """
-    import quilt3.session
-
-    try:
-        credentials = _mint_registry_credentials()
-    except CatalogCredentialsError:
-        raise
-    except Exception as exc:  # transport, auth, or quilt3 failure
-        raise CatalogCredentialsError(
-            f"catalog registry did not issue credentials: {exc}"
-        ) from exc
-
-    botocore_session = quilt3.session.create_botocore_session(credentials=credentials)
-    resolved = botocore_session.get_credentials()
-    method = getattr(resolved, "method", None)
-    if resolved is None or method != QUILT_CREDENTIALS_METHOD:
-        raise CatalogCredentialsError(
-            "refusing to use credentials from "
-            f"{method or 'the ambient AWS credential chain'}: expected "
-            f"quilt3's {QUILT_CREDENTIALS_METHOD} provider"
-        )
-    return botocore_session
-
-
-def catalog_sts_account_id() -> str:
-    """Return the AWS account ID behind the active catalog's minted credentials.
-
-    Uses quilt3's registry-issued temporary credentials — available to any
-    logged-in catalog user, no admin role required — and asks STS which
-    account they belong to: the catalog stack's control account.
-
-    Raises ``CatalogCredentialsError`` rather than answering for the local
-    AWS profile when the catalog does not mint credentials.
-    """
-    botocore_session = catalog_botocore_session()
-    sts_client = botocore_session.create_client("sts")
-    return str(sts_client.get_caller_identity()["Account"])
+__all__ = [
+    "AdminClients",
+    "CatalogCredentialsError",
+    "QUILT_CREDENTIALS_METHOD",
+    "admin_graphql",
+    "admin_graphql_client",
+    "admin_modules",
+    "bind_active_catalog",
+    "catalog_botocore_session",
+    "catalog_sts_account_id",
+    "current_global_config",
+    "login_with_api_key",
+    "make_bucket",
+    "reset_active_catalog",
+]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from quiltx import credentials
+from quiltx.auth import store as credentials
 from quiltx.cli_common import add_catalog_args
 from quiltx.identity import build_catalog_url, normalize_dns
 from quiltx.tools.catalog import login as login_cmd

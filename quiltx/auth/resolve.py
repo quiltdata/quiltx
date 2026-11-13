@@ -28,7 +28,7 @@ import os
 import sys
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from quiltx import credentials
+from quiltx.auth import store as credentials
 
 if TYPE_CHECKING:
     from quiltx.stack import Catalog

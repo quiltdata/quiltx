@@ -1,11 +1,11 @@
-"""Tests for quiltx.credentials (keyring-backed + file fallback)."""
+"""Tests for quiltx.auth.store (keyring-backed + file fallback)."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
 
-from quiltx import credentials
+from quiltx.auth import store as credentials
 
 
 def _mock_no_keyring(monkeypatch):

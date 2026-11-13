@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 
-from quiltx import credentials, userconfig
+from quiltx import userconfig
+from quiltx.auth import store as credentials
 from quiltx.tools.catalog import forget as forget_cmd
 from quiltx.tools.catalog import list_ as list_cmd
 

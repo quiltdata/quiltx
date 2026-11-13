@@ -249,7 +249,7 @@ def _probe_auth_source(catalog: "Catalog", parsed_args: Any) -> str:
 
     Pure inspection — never prompts, never writes to keyring.
     """
-    from quiltx import credentials as creds_module
+    from quiltx.auth import store as creds_module
 
     if getattr(parsed_args, "api_key", None):
         return "flag"

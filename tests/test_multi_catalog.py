@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 
-from quiltx import credentials
+from quiltx.auth import store as credentials
 from quiltx.stack import Catalog
 
 # ---------------------------------------------------------------------------

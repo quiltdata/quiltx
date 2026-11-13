@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from quiltx import credentials
+    from quiltx.auth import store as credentials
 
     parser = build_parser()
     args = parser.parse_args(argv)

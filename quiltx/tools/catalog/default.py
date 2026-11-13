@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
 
-        from quiltx import credentials
+        from quiltx.auth import store as credentials
 
         # B.3: validate by authenticating. If the keyring already has a key
         # we trust it (it was either previously bootstrapped here or pasted

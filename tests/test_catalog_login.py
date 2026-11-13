@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from quiltx import credentials, quilt_auth
+from quiltx.auth import registry as quilt_auth
+from quiltx.auth import store as credentials
 from quiltx.tools.catalog import api_key as api_key_cmd
 from quiltx.tools.catalog import login as login_cmd
 
