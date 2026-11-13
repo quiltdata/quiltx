@@ -70,32 +70,52 @@ def _fat(*cpus: int) -> bytes:
     return header + entries
 
 
-def _wheel(path: Path, extension: str, payload: bytes = b"x", extra=()) -> None:
+def _wheel(
+    path: Path,
+    extension: str,
+    payload: bytes = b"x",
+    extra=(),
+    inner_version: str = VERSION,
+    metadata_version: str = VERSION,
+    typed: bool = True,
+) -> None:
     with zipfile.ZipFile(path, "w") as wheel:
         wheel.writestr("quiltx/__init__.py", "")
         wheel.writestr("quiltx/auth/__init__.py", "")
+        wheel.writestr("quiltx/_version.py", f'__version__ = "{inner_version}"\n')
+        wheel.writestr(
+            f"quiltx-{VERSION}.dist-info/METADATA",
+            f"Metadata-Version: 2.4\nName: quiltx\nVersion: {metadata_version}\n",
+        )
+        if typed:
+            wheel.writestr("quiltx/py.typed", "")
         wheel.writestr(extension, payload)
         for name in extra:
             wheel.writestr(name, "")
 
 
-def _sdist(path: Path, extra=(), skip=()) -> None:
+def _sdist(
+    path: Path, extra=(), skip=(), inner_version: str = VERSION, meta: str = VERSION
+) -> None:
     root = f"quiltx-{VERSION}"
-    names = [
-        "pyproject.toml",
-        "rust/Cargo.toml",
-        "rust/Cargo.lock",
-        "rust/src/lib.rs",
-        "quiltx/__init__.py",
-        *extra,
-    ]
+    files = {
+        "pyproject.toml": "",
+        "rust/Cargo.toml": "",
+        "rust/Cargo.lock": "",
+        "rust/src/lib.rs": "",
+        "quiltx/__init__.py": "",
+        "quiltx/_version.py": f'__version__ = "{inner_version}"\n',
+        "PKG-INFO": f"Metadata-Version: 2.4\nName: quiltx\nVersion: {meta}\n",
+        **{name: "" for name in extra},
+    }
     with tarfile.open(path, "w:gz") as tar:
-        for name in names:
+        for name, text in files.items():
             if name in skip:
                 continue
+            data = text.encode()
             info = tarfile.TarInfo(f"{root}/{name}")
-            info.size = 0
-            tar.addfile(info, io.BytesIO(b""))
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
 
 
 def make_dist(directory: Path) -> None:
@@ -171,3 +191,42 @@ def test_check_dist_flags_the_wrong_version(tmp_path: Path) -> None:
     problems = check.check_dist(tmp_path, "0.24.0")
     assert len([p for p in problems if p.startswith("expected exactly one")]) == 5
     assert len([p for p in problems if p.startswith("unexpected file")]) == 5
+
+
+def test_check_dist_flags_a_version_that_disagrees_inside_the_files(
+    tmp_path: Path,
+) -> None:
+    make_dist(tmp_path)
+    wheel = next(tmp_path.glob("*win_amd64.whl"))
+    _wheel(wheel, "quiltx/_core.pyd", inner_version="0.23.1")
+    _sdist(tmp_path / f"quiltx-{VERSION}.tar.gz", meta="0.23.1")
+    problems = check.check_dist(tmp_path, VERSION)
+    assert any("_version.py says 0.23.1" in p for p in problems)
+    assert any("metadata Version is 0.23.1" in p for p in problems)
+
+
+def test_check_dist_flags_a_wheel_without_py_typed(tmp_path: Path) -> None:
+    make_dist(tmp_path)
+    wheel = next(tmp_path.glob("*win_amd64.whl"))
+    _wheel(wheel, "quiltx/_core.pyd", typed=False)
+    assert check.check_dist(tmp_path, VERSION) == [
+        f"{wheel.name}: missing quiltx/py.typed"
+    ]
+
+
+def test_repo_version_must_match_pyproject(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "quiltx").mkdir()
+    (tmp_path / "quiltx" / "_version.py").write_text('__version__ = "0.23.1"\n')
+    monkeypatch.chdir(tmp_path)
+    assert check.repo_version_problems("0.23.1") == []
+    (problem,) = check.repo_version_problems("0.24.0a1")
+    assert "says 0.23.1" in problem and "pyproject.toml says 0.24.0a1" in problem
+
+
+def test_this_repo_versions_agree() -> None:
+    path = ROOT / "quiltx" / "_version.py"
+    if not path.exists():  # CI runs the suite from a copy without the source package
+        pytest.skip("no quiltx/ source tree next to the tests")
+    version = check.project_version()
+    found = check.VERSION_ASSIGNMENT.search(path.read_text())
+    assert found and found.group(1) == version

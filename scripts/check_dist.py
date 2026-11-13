@@ -6,14 +6,16 @@ A release is five files and no others:
 * ``quiltx-<v>.tar.gz`` (sdist)
 * ``quiltx-<v>-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl``
 * ``quiltx-<v>-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl``
-* ``quiltx-<v>-cp310-abi3-macosx_10_12_universal2...whl`` (arm64 + x86_64 in one file)
+* ``quiltx-<v>-cp310-abi3-macosx_10_12_universal2...whl`` (arm64 + x86_64 in one file,
+  macOS 10.12+ on Intel, 11+ on Apple silicon)
 * ``quiltx-<v>-cp310-abi3-win_amd64.whl``
 
 Beyond the file names it checks what is inside: the compiled extension is
 present (and, for macOS, contains both architectures), no bytecode was bundled,
 the sdist carries the Rust sources so ``pip install`` can build from source, and
-every file is PyPI-uploadable. PyPI never lets a filename be reused, so this runs
-before anything is uploaded.
+the version is the same everywhere: pyproject.toml, ``quiltx/_version.py`` in the
+repo and in every archive, and each archive's metadata. PyPI never lets a filename
+be reused, so this runs before anything is uploaded.
 
 Usage:
     python scripts/check_dist.py DIST_DIR [VERSION]   # VERSION defaults to pyproject.toml
@@ -47,9 +49,11 @@ def expected_patterns(version: str) -> dict[str, str]:
             rf"quiltx-{v}-cp310-abi3-"
             r"manylinux2014_aarch64\.manylinux_2_17_aarch64\.whl"
         ),
-        # maturin also lists the per-architecture tags the universal2 file satisfies.
+        # The build pins MACOSX_DEPLOYMENT_TARGET=10.12 (dist.yml), so a runner
+        # image change cannot silently move the floor. maturin also lists the
+        # per-architecture tags the universal2 file satisfies.
         "macOS universal2": (
-            rf"quiltx-{v}-cp310-abi3-macosx_\d+_\d+_universal2"
+            rf"quiltx-{v}-cp310-abi3-macosx_10_12_universal2"
             r"(\.macosx_\d+_\d+_(x86_64|arm64))*\.whl"
         ),
         "windows x86_64": rf"quiltx-{v}-cp310-abi3-win_amd64\.whl",
@@ -70,11 +74,33 @@ def fat_architectures(data: bytes) -> set[int]:
     return cpus
 
 
+VERSION_ASSIGNMENT = re.compile(r'^__version__ = "([^"]+)"', re.MULTILINE)
+METADATA_VERSION = re.compile(r"^Version: (\S+)", re.MULTILINE)
+
+
+def _versions_in(source: str, metadata: str, name: str, version: str) -> list[str]:
+    """Problems if the archive's _version.py or metadata disagree with *version*."""
+    problems = []
+    found = VERSION_ASSIGNMENT.search(source)
+    if not found or found.group(1) != version:
+        problems.append(
+            f"{name}: quiltx/_version.py says {found.group(1) if found else 'nothing'},"
+            f" expected {version}"
+        )
+    meta = METADATA_VERSION.search(metadata)
+    if not meta or meta.group(1) != version:
+        problems.append(
+            f"{name}: metadata Version is {meta.group(1) if meta else 'missing'},"
+            f" expected {version}"
+        )
+    return problems
+
+
 def _bytecode(names: list[str]) -> list[str]:
     return [n for n in names if "__pycache__" in n or n.endswith((".pyc", ".pyo"))]
 
 
-def check_wheel(path: Path, label: str) -> list[str]:
+def check_wheel(path: Path, label: str, version: str) -> list[str]:
     problems: list[str] = []
     with zipfile.ZipFile(path) as wheel:
         names = wheel.namelist()
@@ -90,11 +116,25 @@ def check_wheel(path: Path, label: str) -> list[str]:
                     f"{path.name}: {extension} is not a universal2 binary "
                     f"(cpu types {sorted(hex(a) for a in archs) or 'none'})"
                 )
-        for required in ("quiltx/__init__.py", "quiltx/auth/__init__.py"):
+        for required in (
+            "quiltx/__init__.py",
+            "quiltx/auth/__init__.py",
+            "quiltx/py.typed",
+        ):
             if required not in names:
                 problems.append(f"{path.name}: missing {required}")
         if _bytecode(names):
             problems.append(f"{path.name}: contains bytecode: {_bytecode(names)[:3]}")
+        metadata = [n for n in names if n.endswith(".dist-info/METADATA")]
+        if "quiltx/_version.py" in names and metadata:
+            problems += _versions_in(
+                wheel.read("quiltx/_version.py").decode(),
+                wheel.read(metadata[0]).decode(),
+                path.name,
+                version,
+            )
+        else:
+            problems.append(f"{path.name}: missing quiltx/_version.py or METADATA")
     return problems
 
 
@@ -114,6 +154,17 @@ def check_sdist(path: Path, version: str) -> list[str]:
             problems.append(f"{path.name}: missing {required}")
     if _bytecode(names):
         problems.append(f"{path.name}: contains bytecode: {_bytecode(names)[:3]}")
+    with tarfile.open(path) as sdist:
+        members = {}
+        for member in (f"{root}/quiltx/_version.py", f"{root}/PKG-INFO"):
+            extracted = sdist.extractfile(member) if member in names else None
+            members[member] = extracted.read().decode() if extracted else ""
+    problems += _versions_in(
+        members[f"{root}/quiltx/_version.py"],
+        members[f"{root}/PKG-INFO"],
+        path.name,
+        version,
+    )
     return problems
 
 
@@ -132,7 +183,7 @@ def check_dist(dist_dir: Path, version: str) -> list[str]:
         if label == "sdist":
             problems += check_sdist(matches[0], version)
         else:
-            problems += check_wheel(matches[0], label)
+            problems += check_wheel(matches[0], label, version)
     for name in sorted(unclaimed):
         problems.append(f"unexpected file: {name}")
     return problems
@@ -146,6 +197,20 @@ def project_version() -> str:
     return match.group(1)
 
 
+def repo_version_problems(version: str) -> list[str]:
+    """Problems if quiltx/_version.py in the working tree disagrees with *version*."""
+    path = Path("quiltx/_version.py")
+    if not path.exists():
+        return []
+    found = VERSION_ASSIGNMENT.search(path.read_text())
+    if found and found.group(1) == version:
+        return []
+    return [
+        f"{path} says {found.group(1) if found else 'nothing'}, "
+        f"but pyproject.toml says {version}"
+    ]
+
+
 def main(argv: list[str]) -> int:
     if not 1 <= len(argv) <= 2:
         print(__doc__)
@@ -153,6 +218,8 @@ def main(argv: list[str]) -> int:
     dist_dir = Path(argv[0])
     version = argv[1] if len(argv) == 2 else project_version()
     problems = check_dist(dist_dir, version)
+    if len(argv) == 1:  # version came from pyproject.toml: the repo must agree
+        problems += repo_version_problems(version)
     if problems:
         for problem in problems:
             print(f"::error::{problem}" if _in_actions() else f"error: {problem}")
