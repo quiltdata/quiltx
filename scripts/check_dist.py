@@ -232,7 +232,7 @@ def main(argv: list[str]) -> int:
         for problem in problems:
             print(f"::error::{problem}" if _in_actions() else f"error: {problem}")
         return 1
-    print(f"{dist_dir}: exactly the 5 expected files for quiltx {version}")
+    print(f"{dist_dir}: exactly the {len(expected_patterns(version))} expected files for quiltx {version}")
     for path in sorted(dist_dir.iterdir()):
         print(f"  {path.name}  {path.stat().st_size:,} bytes")
     return 0
