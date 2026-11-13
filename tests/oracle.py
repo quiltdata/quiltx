@@ -1,14 +1,16 @@
 """The pre-Rust Python implementations, kept verbatim as the parity oracle.
 
-``quiltx.identity.normalize_dns`` and the credential-path lookups in
-``quiltx.auth.store`` now call ``quiltx._core``. These are the functions they
-replaced, copied unchanged from quiltx 0.23.1 (commit 70dfd36 of the PR that
-introduced ``_core``), so ``tests/test_core_parity.py`` can run old and new on
-the same inputs. Nothing under ``quiltx/`` imports this module.
+``quiltx.identity.normalize_dns`` and the credential-path and file-store
+lookups in ``quiltx.auth.store`` now call ``quiltx._core``. The functions
+here are the Python they replaced (paths and ``normalize_dns`` from quiltx
+0.23.1; the file I/O from 0.24.0), so ``tests/test_core_parity.py`` can run
+old and new on the same inputs. Nothing under ``quiltx/`` imports this module.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -127,3 +129,128 @@ KEYRING_SERVICE = "quiltx"
 def keyring_entry(dns: str) -> tuple[str, str]:
     """What ``keyring.get_password(...)`` was called with."""
     return (KEYRING_SERVICE, dns)
+
+
+# ---------------------------------------------------------------------------
+# File-backed store (copied from quiltx.auth.store at 0.24.0, with the path
+# taken as an argument instead of going through _fallback_path / _index_path)
+# ---------------------------------------------------------------------------
+
+
+def read_fallback(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def write_fallback(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Tighten parent dir mode in case it pre-existed at a looser umask.
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    payload = json.dumps(data, indent=2).encode("utf-8")
+    # Open with mode 0o600 from the start so the secret never sits at the
+    # default umask between create and chmod (TOCTOU window on shared hosts).
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    # If the file pre-existed at looser perms (older quiltx), tighten it now.
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def read_index(path: Path) -> list:
+    if not path.exists():
+        return []
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(result, list):
+            return result
+        return []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def write_index(path: Path, entries: list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Tighten parent dir mode in case it pre-existed at a looser umask:
+    # the index leaks DNS names (not secrets), but on a shared host that is
+    # still better kept private. Mirrors the pattern in _write_fallback.
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    path.write_text(json.dumps(entries), encoding="utf-8")
+
+
+def add_to_index(path: Path, dns: str) -> None:
+    entries = read_index(path)
+    if dns not in entries:
+        entries.append(dns)
+        write_index(path, entries)
+
+
+def remove_from_index(path: Path, dns: str) -> None:
+    entries = read_index(path)
+    if dns in entries:
+        entries.remove(dns)
+        write_index(path, entries)
+
+
+def get_fallback(path: Path, dns: str) -> dict | None:
+    data = read_fallback(path)
+    entry = data.get(dns)
+    if entry is None or "api_key" not in entry:
+        return None
+    return entry
+
+
+def store_fallback(
+    path: Path,
+    dns: str,
+    api_key: str,
+    name: str | None = None,
+    expires_at: int | None = None,
+) -> None:
+    api_key = api_key.strip()
+    if not api_key:
+        raise ValueError("API key is empty")
+    if not api_key.startswith("qk_"):
+        raise ValueError(
+            "API key does not start with 'qk_'. Quilt API keys begin with "
+            "'qk_' — paste the secret shown after creating a key in the "
+            "catalog UI under Profile → API Keys."
+        )
+    payload = {
+        "api_key": api_key,
+        "name": name,
+        "expires_at": expires_at,
+    }
+    data = read_fallback(path)
+    data[dns] = payload
+    write_fallback(path, data)
+
+
+def delete_fallback(path: Path, dns: str) -> None:
+    data = read_fallback(path)
+    if dns in data:
+        data.pop(dns)
+        write_fallback(path, data)
+
+
+def list_fallback(path: Path) -> list[tuple[str, dict]]:
+    results: list[tuple[str, dict]] = []
+    data = read_fallback(path)
+    for dns, entry in data.items():
+        if "api_key" in entry:
+            results.append((dns, entry))
+    return results

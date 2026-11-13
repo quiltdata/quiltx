@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The 0600 `credentials.json` fallback and the `credentials_index.json` I/O now run in Rust (`quiltx._core`). The OS keyring backend is unchanged. Behaviour, on-disk format, and file modes are unchanged; `tests/test_core_parity.py` compares bytes with the old Python.
+
 ## [0.24.0] - 2026-11-13
 
 ### Changed
