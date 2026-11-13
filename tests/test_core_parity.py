@@ -1212,13 +1212,83 @@ def test_mint_registry_credentials_matches_the_oracle(
     }
 
 
-def test_mint_registry_credentials_incomplete_matches_the_oracle(
+def test_mint_registry_credentials_incomplete_is_unusable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from quiltx.auth.session import CatalogCredentialsError
+
     _patch_sts(monkeypatch, lambda url: {"AccessKeyId": "ASIA"})
-    assert outcome(
-        _core.mint_registry_credentials, "https://registry.example.com"
-    ) == outcome(oracle.mint_registry_credentials, "https://registry.example.com")
+    with pytest.raises(
+        CatalogCredentialsError, match="no usable credentials"
+    ) as raised:
+        _core.mint_registry_credentials("https://registry.example.com")
+    assert "SecretAccessKey must be a non-empty string" in str(raised.value)
+    # The old Python used a generic message for a missing key; do not
+    # compare this path with the oracle.
+
+
+def test_mint_rejects_null_empty_and_wrong_typed_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.session import CatalogCredentialsError
+
+    happy = {
+        "AccessKeyId": "ASIA",
+        "SecretAccessKey": "secret",
+        "SessionToken": "token",
+        "Expiration": "2030-01-01T00:00:00Z",
+    }
+    cases: list[tuple[str, object, str]] = [
+        ("AccessKeyId", None, "AccessKeyId"),
+        ("AccessKeyId", "", "AccessKeyId"),
+        ("AccessKeyId", 1, "AccessKeyId"),
+        ("SecretAccessKey", None, "SecretAccessKey"),
+        ("SecretAccessKey", "", "SecretAccessKey"),
+        ("SessionToken", None, "SessionToken"),
+        ("SessionToken", "", "SessionToken"),
+    ]
+    for field, bad, mention in cases:
+        body = dict(happy)
+        body[field] = bad  # type: ignore[assignment]
+        _patch_sts(monkeypatch, lambda url, b=body: b)
+        with pytest.raises(
+            CatalogCredentialsError, match="no usable credentials"
+        ) as raised:
+            _core.mint_registry_credentials("https://registry.example.com")
+        assert mention in str(raised.value)
+
+
+def test_mint_rejects_a_naive_or_odd_expiration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.session import CatalogCredentialsError
+
+    happy = {
+        "AccessKeyId": "ASIA",
+        "SecretAccessKey": "secret",
+        "SessionToken": "token",
+        "Expiration": "2030-01-01T00:00:00Z",
+    }
+    bads: list[object] = [
+        None,
+        "",
+        1_730_000_000,
+        "2030-01-01T00:00:00",
+        "not-a-date",
+        "NaN",
+        float("nan"),
+    ]
+    for bad in bads:
+        body = dict(happy)
+        body["Expiration"] = bad  # type: ignore[assignment]
+        _patch_sts(monkeypatch, lambda url, b=body: b)
+        with pytest.raises(
+            CatalogCredentialsError, match="no usable credentials"
+        ) as raised:
+            _core.mint_registry_credentials("https://registry.example.com")
+        assert "Expiration must be a timezone-aware datetime string" in str(
+            raised.value
+        )
 
 
 def test_mint_registry_credentials_rejects_a_non_object_body(
@@ -1226,8 +1296,16 @@ def test_mint_registry_credentials_rejects_a_non_object_body(
 ) -> None:
     from quiltx.auth.session import CatalogCredentialsError
 
-    bodies: list[object] = [[], None, "ok", 1, True, "", "qk_should_not_leak"]
-    for body in bodies:
+    cases: list[tuple[object, str]] = [
+        ([], "list of length 0"),
+        (None, "None"),
+        ("ok", "str of length 2"),
+        (1, "int"),
+        (True, "bool"),
+        ("", "str of length 0"),
+        ("qk_should_not_leak", "str of length 18"),
+    ]
+    for body, typ in cases:
         _patch_sts(monkeypatch, lambda url, b=body: b)
         with pytest.raises(
             CatalogCredentialsError, match="no usable credentials"
@@ -1238,12 +1316,13 @@ def test_mint_registry_credentials_rejects_a_non_object_body(
             "unexpected response from https://registry.example.com/api/auth/get_credentials:"
             in text
         )
+        assert typ in text
         assert "qk_should_not_leak" not in text
         # The old Python used the same generic message for a TypeError; do not
         # compare this path with the oracle.
 
 
-def test_mint_error_text_uses_python_repr_and_redacts_secrets(
+def test_mint_non_object_error_does_not_echo_the_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from quiltx.auth.session import CatalogCredentialsError
@@ -1252,6 +1331,7 @@ def test_mint_error_text_uses_python_repr_and_redacts_secrets(
         return [
             {
                 "SecretAccessKey": "leak_me",
+                "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
                 "message": "bad\u2028key\x80end",
                 "hint": "not a secret",
             }
@@ -1261,11 +1341,11 @@ def test_mint_error_text_uses_python_repr_and_redacts_secrets(
     with pytest.raises(CatalogCredentialsError) as raised:
         _core.mint_registry_credentials("https://registry.example.com")
     text = str(raised.value)
+    assert "list of length 1" in text
     assert "leak_me" not in text
-    assert "<redacted>" in text
-    assert "\\u2028" in text
-    assert "\\x80" in text
-    assert "not a secret" in text
+    assert "AKIAIOSFODNN7EXAMPLE" not in text
+    assert "not a secret" not in text
+    assert "bad" not in text
 
 
 def test_mint_lone_surrogate_in_response_is_catalog_credentials_error(

@@ -34,11 +34,15 @@ def _get_json(url: str) -> Any:
 
     Kept in Python so tests that replace ``quilt3.session`` keep working,
     and so the API key bound by ``Catalog.ensure_auth`` is sent. Called
-    from Rust when minting STS credentials.
+    from Rust when minting STS credentials. A 4xx or 5xx response raises
+    ``CatalogCredentialsError`` naming the status and the registry URL.
     """
     import quilt3.session
 
     response = quilt3.session.get_session().get(url)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int) and 400 <= status <= 599:
+        raise CatalogCredentialsError(f"registry {url} returned HTTP {status}")
     return response.json()
 
 

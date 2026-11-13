@@ -109,22 +109,73 @@ pub(crate) fn python_repr(value: &Value) -> String {
 }
 
 /// True when a JSON key looks like a credential field.
-/// Matches `secret`, `token`, `password`, and `api_key` / `apikey`
-/// as substrings, case-insensitively (`api_?key` after lowercasing).
+/// Matches `secret`, `token`, `password`, `api_key` / `apikey`, and
+/// `accesskeyid` (e.g. AccessKeyId) as substrings, case-insensitively
+/// (`api_?key` after lowercasing).
 fn is_sensitive_key(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
+    let folded = k.replace('_', "");
     k.contains("secret")
         || k.contains("token")
         || k.contains("password")
         || k.contains("apikey")
         || k.contains("api_key")
+        || folded.contains("accesskeyid")
 }
 
 const REDACTED: &str = "<redacted>";
 
+fn is_aws_key_prefix(chars: &[char], i: usize) -> bool {
+    if i + 4 > chars.len() {
+        return false;
+    }
+    let prefix: String = chars[i..i + 4].iter().collect();
+    prefix == "AKIA" || prefix == "ASIA"
+}
+
+fn is_base64_like(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '_' || c == '-' || c == '='
+}
+
+/// Redact AKIA/ASIA-style ids and long base64-like token strings inside
+/// a free-text value so they cannot leak into an error message.
+fn redact_secret_text(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if is_aws_key_prefix(&chars, i) {
+            let mut j = i + 4;
+            while j < chars.len() && chars[j].is_ascii_alphanumeric() {
+                j += 1;
+            }
+            if j - i >= 20 {
+                out.push_str(REDACTED);
+                i = j;
+                continue;
+            }
+        }
+        if is_base64_like(chars[i]) && chars[i] != '=' {
+            let mut j = i;
+            while j < chars.len() && is_base64_like(chars[j]) {
+                j += 1;
+            }
+            if j - i >= 32 {
+                out.push_str(REDACTED);
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Redact credential material so an error message cannot leak a `qk_`
-/// key, token, or password. Applied to GraphQL errors, InvalidInput
-/// payloads, and any other echoed registry body.
+/// key, token, password, AccessKeyId, AKIA/ASIA id, or long token.
+/// Applied to GraphQL errors, InvalidInput payloads, and any other
+/// echoed registry or session body.
 fn redact_secrets(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -140,7 +191,22 @@ fn redact_secrets(value: &Value) -> Value {
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_secrets).collect()),
         Value::String(s) if s.starts_with("qk_") => Value::String(REDACTED.into()),
+        Value::String(s) => Value::String(redact_secret_text(s)),
         other => other.clone(),
+    }
+}
+
+/// A short, non-secret description of a JSON value for fail-closed errors.
+/// Echoes only the Python-ish type and, where it has one, a length.
+pub(crate) fn json_type_and_length(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::Bool(_) => "bool".into(),
+        Value::Number(n) if n.as_i64().is_some() || n.as_u64().is_some() => "int".into(),
+        Value::Number(_) => "float".into(),
+        Value::String(s) => format!("str of length {}", s.chars().count()),
+        Value::Array(items) => format!("list of length {}", items.len()),
+        Value::Object(map) => format!("dict of length {}", map.len()),
     }
 }
 
@@ -826,6 +892,31 @@ mod tests {
                 assert!(!msg.contains("qk_in_the_message"), "{msg}");
                 assert!(!msg.contains("refresh_me"), "{msg}");
                 assert!(msg.contains("<redacted>"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_text_redacts_accesskeyid_akia_and_long_tokens() {
+        let http = MemoryHttp::default().post(
+            "https://catalog.example.com/graphql",
+            json!({"errors": [{
+                "message": "id ASIAIOSFODNN7EXAMPLE and tok abcdefghijklmnopqrstuvwxyz0123456789+/==",
+                "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+                "hint": "not a secret"
+            }]}),
+        );
+        match create_api_key("https://catalog.example.com", "at", "x", 90, &http) {
+            Err(RegistryError::Auth(msg)) => {
+                assert!(!msg.contains("ASIAIOSFODNN7EXAMPLE"), "{msg}");
+                assert!(!msg.contains("AKIAIOSFODNN7EXAMPLE"), "{msg}");
+                assert!(
+                    !msg.contains("abcdefghijklmnopqrstuvwxyz0123456789+/=="),
+                    "{msg}"
+                );
+                assert!(msg.contains("<redacted>"), "{msg}");
+                assert!(msg.contains("not a secret"), "{msg}");
             }
             other => panic!("{other:?}"),
         }
