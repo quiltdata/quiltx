@@ -318,8 +318,23 @@ from `quiltx.auth`. `quilt3_facade` re-exports the `session` names.
 ### Rust extension (`quiltx._core`)
 
 [`rust/`](rust/) is crate `quiltx-core`: PyO3 0.30 with `abi3-py310`, one wheel per
-platform for every CPython 3.10+. Today it exposes `core_version()` and `ping()`
-and nothing depends on it; it is the seam where Rust-backed code lands.
+platform for every CPython 3.10+. It is **required**: `quiltx.auth._native` (the one importer)
+imports it, and `quiltx.identity` and `quiltx.auth.store` go through that, so every CLI
+command needs it and a missing extension fails at import with a message saying how to build it.
+
+What lives in Rust (`rust/src/`):
+
+- `dns.rs`: `normalize_dns(value, insecure)`, the catalog-name normalizer behind
+  `quiltx.identity.normalize_dns`, with the exact error messages of the Python it replaced.
+- `paths.rs`: the credential store's directory (the `platformdirs.user_data_path("quiltx")`
+  rules), `credentials.json`, `credentials_index.json`, and the keyring `(service, username)`
+  for a catalog; used by `quiltx.auth.store`.
+- `core_version()` and `ping()`, the original smoke functions.
+
+`tests/oracle.py` keeps the replaced Python verbatim and `tests/test_core_parity.py` runs
+oracle and Rust on the same inputs (tables, a seeded random walk, and the machine's own
+`platformdirs`); change Rust behaviour only together with that table. After editing Rust,
+rebuild the extension into the venv with `uv sync --reinstall-package quiltx`.
 `./poe test` and `cargo test --locked` (in `rust/`) cover it. Set `pyo3/extension-module`
 only through `[tool.maturin] features` so `cargo test` can still link.
 
