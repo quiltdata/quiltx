@@ -331,6 +331,8 @@ What lives in Rust (`rust/src/`):
   for a catalog; used by `quiltx.auth.store`.
 - `store.rs`: the 0600 `credentials.json` fallback, the index file, and the public
   get/store/delete/list (OS keyring via the Python `keyring` package, or the file fallback).
+- `registry.rs`: resolve the catalog's registry URL, log in, mint a `qk_` API key,
+  and validate one. HTTP is injectable; production uses the Python `urllib` helpers.
 - `core_version()` and `ping()`, the original smoke functions.
 
 `tests/oracle.py` keeps the replaced Python verbatim and `tests/test_core_parity.py` runs

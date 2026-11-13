@@ -11,6 +11,9 @@
 //!   file paths and keyring entry.
 //! * [`store`]: the 0600 `credentials.json` fallback, the index file, and the
 //!   public get/store/delete/list including the OS-keyring path.
+//! * [`registry`]: resolve the catalog's registry URL, log in, mint a `qk_`
+//!   API key, and validate one. HTTP is an injectable client; production
+//!   uses the Python `urllib` helpers so SSL env vars and test patches work.
 
 use std::path::PathBuf;
 
@@ -23,6 +26,7 @@ use serde_json::{Map, Number, Value};
 
 pub mod dns;
 pub mod paths;
+pub mod registry;
 pub mod store;
 
 /// Version of this Rust crate, from `Cargo.toml` (not the Python package version).
@@ -85,6 +89,126 @@ fn store_op_err(e: store::StoreOpError) -> PyErr {
     }
 }
 
+fn registry_err(e: registry::RegistryError) -> PyErr {
+    match e {
+        registry::RegistryError::Auth(msg) => {
+            Python::attach(|py| match catalog_auth_error(py, &msg) {
+                Ok(err) => err,
+                Err(err) => err,
+            })
+        }
+        registry::RegistryError::Py(e) => e,
+    }
+}
+
+fn catalog_auth_error(py: Python<'_>, msg: &str) -> PyResult<PyErr> {
+    let inst = py
+        .import("quiltx.auth.registry")?
+        .getattr("CatalogAuthError")?
+        .call1((msg,))?;
+    Ok(PyErr::from_value(inst))
+}
+
+struct PythonHttp;
+
+impl registry::HttpClient for PythonHttp {
+    fn get_json(&self, url: &str) -> Result<serde_json::Value, registry::RegistryError> {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<serde_json::Value> {
+            let obj = py
+                .import("quiltx.auth.registry")?
+                .getattr("_get_json")?
+                .call1((url,))?;
+            json_from_response(url, &obj).map_err(registry_err)
+        })
+        .map_err(registry::RegistryError::Py)
+    }
+
+    fn post_json(
+        &self,
+        url: &str,
+        payload: &serde_json::Value,
+        bearer: Option<&str>,
+    ) -> Result<serde_json::Value, registry::RegistryError> {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<serde_json::Value> {
+            let func = py.import("quiltx.auth.registry")?.getattr("_post_json")?;
+            let kwargs = PyDict::new(py);
+            if let Some(token) = bearer {
+                kwargs.set_item("bearer", token)?;
+            }
+            let obj = func.call((url, json_to_py(py, payload)?), Some(&kwargs))?;
+            json_from_response(url, &obj).map_err(registry_err)
+        })
+        .map_err(registry::RegistryError::Py)
+    }
+
+    fn post_form(
+        &self,
+        url: &str,
+        payload: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, registry::RegistryError> {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<serde_json::Value> {
+            let obj = py
+                .import("quiltx.auth.registry")?
+                .getattr("_post_form")?
+                .call1((url, map_to_py(py, payload)?))?;
+            json_from_response(url, &obj).map_err(registry_err)
+        })
+        .map_err(registry::RegistryError::Py)
+    }
+}
+
+/// Resolve the registry API base URL from ``<catalog_url>/config.json``.
+#[pyfunction]
+fn resolve_registry_url(catalog_url: &str) -> PyResult<String> {
+    registry::resolve_registry_url(catalog_url, &PythonHttp).map_err(registry_err)
+}
+
+/// POST username/password to ``<registry_url>/api/login``.
+#[pyfunction]
+fn acquire_refresh_token(registry_url: &str, username: &str, password: &str) -> PyResult<String> {
+    registry::acquire_refresh_token(registry_url, username, password, &PythonHttp)
+        .map_err(registry_err)
+}
+
+/// Trade a refresh_token for an access_token (form-encoded ``/api/token``).
+#[pyfunction]
+fn exchange_refresh_token_for_access_token(
+    registry_url: &str,
+    refresh_token: &str,
+) -> PyResult<String> {
+    registry::exchange_refresh_token_for_access_token(registry_url, refresh_token, &PythonHttp)
+        .map_err(registry_err)
+}
+
+/// Mint a ``qk_`` API key via GraphQL ``apiKeyCreate``.
+#[pyfunction]
+fn create_api_key(
+    py: Python<'_>,
+    registry_url: &str,
+    access_token: &str,
+    name: &str,
+    expires_in_days: i64,
+) -> PyResult<Py<PyDict>> {
+    let map = registry::create_api_key(
+        registry_url,
+        access_token,
+        name,
+        expires_in_days,
+        &PythonHttp,
+    )
+    .map_err(registry_err)?;
+    Ok(map_to_py(py, &map)?.unbind())
+}
+
+/// Confirm *api_key* is accepted by the registry (already-resolved URL).
+#[pyfunction]
+fn validate_api_key(registry_url: &str, api_key: &str) -> PyResult<()> {
+    registry::validate_api_key(registry_url, api_key, &PythonHttp).map_err(registry_err)
+}
+
 fn map_to_py<'py>(py: Python<'py>, map: &Map<String, Value>) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     for (key, value) in map {
@@ -136,6 +260,27 @@ fn pydict_to_map(dict: &Bound<'_, PyDict>) -> PyResult<Map<String, Value>> {
         map.insert(key, py_to_json(&value)?);
     }
     Ok(map)
+}
+
+/// Convert a Python HTTP helper's return value to JSON. A `ValueError`
+/// (including a lone surrogate that cannot be represented in Rust) is a
+/// bad response, not a bug in the caller: raise `CatalogAuthError`.
+fn json_from_response(
+    url: &str,
+    obj: &Bound<'_, PyAny>,
+) -> Result<serde_json::Value, registry::RegistryError> {
+    match py_to_json(obj) {
+        Ok(value) => Ok(value),
+        Err(err) => Python::attach(|py| {
+            if err.is_instance_of::<PyValueError>(py) {
+                Err(registry::RegistryError::Auth(format!(
+                    "Unexpected response from {url}: {err}"
+                )))
+            } else {
+                Err(registry::RegistryError::Py(err))
+            }
+        }),
+    }
 }
 
 fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
@@ -443,6 +588,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(store_credential, m)?)?;
     m.add_function(wrap_pyfunction!(delete_credential, m)?)?;
     m.add_function(wrap_pyfunction!(list_credentials, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_registry_url, m)?)?;
+    m.add_function(wrap_pyfunction!(acquire_refresh_token, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        exchange_refresh_token_for_access_token,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(create_api_key, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_api_key, m)?)?;
     Ok(())
 }
 

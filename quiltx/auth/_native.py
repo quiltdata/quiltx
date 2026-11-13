@@ -3,8 +3,8 @@
 Everything Rust-backed that auth needs goes through this module, so the
 boundary between the Python auth code and the Rust core is one file. The core
 is required: catalog-name normalization (``normalize_dns``) runs on every CLI
-command that takes a catalog, and the credential store's paths, keyring key,
-and I/O come from it, so a missing extension is an error at import, with a
+command that takes a catalog, and the credential store and registry HTTP
+come from it, so a missing extension is an error at import, with a
 message that says how to fix it, rather than a degraded mode.
 """
 
@@ -146,3 +146,32 @@ def list_credentials(
 ) -> list[tuple[str, dict]]:
     """Public ``catalog_list``."""
     return _core.list_credentials(use_keyring, fallback_path, index_path)
+
+
+def resolve_registry_url(catalog_url: str) -> str:
+    """Registry base URL advertised by ``<catalog_url>/config.json``."""
+    return _core.resolve_registry_url(catalog_url)
+
+
+def acquire_refresh_token(registry_url: str, username: str, password: str) -> str:
+    """POST username/password to ``<registry_url>/api/login``."""
+    return _core.acquire_refresh_token(registry_url, username, password)
+
+
+def exchange_refresh_token_for_access_token(
+    registry_url: str, refresh_token: str
+) -> str:
+    """Trade a refresh_token for an access_token (form-encoded ``/api/token``)."""
+    return _core.exchange_refresh_token_for_access_token(registry_url, refresh_token)
+
+
+def create_api_key(
+    registry_url: str, access_token: str, name: str, expires_in_days: int
+) -> dict:
+    """Mint a ``qk_`` API key via GraphQL ``apiKeyCreate``."""
+    return _core.create_api_key(registry_url, access_token, name, expires_in_days)
+
+
+def validate_api_key(registry_url: str, api_key: str) -> None:
+    """Confirm *api_key* is accepted; *registry_url* is already resolved."""
+    _core.validate_api_key(registry_url, api_key)

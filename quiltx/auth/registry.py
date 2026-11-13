@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from quiltx.auth import _native
+
 
 class CatalogAuthError(RuntimeError):
     """Raised on any unrecoverable failure during U/P -> qk_ bootstrap."""
@@ -73,12 +75,7 @@ def resolve_registry_url(catalog_url: str) -> str:
     ``registryUrl`` field, fall back to the catalog URL itself (covers
     single-host dev setups).
     """
-    base = catalog_url.rstrip("/")
-    config = _get_json(base + "/config.json")
-    registry_url = config.get("registryUrl")
-    if not registry_url:
-        return base
-    return str(registry_url).rstrip("/")
+    return _native.resolve_registry_url(catalog_url)
 
 
 def _post_json(
@@ -146,15 +143,7 @@ def acquire_refresh_token(registry_url: str, username: str, password: str) -> st
     with a body like ``"SSO is required for this catalog"``) or if the
     response is missing a refresh_token.
     """
-    url = registry_url.rstrip("/") + "/api/login"
-    response = _post_json(url, {"username": username, "password": password})
-    token = response.get("refresh_token")
-    if not token:
-        raise CatalogAuthError(
-            f"No refresh_token in login response from {url}. "
-            f"Response keys: {list(response.keys())}"
-        )
-    return str(token)
+    return _native.acquire_refresh_token(registry_url, username, password)
 
 
 def exchange_refresh_token_for_access_token(
@@ -165,31 +154,7 @@ def exchange_refresh_token_for_access_token(
     The access_token is what we feed to the GraphQL mutation that mints the
     long-lived qk_... API key. Neither token is persisted.
     """
-    url = registry_url.rstrip("/") + "/api/token"
-    response = _post_form(url, {"refresh_token": refresh_token})
-    access_token = response.get("access_token")
-    if not access_token:
-        raise CatalogAuthError(
-            f"No access_token in token response from {url}. "
-            f"Response keys: {list(response.keys())}"
-        )
-    return str(access_token)
-
-
-_API_KEY_CREATE_MUTATION = """
-mutation apiKeyCreate($input: APIKeyCreateInput!) {
-  apiKeyCreate(input: $input) {
-    __typename
-    ... on APIKeyCreated {
-      apiKey { id name expiresAt }
-      secret
-    }
-    ... on InvalidInput {
-      errors { path message name }
-    }
-  }
-}
-""".strip()
+    return _native.exchange_refresh_token_for_access_token(registry_url, refresh_token)
 
 
 def create_api_key(
@@ -206,39 +171,9 @@ def create_api_key(
     CatalogAuthError on any non-success path (transport, GraphQL errors,
     InvalidInput).
     """
-    url = registry_url.rstrip("/") + "/graphql"
-    payload = {
-        "query": _API_KEY_CREATE_MUTATION,
-        "operationName": "apiKeyCreate",
-        "variables": {"input": {"name": name, "expiresInDays": int(expires_in_days)}},
-    }
-    response = _post_json(url, payload, bearer=access_token)
-    if "errors" in response and response["errors"]:
-        raise CatalogAuthError(f"GraphQL errors: {response['errors']}")
-    data = response.get("data") or {}
-    result = data.get("apiKeyCreate")
-    if not result:
-        raise CatalogAuthError(f"Unexpected GraphQL response from {url}: {response!r}")
-    typename = result.get("__typename")
-    if typename == "APIKeyCreated":
-        secret = result.get("secret")
-        if not secret:
-            raise CatalogAuthError("apiKeyCreate succeeded but returned no secret")
-        return {
-            "secret": str(secret),
-            "name": (result.get("apiKey") or {}).get("name") or name,
-            "expires_at": (result.get("apiKey") or {}).get("expiresAt"),
-        }
-    if typename == "InvalidInput":
-        raise CatalogAuthError(
-            f"Catalog rejected apiKeyCreate input: {result.get('errors')}"
-        )
-    raise CatalogAuthError(
-        f"Unexpected apiKeyCreate result type {typename!r}: {result!r}"
+    return _native.create_api_key(
+        registry_url, access_token, str(name), int(expires_in_days)
     )
-
-
-_VALIDATE_QUERY = "query apiKeysList { apiKeysList(input: {}) { apiKeys { id } } }"
 
 
 def validate_api_key(catalog_url: str, api_key: str) -> None:
@@ -249,12 +184,9 @@ def validate_api_key(catalog_url: str, api_key: str) -> None:
     success; raises CatalogAuthError on transport failure, on a 401/403
     from the catalog, or on any GraphQL ``errors`` payload.
     """
+    # Call the Python ``resolve_registry_url`` so tests can patch it.
     registry_url = resolve_registry_url(catalog_url)
-    url = registry_url + "/graphql"
-    payload = {"query": _VALIDATE_QUERY, "operationName": "apiKeysList"}
-    response = _post_json(url, payload, bearer=api_key)
-    if response.get("errors"):
-        raise CatalogAuthError(f"Catalog rejected API key: {response['errors']}")
+    _native.validate_api_key(registry_url, api_key)
 
 
 def bootstrap_api_key(
