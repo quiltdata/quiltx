@@ -75,7 +75,7 @@ fn nonempty_python_str(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn python_repr_str(s: &str) -> String {
+pub(crate) fn python_repr_str(s: &str) -> String {
     // Delegate to Python's own repr() so C0/C1, bidi marks, Zl/Zp,
     // and anything else Python escapes are covered exactly.
     Python::initialize();
@@ -87,7 +87,7 @@ fn python_repr_str(s: &str) -> String {
     })
 }
 
-fn python_repr(value: &Value) -> String {
+pub(crate) fn python_repr(value: &Value) -> String {
     match value {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
@@ -144,7 +144,7 @@ fn redact_secrets(value: &Value) -> Value {
     }
 }
 
-fn python_repr_redacted(value: &Value) -> String {
+pub(crate) fn python_repr_redacted(value: &Value) -> String {
     python_repr(&redact_secrets(value))
 }
 

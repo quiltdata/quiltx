@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Error text that echoes a registry response uses Python's `repr()` (so C1 controls, bidi marks, and Unicode line/paragraph separators are escaped) and redacts any string starting with `qk_` and any value whose key matches `secret`, `token`, `password`, or `api_key` / `apikey` (case-insensitive), including GraphQL errors and InvalidInput messages
 - The `create_api_key` wrapper now applies `str(name)` and `int(expires_in_days)` before calling Rust. `int(expires_in_days)` matches the previous Python; `str(name)` is new
 - A registry response that cannot be decoded (including a lone surrogate) raises `CatalogAuthError` instead of `ValueError`
+- `GET /api/auth/get_credentials` (the STS mint that builds the `access_key` / `secret_key` / `token` / `expiry_time` dict) now runs in Rust (`quiltx._core`). The HTTP transport stays in Python (`quiltx.auth.session._get_json` via quilt3's authenticated session), and `session.py` still wraps the result in botocore and refuses the ambient AWS chain. STS credentials are still not written to disk. A body that is not a JSON object now raises `CatalogCredentialsError` with a redacted Python `repr` of the body, instead of the same generic message a missing field produces. A lone surrogate in the response raises `CatalogCredentialsError` instead of `ValueError`
 
 ### Fixed
 

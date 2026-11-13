@@ -1181,6 +1181,114 @@ def test_lone_surrogate_in_response_is_catalog_auth_error(
     assert "https://catalog.example.com/config.json" in str(raised.value)
 
 
+def _patch_sts(monkeypatch: pytest.MonkeyPatch, get):
+    monkeypatch.setattr(oracle, "_sts_get_json", get)
+    monkeypatch.setattr("quiltx.auth.session._get_json", get)
+
+
+def test_mint_registry_credentials_matches_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = {
+        "AccessKeyId": "ASIA",
+        "SecretAccessKey": "secret",
+        "SessionToken": "token",
+        "Expiration": "2030-01-01T00:00:00Z",
+    }
+
+    def get_json(url: str):
+        assert url == "https://registry.example.com/api/auth/get_credentials"
+        return body
+
+    _patch_sts(monkeypatch, get_json)
+    assert outcome(
+        _core.mint_registry_credentials, "https://registry.example.com/"
+    ) == outcome(oracle.mint_registry_credentials, "https://registry.example.com/")
+    assert _core.mint_registry_credentials("https://registry.example.com/") == {
+        "access_key": "ASIA",
+        "secret_key": "secret",
+        "token": "token",
+        "expiry_time": "2030-01-01T00:00:00Z",
+    }
+
+
+def test_mint_registry_credentials_incomplete_matches_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_sts(monkeypatch, lambda url: {"AccessKeyId": "ASIA"})
+    assert outcome(
+        _core.mint_registry_credentials, "https://registry.example.com"
+    ) == outcome(oracle.mint_registry_credentials, "https://registry.example.com")
+
+
+def test_mint_registry_credentials_rejects_a_non_object_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.session import CatalogCredentialsError
+
+    bodies: list[object] = [[], None, "ok", 1, True, "", "qk_should_not_leak"]
+    for body in bodies:
+        _patch_sts(monkeypatch, lambda url, b=body: b)
+        with pytest.raises(
+            CatalogCredentialsError, match="no usable credentials"
+        ) as raised:
+            _core.mint_registry_credentials("https://registry.example.com")
+        text = str(raised.value)
+        assert (
+            "unexpected response from https://registry.example.com/api/auth/get_credentials:"
+            in text
+        )
+        assert "qk_should_not_leak" not in text
+        # The old Python used the same generic message for a TypeError; do not
+        # compare this path with the oracle.
+
+
+def test_mint_error_text_uses_python_repr_and_redacts_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.session import CatalogCredentialsError
+
+    def get_json(url: str):
+        return [
+            {
+                "SecretAccessKey": "leak_me",
+                "message": "bad\u2028key\x80end",
+                "hint": "not a secret",
+            }
+        ]
+
+    _patch_sts(monkeypatch, get_json)
+    with pytest.raises(CatalogCredentialsError) as raised:
+        _core.mint_registry_credentials("https://registry.example.com")
+    text = str(raised.value)
+    assert "leak_me" not in text
+    assert "<redacted>" in text
+    assert "\\u2028" in text
+    assert "\\x80" in text
+    assert "not a secret" in text
+
+
+def test_mint_lone_surrogate_in_response_is_catalog_credentials_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.session import CatalogCredentialsError
+
+    def get_json(url: str):
+        return {
+            "AccessKeyId": "ASIA\ud800",
+            "SecretAccessKey": "secret",
+            "SessionToken": "token",
+            "Expiration": "2030-01-01T00:00:00Z",
+        }
+
+    _patch_sts(monkeypatch, get_json)
+    with pytest.raises(
+        CatalogCredentialsError, match="Unexpected response from"
+    ) as raised:
+        _core.mint_registry_credentials("https://registry.example.com")
+    assert "https://registry.example.com/api/auth/get_credentials" in str(raised.value)
+
+
 # ---------------------------------------------------------------------------
 # The core is required
 # ---------------------------------------------------------------------------

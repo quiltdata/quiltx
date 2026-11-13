@@ -29,33 +29,35 @@ class CatalogCredentialsError(RuntimeError):
 QUILT_CREDENTIALS_METHOD = "quilt-registry"
 
 
+def _get_json(url: str) -> Any:
+    """GET *url* through quilt3's authenticated catalog session.
+
+    Kept in Python so tests that replace ``quilt3.session`` keep working,
+    and so the API key bound by ``Catalog.ensure_auth`` is sent. Called
+    from Rust when minting STS credentials.
+    """
+    import quilt3.session
+
+    response = quilt3.session.get_session().get(url)
+    return response.json()
+
+
 def _mint_registry_credentials() -> dict[str, str]:
     """Fetch fresh STS credentials from the active catalog's registry.
 
     Uses quilt3's authenticated HTTP session (the API key bound by
     ``Catalog.ensure_auth``) against the registry selected through quilt3's
-    supported context-local resolver. Nothing is written to disk, and no
-    cached or ambient credential source can substitute for this call.
+    supported context-local resolver. The GET and payload mapping run in
+    Rust. Nothing is written to disk, and no cached or ambient credential
+    source can substitute for this call.
     """
+    from quiltx.auth import _native
     import quilt3.session
 
     registry_url = quilt3.session.get_registry_url()
     if not registry_url:
         raise CatalogCredentialsError("no active catalog registry URL")
-    session = quilt3.session.get_session()
-    response = session.get(f"{registry_url.rstrip('/')}/api/auth/get_credentials")
-    payload = response.json()
-    try:
-        return {
-            "access_key": payload["AccessKeyId"],
-            "secret_key": payload["SecretAccessKey"],
-            "token": payload["SessionToken"],
-            "expiry_time": payload["Expiration"],
-        }
-    except (KeyError, TypeError) as exc:
-        raise CatalogCredentialsError(
-            f"registry {registry_url} returned no usable credentials"
-        ) from exc
+    return _native.mint_registry_credentials(registry_url)
 
 
 def catalog_botocore_session() -> Any:
