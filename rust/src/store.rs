@@ -16,16 +16,23 @@
 //!
 //! A missing file, or invalid JSON that Python's `json.loads` already treated
 //! as empty, still reads as empty. A file that exists but is invalid UTF-8, or
-//! that Python would parse but this parser cannot (`NaN`/`Infinity`, a lone
-//! surrogate, nesting deeper than 128), raises so a later write cannot replace
-//! it.
+//! that Python's `json.loads` would accept but this parser cannot (`NaN`/
+//! `Infinity`, a lone surrogate, nesting deeper than 128), raises so a later
+//! write cannot replace it. That decision is made by calling `json.loads`, not
+//! by matching parser error strings. Out-of-range floats and large integers
+//! are read.
 
+#[cfg(unix)]
+use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use pyo3::prelude::*;
 use serde_json::{Map, Number, Value};
 
 /// Why an API key was refused; the message is Python's `ValueError`.
@@ -287,57 +294,37 @@ fn read_json(path: &Path) -> Result<Option<Value>, StoreOpError> {
     let text = String::from_utf8(bytes).map_err(StoreOpError::Utf8)?;
     match serde_json::from_str(&text) {
         Ok(value) => Ok(Some(value)),
-        Err(e) if python_json_unsupported(&text, &e) => Err(StoreOpError::Value(e.to_string())),
-        Err(_) => Ok(None),
-    }
-}
-
-/// `serde_json` rejects some values that Python's `json.loads` accepts. Those
-/// must raise, not look like a missing file.
-fn python_json_unsupported(text: &str, err: &serde_json::Error) -> bool {
-    let msg = err.to_string();
-    if msg.contains("recursion limit")
-        || msg.contains("invalid unicode")
-        || msg.contains("surrogate")
-    {
-        return true;
-    }
-    let rest = slice_at_json_error(text, err);
-    starts_with_token(rest, "NaN")
-        || starts_with_token(rest, "Infinity")
-        || starts_with_token(rest, "-Infinity")
-}
-
-fn slice_at_json_error<'a>(text: &'a str, err: &serde_json::Error) -> &'a str {
-    let want_line = err.line();
-    let want_col = err.column();
-    let mut line = 1usize;
-    let mut col = 1usize;
-    for (i, ch) in text.char_indices() {
-        if line == want_line && col == want_col {
-            return &text[i..];
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
+        Err(e) => {
+            if python_json_loads_ok(&text)? {
+                Err(StoreOpError::Value(e.to_string()))
+            } else {
+                Ok(None)
+            }
         }
     }
-    if line == want_line && col == want_col {
-        return "";
-    }
-    text
 }
 
-fn starts_with_token(s: &str, token: &str) -> bool {
-    if !s.starts_with(token) {
-        return false;
-    }
-    !s[token.len()..]
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+/// Whether Python's `json.loads` would accept *text*. `JSONDecodeError` is
+/// "reject" (the oracle then returns empty); any other failure is an error.
+fn python_json_loads_ok(text: &str) -> Result<bool, StoreOpError> {
+    // Idempotent: a no-op when this is called from a loaded extension, and
+    // required when `cargo test` embeds Python.
+    Python::initialize();
+    Python::attach(|py| -> PyResult<bool> {
+        let json = py.import("json")?;
+        match json.getattr("loads")?.call1((text,)) {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                let decode_error = json.getattr("JSONDecodeError")?;
+                if err.is_instance(py, &decode_error) {
+                    Ok(false)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    })
+    .map_err(|e| StoreOpError::Value(e.to_string()))
 }
 
 /// Python on Windows opens these files in text mode (`os.open` without
@@ -386,12 +373,14 @@ fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
             }
             let mut file = opts.open(&tmp)?;
             file.write_all(&with_python_newlines(bytes))?;
+            file.sync_all()?;
             drop(file);
         }
         if private {
             let _ = chmod(&tmp, 0o600);
         }
         persist_tmp(&tmp, path)?;
+        sync_parent(path)?;
         if private {
             let _ = chmod(path, 0o600);
         }
@@ -424,12 +413,37 @@ fn tmp_sibling(path: &Path) -> PathBuf {
 }
 
 fn persist_tmp(tmp: &Path, dest: &Path) -> io::Result<()> {
-    // On Windows `rename` will not replace an existing file.
+    // `fs::rename` replaces the destination on Windows (no delete first: a
+    // failed replace must not drop the existing file).
     #[cfg(windows)]
-    if dest.exists() {
-        fs::remove_file(dest)?;
+    {
+        const SHARING_VIOLATION: i32 = 32;
+        let mut delay = Duration::from_millis(10);
+        for attempt in 0..5 {
+            match fs::rename(tmp, dest) {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 4 && e.raw_os_error() == Some(SHARING_VIOLATION) => {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop always returns")
     }
+    #[cfg(not(windows))]
     fs::rename(tmp, dest)
+}
+
+fn sync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            File::open(parent)?.sync_all()?;
+        }
+    }
+    let _ = path;
+    Ok(())
 }
 
 fn ensure_parent(path: &Path) -> io::Result<()> {
@@ -506,11 +520,27 @@ fn write_number(out: &mut String, n: &Number) {
         out.push_str(&i.to_string());
     } else if let Some(u) = n.as_u64() {
         out.push_str(&u.to_string());
-    } else if let Some(f) = n.as_f64() {
+    } else if number_is_integer(n) {
+        out.push_str(&n.to_string());
+    } else if let Some(f) = n.as_f64().filter(|f| f.is_finite()) {
         out.push_str(&python_float(f));
     } else {
+        // Keep the original token for out-of-range values such as `1e400`, so
+        // a rewrite stays readable (`Infinity` cannot live in `Value`).
         out.push_str(&n.to_string());
     }
+}
+
+/// A JSON number token with no decimal point or exponent, e.g. a 400-digit int.
+pub(crate) fn number_is_integer(n: &Number) -> bool {
+    let s = n.to_string();
+    let digits = s.strip_prefix('-').unwrap_or(&s);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Python `json.loads` overflow: `1e400` becomes `inf`.
+pub(crate) fn number_as_python_float(n: &Number) -> Option<f64> {
+    n.as_f64().or_else(|| n.to_string().parse().ok())
 }
 
 /// Close enough to `json.dumps` for the floats a credentials file might hold.
@@ -918,6 +948,68 @@ mod tests {
             .filter(|n| n.contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn lone_surrogates_raise_and_do_not_overwrite() {
+        let dir = scratch("surrogate");
+        for body in [
+            r#"{"a":"\ud800"}"#,
+            r#"{"a":"\ud800abc"}"#,
+            r#"{"\ud800":1}"#,
+        ] {
+            let path = dir.join("credentials.json");
+            fs::write(&path, body).unwrap();
+            match read_fallback_value(&path) {
+                Err(StoreOpError::Value(_)) => {}
+                other => panic!("expected Value error for {body}, got {other:?}"),
+            }
+            match store_fallback(&path, "x.example.com", "qk_x", None, None) {
+                Err(StoreOpError::Value(_)) => {}
+                other => panic!("expected Value error on store for {body}, got {other:?}"),
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), body);
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn out_of_range_numbers_are_readable() {
+        let dir = scratch("bignum");
+        let path = dir.join("credentials.json");
+        fs::write(&path, r#"{"n": 1e400}"#).unwrap();
+        let v = read_fallback_value(&path).unwrap();
+        let n = number_as_python_float(v.get("n").unwrap().as_number().unwrap()).unwrap();
+        assert!(n.is_infinite() && n.is_sign_positive(), "{n}");
+        fs::write(&path, r#"{"n": -1e400}"#).unwrap();
+        let v = read_fallback_value(&path).unwrap();
+        let n = number_as_python_float(v.get("n").unwrap().as_number().unwrap()).unwrap();
+        assert!(n.is_infinite() && n.is_sign_negative(), "{n}");
+        let big = "1".repeat(400);
+        fs::write(&path, format!(r#"{{"n": {big}}}"#)).unwrap();
+        let v = read_fallback_value(&path).unwrap();
+        let got = v.get("n").unwrap().as_number().unwrap().to_string();
+        assert_eq!(got, big);
+        store_fallback(&path, "x.example.com", "qk_x", None, None).unwrap();
+        let v = read_fallback_value(&path).unwrap();
+        assert_eq!(v.get("n").unwrap().as_number().unwrap().to_string(), big);
+        assert!(get_fallback(&path, "x.example.com").unwrap().is_some());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn invalid_or_truncated_json_still_reads_empty() {
+        let dir = scratch("trunc");
+        let path = dir.join("credentials.json");
+        for body in ["not-json", "-NaN", r#"{"a":NaN"#] {
+            fs::write(&path, body).unwrap();
+            assert_eq!(
+                read_fallback_value(&path).unwrap(),
+                Value::Object(Map::new()),
+                "{body}"
+            );
+        }
         cleanup(&dir);
     }
 }

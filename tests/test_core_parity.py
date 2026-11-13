@@ -540,6 +540,50 @@ def test_nan_does_not_reset_the_file(tmp_path: Path) -> None:
     assert old.read_bytes() == body
 
 
+def test_lone_surrogates_do_not_reset_the_file(tmp_path: Path) -> None:
+    bodies = (
+        b'{"a":"\\ud800"}',
+        b'{"a":"\\ud800abc"}',
+        b'{"\\ud800":1}',
+    )
+    for i, body in enumerate(bodies):
+        old, new = file_pair(tmp_path, f"surrogate-{i}.json")
+        for path in (old, new):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        got = oracle.read_fallback(old)
+        assert got, body
+        with pytest.raises(ValueError):
+            _core.read_fallback(new)
+        with pytest.raises(ValueError):
+            _core.store_fallback(new, "x.example.com", "qk_x")
+        with pytest.raises(ValueError):
+            _core.delete_fallback(new, "a")
+        assert new.read_bytes() == body
+        assert old.read_bytes() == body
+
+
+def test_out_of_range_numbers_match_the_oracle(tmp_path: Path) -> None:
+    bodies = (
+        b'{"n": 1e400}',
+        b'{"n": -1e400}',
+        b'{"n": ' + b"1" * 400 + b"}",
+    )
+    for i, body in enumerate(bodies):
+        old, new = file_pair(tmp_path, f"num-{i}.json")
+        for path in (old, new):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        assert _core.read_fallback(new) == oracle.read_fallback(old)
+        _core.store_fallback(new, "x.example.com", "qk_x")
+        oracle.store_fallback(old, "x.example.com", "qk_x")
+        rust = _core.read_fallback(new)
+        py = oracle.read_fallback(old)
+        assert rust == py
+        assert "n" in rust
+        assert rust["x.example.com"]["api_key"] == "qk_x"
+
+
 def test_write_fallback_over_a_looser_file_tightens_the_mode(
     tmp_path: Path,
 ) -> None:

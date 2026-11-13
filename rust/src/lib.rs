@@ -17,7 +17,7 @@ use pyo3::exceptions::{
     PyAttributeError, PyRuntimeError, PyTypeError, PyUnicodeDecodeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDict, PyList};
+use pyo3::types::{PyAny, PyBool, PyDict, PyInt, PyList, PyTuple};
 use serde_json::{Map, Number, Value};
 
 pub mod dns;
@@ -100,7 +100,13 @@ fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
                 Ok(i.into_pyobject(py)?.into_any().unbind())
             } else if let Some(u) = n.as_u64() {
                 Ok(u.into_pyobject(py)?.into_any().unbind())
-            } else if let Some(f) = n.as_f64() {
+            } else if store::number_is_integer(n) {
+                Ok(py
+                    .import("builtins")?
+                    .getattr("int")?
+                    .call1((n.to_string(),))?
+                    .unbind())
+            } else if let Some(f) = store::number_as_python_float(n) {
                 Ok(f.into_pyobject(py)?.into_any().unbind())
             } else {
                 Ok(n.to_string().into_pyobject(py)?.into_any().unbind())
@@ -121,7 +127,10 @@ fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
 fn pydict_to_map(dict: &Bound<'_, PyDict>) -> PyResult<Map<String, Value>> {
     let mut map = Map::new();
     for (key, value) in dict.iter() {
-        let key: String = key.extract()?;
+        let key: String = match key.extract() {
+            Ok(s) => s,
+            Err(_) => key.str()?.to_string(),
+        };
         map.insert(key, py_to_json(&value)?);
     }
     Ok(map)
@@ -141,6 +150,13 @@ fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(u) = obj.extract::<u64>() {
         return Ok(Value::Number(u.into()));
     }
+    // A Python int too large for i64/u64 must not be taken as a float.
+    if let Ok(int_obj) = obj.cast::<PyInt>() {
+        let token = int_obj.str()?.to_string();
+        if let Ok(n) = token.parse::<Number>() {
+            return Ok(Value::Number(n));
+        }
+    }
     if let Ok(f) = obj.extract::<f64>() {
         return Ok(Number::from_f64(f)
             .map(Value::Number)
@@ -152,6 +168,13 @@ fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(list) = obj.cast::<PyList>() {
         let mut items = Vec::with_capacity(list.len());
         for item in list.iter() {
+            items.push(py_to_json(&item)?);
+        }
+        return Ok(Value::Array(items));
+    }
+    if let Ok(tup) = obj.cast::<PyTuple>() {
+        let mut items = Vec::with_capacity(tup.len());
+        for item in tup.iter() {
             items.push(py_to_json(&item)?);
         }
         return Ok(Value::Array(items));
