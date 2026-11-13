@@ -49,9 +49,10 @@ def _keyring_available() -> bool:
         import keyring
 
         backend = keyring.get_keyring()
-        # The 'fail' backend raises on every operation.
-        name = type(backend).__name__.lower()
-        return "fail" not in name and "null" not in name
+        # fail.Keyring and null.Keyring are both named just "Keyring";
+        # distinguish them by module so headless Linux falls back to the file.
+        module = type(backend).__module__
+        return module not in {"keyring.backends.fail", "keyring.backends.null"}
     except Exception:
         return False
 
@@ -82,40 +83,12 @@ def _warn_file_fallback() -> None:
         _FILE_FALLBACK_WARNED = True
 
 
-def _read_fallback() -> dict[str, CredentialEntry]:
-    return _native.read_fallback(_fallback_path())
-
-
-def _write_fallback(data: dict[str, CredentialEntry]) -> None:
-    _native.write_fallback(_fallback_path(), data)
-
-
-# ---------------------------------------------------------------------------
-# Index file for keyring-backed list()
-# ---------------------------------------------------------------------------
-# keyring has no enumerate-all API. We maintain a lightweight
-# user_data_path("quiltx")/credentials_index.json that tracks which DNS
-# names we've stored. Written on set(), pruned on delete().
+# keyring has no enumerate-all API. credentials_index.json tracks which
+# DNS names we've stored; Rust writes it on store() and prunes it on delete().
 
 
 def _index_path() -> Path:
     return _native.credentials_index_file()
-
-
-def _read_index() -> list[str]:
-    return _native.read_index(_index_path())
-
-
-def _write_index(entries: list[str]) -> None:
-    _native.write_index(_index_path(), entries)
-
-
-def _add_to_index(dns: str) -> None:
-    _native.add_to_index(_index_path(), dns)
-
-
-def _remove_from_index(dns: str) -> None:
-    _native.remove_from_index(_index_path(), dns)
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +100,7 @@ def get(dns: str) -> CredentialEntry | None:
     """Return stored credentials for *dns*, or None if not found."""
     return cast(
         CredentialEntry | None,
-        _native.get_credential(
-            dns, _keyring_available(), _fallback_path(), _index_path()
-        ),
+        _native.get_credential(dns, _keyring_available(), _fallback_path()),
     )
 
 
@@ -146,14 +117,15 @@ def store(
     ``session.py`` prefix check). Raises ``ValueError`` for malformed input
     so a typo or paste of the wrong string never lands in the keyring.
     """
-    if not _keyring_available():
+    use_keyring = _keyring_available()
+    if not use_keyring:
         _warn_file_fallback()
     _native.store_credential(
         dns,
         api_key,
         name,
         expires_at,
-        _keyring_available(),
+        use_keyring,
         _fallback_path(),
         _index_path(),
     )

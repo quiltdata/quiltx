@@ -1,10 +1,11 @@
-"""The only importer of the compiled ``quiltx._core`` extension.
+"""The only importer of ``quiltx._core``.
 
 Everything Rust-backed that auth needs goes through this module, so the
 boundary between the Python auth code and the Rust core is one file. The core
 is required: catalog-name normalization (``normalize_dns``) runs on every CLI
-command that takes a catalog, and the credential store's file paths, keyring key, and credential store I/O come from it, so a missing extension is an error at
-import, with a message that says how to fix it, rather than a degraded mode.
+command that takes a catalog, and the credential store's paths, keyring key,
+and I/O come from it, so a missing extension is an error at import, with a
+message that says how to fix it, rather than a degraded mode.
 """
 
 from __future__ import annotations
@@ -113,11 +114,9 @@ def list_fallback(path: Path) -> list[tuple[str, dict]]:
     return _core.list_fallback(path)
 
 
-def get_credential(
-    dns: str, use_keyring: bool, fallback_path: Path, index_path: Path
-) -> dict | None:
+def get_credential(dns: str, use_keyring: bool, fallback_path: Path) -> dict | None:
     """Public ``get``: OS keyring or the file fallback, chosen by *use_keyring*."""
-    return _core.get_credential(dns, use_keyring, fallback_path, index_path)
+    return _core.get_credential(dns, use_keyring, fallback_path)
 
 
 def store_credential(

@@ -284,8 +284,24 @@ impl store::KeyringBackend for PythonKeyring {
             let value = keyring.call_method1("get_password", (service, username))?;
             if value.is_none() {
                 Ok(None)
+            } else if let Ok(text) = value.extract::<String>() {
+                Ok(Some(text))
             } else {
-                Ok(Some(value.extract()?))
+                let raw: Vec<u8> = value.extract()?;
+                match String::from_utf8(raw) {
+                    Ok(text) => Ok(Some(text)),
+                    Err(err) => {
+                        let raw = err.into_bytes();
+                        let end = raw.len();
+                        Err(PyUnicodeDecodeError::new_err((
+                            "utf-8",
+                            raw,
+                            0,
+                            end,
+                            "invalid utf-8 in keyring entry",
+                        )))
+                    }
+                }
             }
         })
         .map_err(store::StoreOpError::Py)
@@ -335,7 +351,6 @@ fn get_credential(
     dns: &str,
     use_keyring: bool,
     fallback_path: PathBuf,
-    _index_path: PathBuf,
 ) -> PyResult<Option<Py<PyDict>>> {
     match store::get_credential(dns, use_keyring, &fallback_path, &PythonKeyring)
         .map_err(store_op_err)?
