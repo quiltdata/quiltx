@@ -267,6 +267,24 @@ fn read_json(path: &Path) -> io::Result<Value> {
     serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Python on Windows opens these files in text mode (`os.open` without
+/// `O_BINARY`, and `Path.write_text`), so `\n` is stored as CRLF. Match that
+/// so a rewrite does not change a file Python already wrote.
+fn with_python_newlines(bytes: &[u8]) -> Vec<u8> {
+    if cfg!(windows) {
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            if b == b'\n' {
+                out.push(b'\r');
+            }
+            out.push(b);
+        }
+        out
+    } else {
+        bytes.to_vec()
+    }
+}
+
 /// Create the immediate parent at 0700 (grandparents use the default mode),
 /// then write *bytes* opening the file at 0600, matching `_write_fallback`.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -279,7 +297,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         opts.mode(0o600);
     }
     let mut file = opts.open(path)?;
-    file.write_all(bytes)?;
+    file.write_all(&with_python_newlines(bytes))?;
     // The file may have pre-existed at looser permissions (older quiltx).
     drop(file);
     let _ = chmod(path, 0o600);
@@ -290,7 +308,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 fn write_index_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     ensure_parent(path)?;
     let mut file = File::create(path)?;
-    file.write_all(bytes)?;
+    file.write_all(&with_python_newlines(bytes))?;
     Ok(())
 }
 
@@ -687,9 +705,22 @@ mod tests {
         let dir = scratch("bytes");
         let path = dir.join("credentials.json");
         store_fallback(&path, "nightly.quilttest.com", "qk_abc", None, None).unwrap();
-        let got = fs::read_to_string(&path).unwrap();
-        let want = "{\n  \"nightly.quilttest.com\": {\n    \"api_key\": \"qk_abc\",\n    \"name\": null,\n    \"expires_at\": null\n  }\n}";
+        let got = fs::read(&path).unwrap();
+        let want = super::with_python_newlines(
+            b"{\n  \"nightly.quilttest.com\": {\n    \"api_key\": \"qk_abc\",\n    \"name\": null,\n    \"expires_at\": null\n  }\n}",
+        );
         assert_eq!(got, want);
         cleanup(&dir);
+    }
+
+    #[test]
+    fn python_newlines_match_text_mode() {
+        let input = b"{\n  \"a\": 1\n}";
+        let got = super::with_python_newlines(input);
+        if cfg!(windows) {
+            assert_eq!(got, b"{\r\n  \"a\": 1\r\n}");
+        } else {
+            assert_eq!(got, input);
+        }
     }
 }
