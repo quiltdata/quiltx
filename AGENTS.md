@@ -329,8 +329,8 @@ What lives in Rust (`rust/src/`):
 - `paths.rs`: the credential store's directory (the `platformdirs.user_data_path("quiltx")`
   rules), `credentials.json`, `credentials_index.json`, and the keyring `(service, username)`
   for a catalog; used by `quiltx.auth.store`.
-- `store.rs`: the 0600 `credentials.json` fallback and the index file (read/write/get/store/
-  delete/list). The OS keyring backend stays in Python.
+- `store.rs`: the 0600 `credentials.json` fallback, the index file, and the public
+  get/store/delete/list (OS keyring via the Python `keyring` package, or the file fallback).
 - `core_version()` and `ping()`, the original smoke functions.
 
 `tests/oracle.py` keeps the replaced Python verbatim and `tests/test_core_parity.py` runs

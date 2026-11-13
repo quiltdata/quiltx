@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A missing file, or invalid or truncated JSON that Python's `json.loads` already treated as empty (including `-NaN` and `{"a":NaN`), still reads as empty. A file that exists but is invalid UTF-8 raises `UnicodeDecodeError`. JSON that Python would parse but this parser cannot (`NaN`/`Infinity`, a lone surrogate as a value or a key, nesting deeper than 128) raises `ValueError` so a later write cannot replace it. Out-of-range floats (`1e400`) and large integers are read
 - A `NaN` or `inf` written from Python becomes `null`. Tuples and non-string keys are accepted (tuples as lists, other keys as `str(key)`); a bool key becomes `"True"` / `"False"`
 - A corrupt index keeps only string entries (non-string elements are dropped). Odd legacy floats may not round-trip exactly
+- `get` / `store` / `delete` / `catalog_list` now run in Rust (`quiltx._core`), including the OS-keyring path. The OS secret store is still the `keyring` package, so existing entries are unchanged. A corrupt keyring entry (invalid JSON) now raises `ValueError` instead of being treated as missing, so a later store cannot silently replace it. The error names the catalog and how to fix it (`quiltx catalog login --catalog <dns>` or `quiltx catalog forget <dns>`). `catalog_list` skips a corrupt entry and prints a stderr warning that names it
+
+### Fixed
+
+- `_keyring_available()` recognizes `keyring.backends.fail.Keyring` and `keyring.backends.null.Keyring` by module name, so headless Linux falls back to the 0600 file instead of treating the fail backend as a real keyring
 
 ## [0.24.0] - 2026-11-13
 

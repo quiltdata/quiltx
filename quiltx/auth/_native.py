@@ -1,11 +1,11 @@
-"""The only importer of the compiled ``quiltx._core`` extension.
+"""The only importer of ``quiltx._core``.
 
 Everything Rust-backed that auth needs goes through this module, so the
 boundary between the Python auth code and the Rust core is one file. The core
 is required: catalog-name normalization (``normalize_dns``) runs on every CLI
-command that takes a catalog, and the credential store's file paths, keyring
-key, and file-backed I/O come from it, so a missing extension is an error at
-import, with a message that says how to fix it, rather than a degraded mode.
+command that takes a catalog, and the credential store's paths, keyring key,
+and I/O come from it, so a missing extension is an error at import, with a
+message that says how to fix it, rather than a degraded mode.
 """
 
 from __future__ import annotations
@@ -112,3 +112,37 @@ def delete_fallback(path: Path, dns: str) -> None:
 def list_fallback(path: Path) -> list[tuple[str, dict]]:
     """File-backend ``catalog_list``: ``(dns, entry)`` in file order."""
     return _core.list_fallback(path)
+
+
+def get_credential(dns: str, use_keyring: bool, fallback_path: Path) -> dict | None:
+    """Public ``get``: OS keyring or the file fallback, chosen by *use_keyring*."""
+    return _core.get_credential(dns, use_keyring, fallback_path)
+
+
+def store_credential(
+    dns: str,
+    api_key: str,
+    name: str | None,
+    expires_at: int | None,
+    use_keyring: bool,
+    fallback_path: Path,
+    index_path: Path,
+) -> None:
+    """Public ``store``: validate the key and write it."""
+    _core.store_credential(
+        dns, api_key, name, expires_at, use_keyring, fallback_path, index_path
+    )
+
+
+def delete_credential(
+    dns: str, use_keyring: bool, fallback_path: Path, index_path: Path
+) -> None:
+    """Public ``delete`` (idempotent)."""
+    _core.delete_credential(dns, use_keyring, fallback_path, index_path)
+
+
+def list_credentials(
+    use_keyring: bool, fallback_path: Path, index_path: Path
+) -> list[tuple[str, dict]]:
+    """Public ``catalog_list``."""
+    return _core.list_credentials(use_keyring, fallback_path, index_path)

@@ -33,6 +33,8 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use pyo3::prelude::*;
+
+use crate::paths;
 use serde_json::{Map, Number, Value};
 
 /// Why an API key was refused; the message is Python's `ValueError`.
@@ -55,6 +57,8 @@ pub enum StoreOpError {
     Utf8(std::string::FromUtf8Error),
     /// JSON that Python's `json.loads` would accept but this parser cannot.
     Value(String),
+    /// A Python exception from the `keyring` package, re-raised as-is.
+    Py(PyErr),
 }
 
 impl From<StoreError> for StoreOpError {
@@ -275,6 +279,134 @@ pub fn list_fallback(path: &Path) -> Result<Vec<FallbackEntry>, StoreOpError> {
         .collect())
 }
 
+/// The OS keyring operations used by [`get_credential`] and friends.
+///
+/// The production backend is the Python `keyring` package (so existing
+/// entries and tests that patch `keyring.get_password` keep working).
+pub trait KeyringBackend {
+    fn get_password(&self, service: &str, username: &str) -> Result<Option<String>, StoreOpError>;
+    fn set_password(
+        &self,
+        service: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), StoreOpError>;
+    fn delete_password(&self, service: &str, username: &str) -> Result<(), StoreOpError>;
+}
+
+/// Public `get`: keyring or the 0600 file, chosen by *use_keyring*.
+pub fn get_credential(
+    dns: &str,
+    use_keyring: bool,
+    fallback_path: &Path,
+    keyring: &dyn KeyringBackend,
+) -> Result<Option<Map<String, Value>>, StoreOpError> {
+    if use_keyring {
+        get_keyring(dns, keyring)
+    } else {
+        get_fallback(fallback_path, dns)
+    }
+}
+
+/// Public `store`: validate the key, then write to the keyring (and index)
+/// or the file fallback.
+#[allow(clippy::too_many_arguments)]
+pub fn store_credential(
+    dns: &str,
+    api_key: &str,
+    name: Option<&str>,
+    expires_at: Option<i64>,
+    use_keyring: bool,
+    fallback_path: &Path,
+    index_path: &Path,
+    keyring: &dyn KeyringBackend,
+) -> Result<(), StoreOpError> {
+    if use_keyring {
+        let payload = credential_payload(api_key, name, expires_at)?;
+        let serialized = dumps(&Value::Object(payload), None);
+        let (service, username) = paths::keyring_entry(dns);
+        keyring.set_password(service, &username, &serialized)?;
+        add_to_index(index_path, dns)?;
+        Ok(())
+    } else {
+        store_fallback(fallback_path, dns, api_key, name, expires_at)
+    }
+}
+
+/// Public `delete` (idempotent).
+pub fn delete_credential(
+    dns: &str,
+    use_keyring: bool,
+    fallback_path: &Path,
+    index_path: &Path,
+    keyring: &dyn KeyringBackend,
+) -> Result<(), StoreOpError> {
+    if use_keyring {
+        let (service, username) = paths::keyring_entry(dns);
+        keyring.delete_password(service, &username)?;
+        remove_from_index(index_path, dns)?;
+        Ok(())
+    } else {
+        delete_fallback(fallback_path, dns)
+    }
+}
+
+/// Public `catalog_list`.
+pub fn list_credentials(
+    use_keyring: bool,
+    fallback_path: &Path,
+    index_path: &Path,
+    keyring: &dyn KeyringBackend,
+) -> Result<Vec<FallbackEntry>, StoreOpError> {
+    if use_keyring {
+        let mut results = Vec::new();
+        for dns in read_index(index_path)? {
+            match get_keyring(&dns, keyring) {
+                Ok(Some(entry)) => results.push((dns, entry)),
+                Ok(None) => {}
+                Err(StoreOpError::Value(_)) => {
+                    // Skip a corrupt entry so one bad catalog does not hide the
+                    // rest; get still raises, so a later store cannot silently
+                    // replace it.
+                    eprintln!(
+                        "WARNING: skipping corrupt keyring entry for {dns}; run `quiltx catalog login --catalog {dns}` or `quiltx catalog forget {dns}`."
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(results)
+    } else {
+        list_fallback(fallback_path)
+    }
+}
+
+fn corrupt_keyring_error(dns: &str) -> StoreOpError {
+    StoreOpError::Value(format!(
+        "keyring entry for {dns} is not valid JSON; run `quiltx catalog login --catalog {dns}` or `quiltx catalog forget {dns}`"
+    ))
+}
+
+fn get_keyring(
+    dns: &str,
+    keyring: &dyn KeyringBackend,
+) -> Result<Option<Map<String, Value>>, StoreOpError> {
+    let (service, username) = paths::keyring_entry(dns);
+    let Some(raw) = keyring.get_password(service, &username)? else {
+        return Ok(None);
+    };
+    // A corrupt entry must raise, not look missing: the old Python returned
+    // None on `JSONDecodeError`, and a later `store` would replace it.
+    let value = match parse_json_text(&raw) {
+        Ok(Some(value)) => value,
+        Ok(None) | Err(StoreOpError::Value(_)) => {
+            return Err(corrupt_keyring_error(dns));
+        }
+        Err(err) => return Err(err),
+    };
+    Ok(entry_if_api_key(Some(&value)))
+}
+
 fn entry_if_api_key(value: Option<&Value>) -> Option<Map<String, Value>> {
     match value {
         Some(Value::Object(map)) if map.contains_key("api_key") => Some(map.clone()),
@@ -292,10 +424,14 @@ fn read_json(path: &Path) -> Result<Option<Value>, StoreOpError> {
         Err(e) => return Err(e.into()),
     };
     let text = String::from_utf8(bytes).map_err(StoreOpError::Utf8)?;
-    match serde_json::from_str(&text) {
+    parse_json_text(&text)
+}
+
+fn parse_json_text(text: &str) -> Result<Option<Value>, StoreOpError> {
+    match serde_json::from_str(text) {
         Ok(value) => Ok(Some(value)),
         Err(e) => {
-            if python_json_loads_ok(&text)? {
+            if python_json_loads_ok(text)? {
                 Err(StoreOpError::Value(e.to_string()))
             } else {
                 Ok(None)
@@ -1015,6 +1151,249 @@ mod tests {
                 "{body}"
             );
         }
+        cleanup(&dir);
+    }
+
+    struct MemoryKeyring {
+        map: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
+    }
+
+    impl MemoryKeyring {
+        fn new() -> Self {
+            Self {
+                map: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    impl KeyringBackend for MemoryKeyring {
+        fn get_password(
+            &self,
+            service: &str,
+            username: &str,
+        ) -> Result<Option<String>, StoreOpError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(&(service.to_string(), username.to_string()))
+                .cloned())
+        }
+
+        fn set_password(
+            &self,
+            service: &str,
+            username: &str,
+            password: &str,
+        ) -> Result<(), StoreOpError> {
+            self.map.lock().unwrap().insert(
+                (service.to_string(), username.to_string()),
+                password.to_string(),
+            );
+            Ok(())
+        }
+
+        fn delete_password(&self, service: &str, username: &str) -> Result<(), StoreOpError> {
+            self.map
+                .lock()
+                .unwrap()
+                .remove(&(service.to_string(), username.to_string()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn keyring_store_get_delete_list_round_trip() {
+        let dir = scratch("kr");
+        let fallback = dir.join("credentials.json");
+        let index = dir.join("credentials_index.json");
+        let kr = MemoryKeyring::new();
+        store_credential(
+            "a.example.com",
+            "qk_a",
+            Some("alice"),
+            Some(9),
+            true,
+            &fallback,
+            &index,
+            &kr,
+        )
+        .unwrap();
+        store_credential(
+            "b.example.com",
+            "  qk_b  ",
+            None,
+            None,
+            true,
+            &fallback,
+            &index,
+            &kr,
+        )
+        .unwrap();
+        assert!(
+            !fallback.exists(),
+            "keyring path must not write the file store"
+        );
+        let a = get_credential("a.example.com", true, &fallback, &kr)
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.get("api_key"), Some(&Value::String("qk_a".into())));
+        assert_eq!(a.get("name"), Some(&Value::String("alice".into())));
+        let listed: Vec<String> = list_credentials(true, &fallback, &index, &kr)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(listed, ["a.example.com", "b.example.com"]);
+        let raw = kr.get_password("quiltx", "a.example.com").unwrap().unwrap();
+        assert_eq!(
+            raw,
+            r#"{"api_key": "qk_a", "name": "alice", "expires_at": 9}"#
+        );
+        delete_credential("a.example.com", true, &fallback, &index, &kr).unwrap();
+        assert!(get_credential("a.example.com", true, &fallback, &kr)
+            .unwrap()
+            .is_none());
+        delete_credential("a.example.com", true, &fallback, &index, &kr).unwrap();
+        let listed: Vec<String> = list_credentials(true, &fallback, &index, &kr)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(listed, ["b.example.com"]);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn corrupt_keyring_entry_raises_and_is_not_treated_as_missing() {
+        let dir = scratch("kr-bad");
+        let fallback = dir.join("credentials.json");
+        let kr = MemoryKeyring::new();
+        kr.set_password("quiltx", "x.example.com", "not-json")
+            .unwrap();
+        match get_credential("x.example.com", true, &fallback, &kr) {
+            Err(StoreOpError::Value(msg)) => {
+                assert!(msg.contains("x.example.com"), "{msg}");
+                assert!(msg.contains("not valid JSON"), "{msg}");
+                assert!(
+                    msg.contains("quiltx catalog login --catalog x.example.com"),
+                    "{msg}"
+                );
+                assert!(msg.contains("quiltx catalog forget x.example.com"), "{msg}");
+            }
+            other => panic!("expected Value error, got {other:?}"),
+        }
+        // A missing entry is still None.
+        assert!(get_credential("missing.example.com", true, &fallback, &kr)
+            .unwrap()
+            .is_none());
+        // The corrupt payload is still there (get did not clear it).
+        assert_eq!(
+            kr.get_password("quiltx", "x.example.com")
+                .unwrap()
+                .as_deref(),
+            Some("not-json")
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn list_skips_a_corrupt_keyring_entry() {
+        let dir = scratch("kr-list-bad");
+        let fallback = dir.join("credentials.json");
+        let index = dir.join("credentials_index.json");
+        let kr = MemoryKeyring::new();
+        store_credential(
+            "good.example.com",
+            "qk_good",
+            None,
+            None,
+            true,
+            &fallback,
+            &index,
+            &kr,
+        )
+        .unwrap();
+        add_to_index(&index, "bad.example.com").unwrap();
+        kr.set_password("quiltx", "bad.example.com", "not-json")
+            .unwrap();
+        let listed: Vec<String> = list_credentials(true, &fallback, &index, &kr)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(listed, ["good.example.com"]);
+        assert_eq!(
+            kr.get_password("quiltx", "bad.example.com")
+                .unwrap()
+                .as_deref(),
+            Some("not-json")
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn store_and_delete_replace_a_corrupt_keyring_entry() {
+        let dir = scratch("kr-replace-bad");
+        let fallback = dir.join("credentials.json");
+        let index = dir.join("credentials_index.json");
+        let kr = MemoryKeyring::new();
+        kr.set_password("quiltx", "x.example.com", "not-json")
+            .unwrap();
+        add_to_index(&index, "x.example.com").unwrap();
+        store_credential(
+            "x.example.com",
+            "qk_new",
+            None,
+            None,
+            true,
+            &fallback,
+            &index,
+            &kr,
+        )
+        .unwrap();
+        let entry = get_credential("x.example.com", true, &fallback, &kr)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.get("api_key"), Some(&Value::String("qk_new".into())));
+        kr.set_password("quiltx", "x.example.com", "not-json")
+            .unwrap();
+        delete_credential("x.example.com", true, &fallback, &index, &kr).unwrap();
+        assert!(get_credential("x.example.com", true, &fallback, &kr)
+            .unwrap()
+            .is_none());
+        assert!(kr
+            .get_password("quiltx", "x.example.com")
+            .unwrap()
+            .is_none());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn file_fallback_is_used_when_keyring_is_off() {
+        let dir = scratch("kr-off");
+        let fallback = dir.join("credentials.json");
+        let index = dir.join("credentials_index.json");
+        let kr = MemoryKeyring::new();
+        store_credential(
+            "a.example.com",
+            "qk_a",
+            None,
+            None,
+            false,
+            &fallback,
+            &index,
+            &kr,
+        )
+        .unwrap();
+        assert!(fallback.exists());
+        assert!(kr
+            .get_password("quiltx", "a.example.com")
+            .unwrap()
+            .is_none());
+        assert!(get_credential("a.example.com", false, &fallback, &kr)
+            .unwrap()
+            .is_some());
         cleanup(&dir);
     }
 }
