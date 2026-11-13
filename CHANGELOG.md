@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-13
+
 ### Changed
 
 - Catalog-name normalization (`quiltx.identity.normalize_dns`) and the credential store's file paths and keyring key now come from Rust (`quiltx._core`), which is therefore required. Behaviour and error messages are unchanged; `tests/test_core_parity.py` runs the old Python and the Rust on the same inputs. Known differences, all on malformed input: a `HOME` that is empty or relative, and a relative `XDG_DATA_HOME`, are treated as unset (as current `platformdirs` does); text that is not valid UTF-8 raises a `ValueError`
