@@ -11,7 +11,7 @@ authors = [
 keywords = ["quiltx", "tools"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
   "keyring>=24.0",
+  "platformdirs",
   "pyyaml",
   "quilt3>=8.1.0a3,<9",
   "rich"
@@ -75,17 +76,6 @@ sequence = ["setup", "lint", { shell = "QUILTX_STACK_INTEGRATION=1 pytest tests"
 help = "Preview release notes for the current version"
 cmd = "python scripts/release_notes.py"
 
-[tool.poe.tasks.tag]
-help = "Create and push a git tag for the current version"
-shell = """
-VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
-TAG="v$VERSION"
-echo "Creating tag $TAG for version $VERSION"
-git tag -a "$TAG" -m "Release $VERSION"
-git push origin "$TAG"
-echo "Tag $TAG created and pushed. GitHub release and PyPI publish will happen via CI."
-"""
-
 [project.scripts]
 quiltx = "quiltx.cli:main"
 
@@ -104,6 +94,13 @@ python-source = "."
 features = ["pyo3/extension-module"]
 # A local build runs after the tests have written bytecode; never ship it.
 exclude = ["**/__pycache__/**", "**/*.pyc"]
+# The sdist also carries what a downstream packager needs to run the tests.
+include = [
+  { path = "tests/**/*.py", format = "sdist" },
+  { path = "scripts/*.py", format = "sdist" },
+  { path = "CHANGELOG.md", format = "sdist" },
+  { path = "stack-acl.example.yaml", format = "sdist" },
+]
 
 [tool.uv]
 # Rebuild the editable install when the Rust sources change.

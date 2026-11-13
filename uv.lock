@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 
 [[package]]
@@ -1419,6 +1419,7 @@ version = "0.23.1"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
+    { name = "platformdirs" },
     { name = "pyyaml" },
     { name = "quilt3" },
     { name = "rich" },
@@ -1449,6 +1450,7 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5.0" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.24.0" },
     { name = "mypy", marker = "extra == 'dev'" },
+    { name = "platformdirs" },
     { name = "poethepoet", marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },

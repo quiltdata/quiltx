@@ -46,3 +46,33 @@ def test_facade_re_exports_registry_credentials_api() -> None:
     assert quilt3_facade.CatalogCredentialsError is session.CatalogCredentialsError
     assert quilt3_facade.catalog_sts_account_id is session.catalog_sts_account_id
     assert quilt3_facade.QUILT_CREDENTIALS_METHOD == session.QUILT_CREDENTIALS_METHOD
+
+
+def test_alias_names_are_visible_to_type_checkers() -> None:
+    # mypy checks this file: these imports resolve through the alias modules'
+    # TYPE_CHECKING star-imports, and at runtime to the real objects.
+    from quiltx.auth import registry, store
+    from quiltx.credentials import get
+    from quiltx.quilt_auth import CatalogAuthError
+
+    assert get is store.get
+    assert CatalogAuthError is registry.CatalogAuthError
+
+
+def test_patching_the_package_name_is_what_callers_see(monkeypatch) -> None:
+    from quiltx import auth
+    from quiltx.auth import resolve
+
+    sentinel = object()
+    monkeypatch.setattr(auth, "resolve_cli", sentinel)
+    from quiltx.auth import resolve_cli  # what Catalog.ensure_auth does at call time
+
+    assert resolve_cli is sentinel
+
+    monkeypatch.undo()
+    monkeypatch.setattr(resolve, "resolve_cli", sentinel)
+    from quiltx.auth import resolve_cli as seen_by_callers
+
+    assert (
+        seen_by_callers is not sentinel
+    )  # patching the submodule attribute is not enough

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Rust core of quiltx, exposed to Python as quiltx._core"
-license = "MIT"
+license = "Apache-2.0"
 publish = false
 
 [lib]
@@ -18,3 +18,8 @@ crate-type = ["cdylib", "rlib"]
 # (see [tool.maturin] features in pyproject.toml), so `cargo test` can still link
 # against libpython.
 pyo3 = { version = "0.30", features = ["abi3-py310"] }
+
+[profile.release]
+# Smaller wheels: the extension ships in every platform file.
+strip = true
+lto = true

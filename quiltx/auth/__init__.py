@@ -19,6 +19,17 @@ responsibility. It was extracted from flat modules without changing behaviour:
 ``quiltx.credentials`` and ``quiltx.quilt_auth`` remain as aliases of
 ``store`` and ``registry`` for external importers; new code should import from
 this package.
+
+Where to patch in tests
+-----------------------
+
+Callers look the resolver up on this package at call time
+(``from quiltx.auth import resolve_cli`` inside ``Catalog.ensure_auth``), so to
+stub it patch ``quiltx.auth.resolve_cli`` (or ``resolve_api``). Patching
+``quiltx.auth.resolve.resolve_cli`` changes only the submodule's attribute and
+callers do not see it. State the resolver reads is patched on the module that
+owns it: ``quiltx.auth.store`` (``quiltx.credentials`` is the same module) and
+``quiltx.auth.registry`` (``quiltx.quilt_auth``).
 """
 
 from quiltx.auth.resolve import (
