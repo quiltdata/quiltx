@@ -47,7 +47,7 @@ def _name_for(entry: Mapping[str, object]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from quiltx import credentials
+    from quiltx.auth import store as credentials
 
     parser = build_parser()
     parser.parse_args(argv)  # handles --help

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from quiltx import quilt_auth
+from quiltx.auth import registry as quilt_auth
 
 
 def _make_post_json_stub(

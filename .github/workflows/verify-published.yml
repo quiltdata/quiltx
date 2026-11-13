@@ -1,0 +1,144 @@
+# Installs a published quiltx from PyPI on every platform (including Alpine/musl) and checks that it
+# works and that it is installed (or not) by default as intended. Run by
+# publish.yml after a release, or by hand for any version.
+name: Verify published
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version that was just published"
+        type: string
+        required: true
+      prerelease:
+        description: "Whether that version is a PEP 440 pre-release"
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to verify, e.g. 0.24.0a1"
+        type: string
+        required: true
+      prerelease:
+        description: "Is it a pre-release (a, b, rc or dev)?"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.runner }}, py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-latest]
+        python: ["3.10", "3.14"]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+      PRERELEASE: ${{ inputs.prerelease }}
+    steps:
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      # An explicit pin is an explicit request, so a pre-release installs
+      # without --pre. PyPI and its CDN take a while to show a new release.
+      - name: Install the pinned version
+        run: |
+          python -m venv pinned
+          if [ -d pinned/Scripts ]; then BIN=pinned/Scripts; else BIN=pinned/bin; fi
+          for attempt in $(seq 1 20); do
+            if "$BIN/python" -m pip install --no-cache-dir --only-binary=quiltx "quiltx==$VERSION"; then
+              exit 0
+            fi
+            echo "quiltx $VERSION not installable yet (attempt $attempt); waiting"
+            sleep 30
+          done
+          echo "::error::quiltx $VERSION never became installable as a wheel"
+          exit 1
+
+      - name: Import the extension from the installed wheel
+        working-directory: ${{ runner.temp }}
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/pinned/Scripts" ]; then BIN="$GITHUB_WORKSPACE/pinned/Scripts"; else BIN="$GITHUB_WORKSPACE/pinned/bin"; fi
+          "$BIN/python" - <<'PY'
+          import os
+          import quiltx
+          from quiltx import _core
+
+          assert quiltx.__version__ == os.environ["VERSION"], quiltx.__version__
+          assert _core.ping("pypi") == "pong:pypi"
+          print("ok", quiltx.__version__, _core.core_version())
+          PY
+
+      # What a user gets from a bare `pip install quiltx`: the new version for a
+      # stable release, and *not* the pre-release for a pre-release.
+      - name: Check what a plain install picks
+        run: |
+          python -m venv plain
+          if [ -d plain/Scripts ]; then BIN=plain/Scripts; else BIN=plain/bin; fi
+          "$BIN/python" -m pip install --no-cache-dir quiltx
+          # tr: pip prints CRLF line endings on Windows, which would end up in GOT
+          GOT=$("$BIN/python" -m pip show quiltx | sed -n 's/^Version: //p' | tr -d '\r')
+          echo "plain pip install quiltx -> $GOT"
+          if [ "$PRERELEASE" = "true" ]; then
+            test "$GOT" != "$VERSION" || { echo "::error::a pre-release was installed by default"; exit 1; }
+          else
+            test "$GOT" = "$VERSION" || { echo "::error::plain install got $GOT, expected $VERSION"; exit 1; }
+          fi
+
+  # Alpine (musl): the musllinux wheel must be what pip picks, with no compiler.
+  # Run through `docker run` because the runner's own node is glibc.
+  verify-musl:
+    name: verify (${{ matrix.runner }}, py${{ matrix.python }}, alpine)
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        python: ["3.10", "3.14"]
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ inputs.version }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      IMAGE: python:${{ matrix.python }}-alpine
+    steps:
+      - name: Install from PyPI in Alpine and import the extension
+        run: |
+          cat > alpine-verify.sh <<'SH'
+          set -eu
+          python -m venv /venv
+          . /venv/bin/activate
+          # --only-binary=quiltx: a missing musllinux wheel is a failure, not a
+          # silent build from the sdist. PyPI and its CDN take a while to show a new release.
+          for attempt in $(seq 1 20); do
+            if pip install --no-cache-dir --only-binary=quiltx "quiltx==$VERSION"; then
+              break
+            fi
+            [ "$attempt" -lt 20 ] || { echo "::error::quiltx $VERSION never became installable as a wheel"; exit 1; }
+            echo "quiltx $VERSION not installable yet (attempt $attempt); waiting"
+            sleep 30
+          done
+          pip show -f quiltx | grep -E '^(Version|Location)|_core'
+          cd /tmp
+          python - <<'PY'
+          import os
+          import quiltx
+          from quiltx import _core
+
+          assert quiltx.__version__ == os.environ["VERSION"], quiltx.__version__
+          assert _core.ping("pypi") == "pong:pypi"
+          print("ok", quiltx.__version__, _core.core_version())
+          PY
+          pip download --no-cache-dir --no-deps -d /tmp/dl "quiltx==$VERSION" --only-binary=:all:
+          ls /tmp/dl | grep -q musllinux_1_2 || { echo "::error::pip did not choose the musllinux wheel"; exit 1; }
+          SH
+          docker run --rm -e VERSION -v "$PWD/alpine-verify.sh:/alpine-verify.sh:ro" "$IMAGE" sh /alpine-verify.sh

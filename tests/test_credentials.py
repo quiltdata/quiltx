@@ -1,11 +1,13 @@
-"""Tests for quiltx.credentials (keyring-backed + file fallback)."""
+"""Tests for quiltx.auth.store (keyring-backed + file fallback)."""
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
+import pytest
 
-from quiltx import credentials
+from quiltx.auth import store as credentials
 
 
 def _mock_no_keyring(monkeypatch):
@@ -108,6 +110,10 @@ def test_public_aliases_match_internal_names():
     assert credentials.list is credentials.catalog_list
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX permission bits do not exist on Windows (file modes are ACLs)",
+)
 def test_file_mode_600(tmp_path, monkeypatch):
     _mock_no_keyring(monkeypatch)
     _use_tmp_fallback(monkeypatch, tmp_path)

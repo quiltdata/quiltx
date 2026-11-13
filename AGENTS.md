@@ -2,7 +2,7 @@
 
 ## Developer Setup
 
-- Setup: `./poe setup` (install deps + hooks)
+- Setup: `./poe setup` (install deps + hooks). **A Rust toolchain (1.85+, [rustup](https://rustup.rs)) is required**: quiltx builds a small PyO3 extension, `quiltx._core`, from [`rust/`](rust/) with [maturin](https://www.maturin.rs), and `uv sync` compiles it.
 - Run tests: `./poe test` (unit) or `./poe test-all` (full suite)
 - Run from repo: `./poe run <tool>` (e.g., `./poe run config --help`)
 
@@ -302,14 +302,82 @@ same rule, so a public-API caller does not silently lose email-keyed entries.
 
 Functions for catalog configuration and credentials. Use `from quiltx.config import` for programmatic access.
 
+## Layout notes
+
+### Auth (`quiltx.auth`)
+
+All catalog authentication lives in the `quiltx/auth/` subpackage: `resolve`
+(the API-key resolver; its public names are re-exported from `quiltx.auth`),
+`store` (OS keyring / 0600 file fallback), `registry` (HTTP to a catalog's
+registry; never imports quilt3), `session` (registry-issued STS credentials; the
+only auth module that imports quilt3) and `_native` (the only importer of the
+Rust extension). `quiltx.credentials` and `quiltx.quilt_auth` are aliases of
+`store` and `registry` for external importers; in-repo code and tests import
+from `quiltx.auth`. `quilt3_facade` re-exports the `session` names.
+
+### Rust extension (`quiltx._core`)
+
+[`rust/`](rust/) is crate `quiltx-core`: PyO3 0.30 with `abi3-py310`, one wheel per
+platform for every CPython 3.10+. Today it exposes `core_version()` and `ping()`
+and nothing depends on it; it is the seam where Rust-backed code lands.
+`./poe test` and `cargo test --locked` (in `rust/`) cover it. Set `pyo3/extension-module`
+only through `[tool.maturin] features` so `cargo test` can still link.
+
 ## Publishing Releases
 
-1. Update `version` in [pyproject.toml](pyproject.toml), [quiltx/_version.py](quiltx/_version.py) and [CHANGELOG.md](CHANGELOG.md)
+1. Bump the version: `./poe bump [major|minor|patch]`, or for a pre-release
+   `./poe bump minor --pre a` (0.23.1 -> 0.24.0a1), then `./poe bump pre` (a1 -> a2)
+   and `./poe bump release` (-> 0.24.0). Update [CHANGELOG.md](CHANGELOG.md).
 2. Merge to `main`
 
 On each push to `main`, [.github/workflows/publish.yml](.github/workflows/publish.yml)
-checks whether a `v$VERSION` tag already exists. If not, it builds, tags, creates the
-GitHub release, and publishes to PyPI. If the tag already exists, the run is a no-op —
-so only version bumps trigger a release.
+checks whether a `v$VERSION` tag already exists. If it does, the run is a no-op, so
+only version bumps trigger a release. Otherwise:
 
-`./poe tag` remains available for manual/local tagging if ever needed.
+1. `dist` ([dist.yml](.github/workflows/dist.yml)) builds, checks and tests exactly seven
+   files: an sdist and `cp310-abi3` wheels for Linux x86_64 and aarch64 on glibc
+   (manylinux2014) and on musl (musllinux_1_2, for Alpine), macOS (one `universal2` wheel)
+   and Windows x86_64. The musl wheels are built in the rust-cross musllinux containers
+   (natively on the arm runner) and tested by installing them in `python:3.10-alpine` and
+   `python:3.14-alpine` containers on both architectures. [`scripts/check_dist.py`](scripts/check_dist.py)
+   fails the run unless that set is exactly right (names, platform tags, contents, versions).
+2. `draft-release` creates a **draft** GitHub release with those files.
+3. `publish` runs in the `pypi` GitHub Environment (the one quiltx already used for PyPI): it tags,
+   publishes the release and uploads to PyPI via trusted publishing.
+4. `verify` ([verify-published.yml](.github/workflows/verify-published.yml)) installs the
+   release from PyPI on every platform.
+
+`publish` runs in quiltx's existing `pypi` Environment, which the PyPI trusted publisher
+already names, so nothing needs creating or changing on PyPI.
+
+A PEP 440 pre-release (`0.24.0a1`, `b1`, `rc1`) takes the same path with its GitHub release
+marked pre-release. pip and uv do not install it by default while a stable release exists, so it
+is a safe way to try the whole pipeline. PyPI never lets a filename be reused: a failed
+attempt costs a version number (`a1`, then `a2`). `.devN` versions are rejected by `check-version`.
+
+Only `main` publishes: `check-version` and `publish` are skipped on any other ref, so
+`workflow_dispatch` from a branch does nothing. `scripts/check_dist.py` (run by CI on every
+PR and again before the draft and before the upload) also fails if `quiltx/_version.py`
+disagrees with `pyproject.toml`, or an archive's `_version.py` or metadata disagrees with it.
+`./poe bump` keeps the two in step; there is no `./poe tag`, because the publish job tags
+the release itself and a tag made by hand would make it skip the release.
+
+### Recovering a failed release
+
+First find out how far it got. `gh release view vX.Y.Z`, `git ls-remote --tags origin vX.Y.Z`
+and `https://pypi.org/project/quiltx/X.Y.Z/` answer it. Re-run **failed jobs**
+(Actions -> the run -> "Re-run failed jobs"), not "re-run all jobs": `check-version` would
+see the tag and stop, and the retained outputs and artifacts are what the later jobs use.
+
+| It failed in | State | What to do |
+|---|---|---|
+| `dist` or `draft-release` | Nothing is public: no tag, no PyPI upload; at most a draft | Fix and push to `main` again (same version). A leftover draft for the tag is replaced. |
+| `publish`, before the tag | Nothing is public | Re-run failed jobs. |
+| `publish`, after the tag, before the release or PyPI | Tag exists, release still a draft | Re-run failed jobs: the tag step sees the tag at this commit and carries on, `gh release edit` is repeatable, and the PyPI upload uses `skip-existing`, so a partial upload is completed. |
+| `publish`, PyPI failed, release already public | GitHub release is out, PyPI has none or some of the seven files | Same: re-run failed jobs. If the run's artifacts have expired, download the seven files from the GitHub release assets into an empty `dist/`, run `python scripts/check_dist.py dist`, and upload with `twine upload --skip-existing dist/*` using a PyPI token for a maintainer (the trusted publisher only works from the workflow). |
+| PyPI rejected a file, or a bad file got through | A filename is spent for good, even if deleted | Do not delete and re-upload. Fix forward: `./poe bump patch` (or `pre`), release that, and say in the old GitHub release that it is superseded (mark it pre-release). Yank the bad PyPI release if users could pick it up. |
+| `verify` failed | Everything is published | Usually index lag or a wheel that does not run on one platform. Re-run `verify-published.yml` by hand (Actions -> Verify published) with the version; if a platform really fails, fix forward as above. |
+| The tag points at the wrong commit | | Never move or delete a tag whose version is on PyPI. If nothing reached PyPI, delete the tag and the draft or release together, then push to `main` again. |
+
+If `publish` reports another run won ("Tag ... is at ..., not this commit"), a different commit
+already released that version: nothing to do, bump the version for your change.

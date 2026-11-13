@@ -28,7 +28,8 @@ import sys
 
 from dataclasses import dataclass
 
-from quiltx import credentials, quilt_auth
+from quiltx.auth import registry as quilt_auth
+from quiltx.auth import store as credentials
 from quiltx.cli_common import add_catalog_args
 from quiltx.identity import build_catalog_url, normalize_dns
 

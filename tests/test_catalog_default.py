@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from quiltx import credentials, userconfig
+from quiltx import userconfig
+from quiltx.auth import store as credentials
 from quiltx.tools.catalog import default as default_cmd
 
 
@@ -87,7 +88,7 @@ def test_default_set_unknown_catalog_with_api_key_succeeds(
     """When --api-key is provided for an unknown DNS, the login flow validates
     it against the catalog and stores it; `default` then proceeds."""
     _setup_no_keyring(monkeypatch, tmp_path)
-    from quiltx import quilt_auth
+    from quiltx.auth import registry as quilt_auth
 
     monkeypatch.setattr(
         quilt_auth, "validate_api_key", lambda catalog_url, api_key: None

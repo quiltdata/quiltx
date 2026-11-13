@@ -208,3 +208,6 @@ __marimo__/
 
 # Claude Code project instructions
 CLAUDE.md
+
+# Rust
+rust/target/

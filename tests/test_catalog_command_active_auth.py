@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from quiltx import credentials
+from quiltx.auth import store as credentials
 from quiltx.stack import Catalog, catalog_command
 
 # ---------------------------------------------------------------------------

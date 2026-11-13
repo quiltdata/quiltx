@@ -1,0 +1,372 @@
+# Builds, checks and tests the seven release files:
+#
+#   quiltx-<v>.tar.gz                                   sdist
+#   quiltx-<v>-cp310-abi3-manylinux2014_x86_64...whl    Linux x86_64 (glibc)
+#   quiltx-<v>-cp310-abi3-manylinux2014_aarch64...whl   Linux aarch64 (glibc)
+#   quiltx-<v>-cp310-abi3-musllinux_1_2_x86_64.whl      Linux x86_64 (musl, Alpine)
+#   quiltx-<v>-cp310-abi3-musllinux_1_2_aarch64.whl     Linux aarch64 (musl, Alpine)
+#   quiltx-<v>-cp310-abi3-macosx_*_universal2.whl       macOS arm64 + x86_64, one file
+#   quiltx-<v>-cp310-abi3-win_amd64.whl                 Windows x86_64
+#
+# Reusable: ci.yml runs it on every pull request, publish.yml runs it before a
+# release. It uploads artifacts and publishes nothing.
+name: Dist
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: "Building for a release (turns sccache off)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # One wheel per platform: `abi3` (cp310-abi3) serves every CPython 3.10+.
+  wheels:
+    name: wheel (${{ matrix.name }})
+    strategy:
+      # One broken platform must not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          # manylinux2014 (glibc 2.17) is the oldest baseline current Rust supports.
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64
+            manylinux: "2014"
+          # Built natively on an arm runner inside the aarch64 manylinux image.
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: "2014"
+          # musllinux_1_2 (musl 1.2) is what current Alpine uses; the build runs
+          # inside the matching rust-cross musllinux container, natively on arm.
+          - name: linux-musl-x86_64
+            runner: ubuntu-24.04
+            target: x86_64
+            manylinux: musllinux_1_2
+          - name: linux-musl-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: musllinux_1_2
+          # One universal2 wheel; both Rust targets must be installed.
+          - name: macos-universal2
+            runner: macos-15
+            target: universal2-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            macosx-deployment-target: "10.12"
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust (macOS targets)
+        if: matrix.rust-targets
+        uses: ./.github/actions/setup-rust-minimal
+        with:
+          cache-target: release
+          cache-key: ${{ matrix.name }}
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: "1.16.0"
+          command: build
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          sccache: ${{ !inputs.release }}
+        env:
+          # Pinned so a runner image change cannot move the macOS floor; the
+          # file name's macosx_10_12 tag is checked by scripts/check_dist.py.
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx-deployment-target }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: "1.16.0"
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # The exact-file-set check, on the files as downloaded into one directory:
+  # seven files, the expected platform tags, nothing else. PyPI filenames are
+  # permanent, so this must pass before anything is uploaded.
+  check:
+    name: exact file set
+    needs: [wheels, sdist]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Exact file set
+        run: python scripts/check_dist.py dist
+
+      - name: twine check
+        run: pipx run twine check --strict dist/*
+
+  # Run the built wheel, not the source tree: install it into a clean venv and
+  # run the suite from a copy of the repo without the quiltx/ source package
+  # (the tests import `tests.conftest` and read fixtures from the repo root, so
+  # they need `python -m pytest` there, and the checkout's quiltx/ would shadow
+  # the wheel). Linux x86_64
+  # covers every supported Python; the other platforms cover the oldest and the
+  # newest. macOS universal2 runs on both an arm64 and an Intel runner, so both
+  # halves of the one file are executed.
+  test-wheels:
+    name: test (${{ matrix.name }}, py${{ matrix.python }})
+    needs: wheels
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, runner: ubuntu-24.04, python: "3.10", bin: bin }
+          - { name: linux-x86_64, runner: ubuntu-24.04, python: "3.11", bin: bin }
+          - { name: linux-x86_64, runner: ubuntu-24.04, python: "3.12", bin: bin }
+          - { name: linux-x86_64, runner: ubuntu-24.04, python: "3.13", bin: bin }
+          - { name: linux-x86_64, runner: ubuntu-24.04, python: "3.14", bin: bin }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, python: "3.10", bin: bin }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, python: "3.14", bin: bin }
+          - { name: macos-universal2, runner: macos-15, python: "3.10", bin: bin, arch: arm64 }
+          - { name: macos-universal2, runner: macos-15, python: "3.14", bin: bin, arch: arm64 }
+          - { name: macos-universal2, runner: macos-15-intel, python: "3.10", bin: bin, arch: x86_64 }
+          - { name: macos-universal2, runner: macos-15-intel, python: "3.14", bin: bin, arch: x86_64 }
+          - { name: windows-x86_64, runner: windows-latest, python: "3.10", bin: Scripts }
+          - { name: windows-x86_64, runner: windows-latest, python: "3.14", bin: Scripts }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Install the built wheel into a clean venv
+        run: |
+          uv venv .testenv --python "${{ matrix.python }}"
+          VIRTUAL_ENV="$PWD/.testenv" uv pip install dist/*.whl pytest
+          echo "$PWD/.testenv/${{ matrix.bin }}" >> "$GITHUB_PATH"
+
+      # From outside the checkout, so the source tree cannot shadow the wheel.
+      - name: Smoke test the extension
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          import platform
+          import quiltx
+          from quiltx import _core
+
+          print("python", platform.python_version(), platform.machine())
+          print("quiltx", quiltx.__file__)
+          assert "site-packages" in quiltx.__file__, "not the installed wheel"
+          assert _core.ping("ci") == "pong:ci"
+          print("core_version", _core.core_version())
+          PY
+
+      - name: Check the macOS runner runs the architecture it should
+        if: matrix.arch
+        run: test "$(uname -m)" = "${{ matrix.arch }}" && python -c "import platform; assert platform.machine() == '${{ matrix.arch }}'"
+
+      - name: Copy the tests away from the source package
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          skip = shutil.ignore_patterns(
+              "quiltx", "rust", ".git", ".venv", ".testenv", "dist", "__pycache__"
+          )
+          shutil.copytree(".", Path(os.environ["RUNNER_TEMP"]) / "suite", ignore=skip)
+          PY
+
+      - name: Test suite
+        working-directory: ${{ runner.temp }}/suite
+        env:
+          QUILTX_TEST_INSTALLED: "1"
+        run: python -m pytest tests -p no:cacheprovider
+
+  # The musl wheels run in a real Alpine (musl) container: the runner has only
+  # glibc, so the wheel is installed and the suite run inside python:X-alpine
+  # through `docker run`, not `container:` (the runner's own node is glibc).
+  test-musl-wheels:
+    name: test (${{ matrix.name }}, py${{ matrix.python }}, alpine)
+    needs: wheels
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-musl-x86_64, runner: ubuntu-24.04, python: "3.10" }
+          - { name: linux-musl-x86_64, runner: ubuntu-24.04, python: "3.14" }
+          - { name: linux-musl-aarch64, runner: ubuntu-24.04-arm, python: "3.10" }
+          - { name: linux-musl-aarch64, runner: ubuntu-24.04-arm, python: "3.14" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist
+
+      - name: Copy the tests away from the source package
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          skip = shutil.ignore_patterns(
+              "quiltx", "rust", ".git", ".venv", ".testenv", "dist", "__pycache__"
+          )
+          shutil.copytree(".", Path(os.environ["RUNNER_TEMP"]) / "suite", ignore=skip)
+          PY
+
+      - name: Install the musl wheel in Alpine, smoke test it, run the suite
+        env:
+          IMAGE: python:${{ matrix.python }}-alpine
+        run: |
+          cat > "$RUNNER_TEMP/alpine-test.sh" <<'SH'
+          set -eu
+          echo "alpine $(cat /etc/alpine-release), $(uname -m), python $(python -V)"
+          ls /lib/ld-musl-* # musl, not glibc
+          python -m venv /venv
+          . /venv/bin/activate
+          ls /dist/*.whl
+          pip install --no-cache-dir /dist/*.whl pytest
+          cd /tmp
+          python - <<'PY'
+          import platform
+          import quiltx
+          from quiltx import _core
+
+          print("python", platform.python_version(), platform.machine())
+          assert "site-packages" in quiltx.__file__, "not the installed wheel"
+          assert _core.ping("ci") == "pong:ci"
+          print("core_version", _core.core_version())
+          PY
+          cd /suite
+          QUILTX_TEST_INSTALLED=1 python -m pytest tests -p no:cacheprovider
+          SH
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$RUNNER_TEMP/suite:/suite" \
+            -v "$RUNNER_TEMP/alpine-test.sh:/alpine-test.sh:ro" \
+            "$IMAGE" sh /alpine-test.sh
+
+  # The sdist must build from source with a Rust toolchain and then work.
+  test-sdist:
+    name: test (sdist)
+    needs: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdist
+          path: dist
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Build and install from the sdist
+        run: |
+          uv venv .testenv --python 3.12
+          VIRTUAL_ENV="$PWD/.testenv" uv pip install dist/*.tar.gz pytest
+          echo "$PWD/.testenv/bin" >> "$GITHUB_PATH"
+
+      - name: Smoke test the extension
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          import quiltx
+          from quiltx import _core
+
+          assert "site-packages" in quiltx.__file__, "not the installed sdist build"
+          assert _core.ping("ci") == "pong:ci"
+          PY
+
+      - name: Copy the tests away from the source package
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          skip = shutil.ignore_patterns(
+              "quiltx", "rust", ".git", ".venv", ".testenv", "dist", "__pycache__"
+          )
+          shutil.copytree(".", Path(os.environ["RUNNER_TEMP"]) / "suite", ignore=skip)
+          PY
+
+      - name: Test suite
+        working-directory: ${{ runner.temp }}/suite
+        env:
+          QUILTX_TEST_INSTALLED: "1"
+        run: python -m pytest tests -p no:cacheprovider
+
+  # One check for the caller (and for branch protection) to depend on.
+  dist:
+    name: Dist complete
+    needs: [wheels, sdist, check, test-wheels, test-musl-wheels, test-sdist]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every build, check and test passed
+        run: |
+          echo '${{ toJSON(needs) }}'
+          test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "false"

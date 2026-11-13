@@ -1,0 +1,26 @@
+[package]
+name = "quiltx-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Rust core of quiltx, exposed to Python as quiltx._core"
+license = "Apache-2.0"
+repository = "https://github.com/quiltdata/quiltx"
+publish = false
+
+[lib]
+# Imported from Python as `quiltx._core`; maturin installs it under that name.
+name = "_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# abi3-py310 matches requires-python >=3.10: one wheel per platform serves every
+# CPython 3.10+. `extension-module` is deliberately NOT set here: maturin adds it
+# (see [tool.maturin] features in pyproject.toml), so `cargo test` can still link
+# against libpython.
+pyo3 = { version = "0.30", features = ["abi3-py310"] }
+
+[profile.release]
+# Smaller wheels: the extension ships in every platform file.
+strip = true
+lto = true

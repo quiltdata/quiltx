@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from quiltx import auth, credentials
+from quiltx import auth
+from quiltx.auth import store as credentials
 from quiltx.stack import Catalog
 
 FAKE_CATALOG = Catalog(
