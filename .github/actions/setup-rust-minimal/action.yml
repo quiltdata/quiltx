@@ -23,7 +23,7 @@ runs:
   using: "composite"
   steps:
     - name: Setup Rust
-      uses: moonrepo/setup-rust@v1
+      uses: moonrepo/setup-rust@abb2d32350334249b178c401e5ec5836e0cd88d3 # v1.3.0
       with:
         # Its cache is one per OS, shared by every job. rust-cache below keeps one per job.
         cache: false
