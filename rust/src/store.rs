@@ -9,14 +9,22 @@
 //!
 //! Writes match the Python byte for byte (`json.dumps` with `ensure_ascii` and,
 //! for the fallback file, `indent=2`) and the same directory and file modes:
-//! the fallback file is opened at 0600, its parent directory is 0700, and the
-//! index is written with the process umask (Python's `Path.write_text`). Missing
-//! or unreadable files, and malformed JSON, read as empty, as they did in
-//! Python.
+//! the fallback file is 0600, its parent directory is 0700, and the index is
+//! written with the process umask (Python's `Path.write_text`). Writes go to a
+//! temp file in the same directory and are renamed into place. On Windows the
+//! files use CRLF, as Python's text-mode writes did.
+//!
+//! A missing file, or invalid JSON that Python's `json.loads` already treated
+//! as empty, still reads as empty. A file that exists but is invalid UTF-8, or
+//! that Python would parse but this parser cannot (`NaN`/`Infinity`, a lone
+//! surrogate, nesting deeper than 128), raises so a later write cannot replace
+//! it.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Number, Value};
 
@@ -36,6 +44,10 @@ pub enum StoreOpError {
     },
     /// Python `TypeError` message.
     Type(String),
+    /// Invalid UTF-8 in a file that exists; mapped to `UnicodeDecodeError`.
+    Utf8(std::string::FromUtf8Error),
+    /// JSON that Python's `json.loads` would accept but this parser cannot.
+    Value(String),
 }
 
 impl From<StoreError> for StoreOpError {
@@ -110,23 +122,23 @@ pub fn credential_payload(
     Ok(payload)
 }
 
-/// Parsed `credentials.json`. A missing, unreadable, or malformed file is `{}`.
-/// Valid JSON that is not an object (for example `[]`) is returned as-is, as
-/// Python's `json.loads` did.
-pub fn read_fallback_value(path: &Path) -> Value {
-    match read_json(path) {
-        Ok(value) => value,
-        _ => Value::Object(Map::new()),
+/// Parsed `credentials.json`. A missing file, or invalid JSON that Python
+/// already treated as empty, is `{}`. Valid JSON that is not an object (for
+/// example `[]`) is returned as-is, as Python's `json.loads` did.
+pub fn read_fallback_value(path: &Path) -> Result<Value, StoreOpError> {
+    match read_json(path)? {
+        Some(value) => Ok(value),
+        None => Ok(Value::Object(Map::new())),
     }
 }
 
-/// The mapping in `credentials.json`, or `{}` if the file is missing, unreadable,
-/// malformed, or not an object. Prefer [`as_mapping`] when the Python would
-/// raise `AttributeError` on a non-dict.
-pub fn read_fallback(path: &Path) -> Map<String, Value> {
-    match read_fallback_value(path) {
-        Value::Object(map) => map,
-        _ => Map::new(),
+/// The mapping in `credentials.json`, or `{}` if the file is missing, was
+/// invalid JSON that Python treated as empty, or is not an object. Prefer
+/// [`as_mapping`] when the Python would raise `AttributeError` on a non-dict.
+pub fn read_fallback(path: &Path) -> Result<Map<String, Value>, StoreOpError> {
+    match read_fallback_value(path)? {
+        Value::Object(map) => Ok(map),
+        _ => Ok(Map::new()),
     }
 }
 
@@ -144,7 +156,7 @@ fn json_type_name(value: &Value) -> &'static str {
 
 /// The object in a fallback file, or `AttributeError` if it is some other JSON.
 pub fn as_mapping(path: &Path, attr: &'static str) -> Result<Map<String, Value>, StoreOpError> {
-    let value = read_fallback_value(path);
+    let value = read_fallback_value(path)?;
     match value {
         Value::Object(map) => Ok(map),
         other => Err(StoreOpError::Attribute {
@@ -155,7 +167,7 @@ pub fn as_mapping(path: &Path, attr: &'static str) -> Result<Map<String, Value>,
 }
 
 fn assign_mapping(path: &Path) -> Result<Map<String, Value>, StoreOpError> {
-    let value = read_fallback_value(path);
+    let value = read_fallback_value(path)?;
     match value {
         Value::Object(map) => Ok(map),
         Value::Array(_) => Err(StoreOpError::Type(
@@ -174,14 +186,15 @@ pub fn write_fallback(path: &Path, data: &Map<String, Value>) -> io::Result<()> 
     write_private(path, &bytes)
 }
 
-/// Read `credentials_index.json`; a missing, unreadable, or non-list file is `[]`.
-pub fn read_index(path: &Path) -> Vec<String> {
-    match read_json(path) {
-        Ok(Value::Array(items)) => items
+/// Read `credentials_index.json`; a missing file, invalid JSON that Python
+/// treated as empty, or a non-list is `[]`. Non-string list elements are dropped.
+pub fn read_index(path: &Path) -> Result<Vec<String>, StoreOpError> {
+    match read_json(path)? {
+        Some(Value::Array(items)) => Ok(items
             .into_iter()
             .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
+            .collect()),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -193,8 +206,8 @@ pub fn write_index(path: &Path, entries: &[String]) -> io::Result<()> {
 }
 
 /// Append *dns* to the index if it is not already present.
-pub fn add_to_index(path: &Path, dns: &str) -> io::Result<()> {
-    let mut entries = read_index(path);
+pub fn add_to_index(path: &Path, dns: &str) -> Result<(), StoreOpError> {
+    let mut entries = read_index(path)?;
     if !entries.iter().any(|e| e == dns) {
         entries.push(dns.to_string());
         write_index(path, &entries)?;
@@ -203,8 +216,8 @@ pub fn add_to_index(path: &Path, dns: &str) -> io::Result<()> {
 }
 
 /// Remove the first occurrence of *dns* from the index, if any.
-pub fn remove_from_index(path: &Path, dns: &str) -> io::Result<()> {
-    let mut entries = read_index(path);
+pub fn remove_from_index(path: &Path, dns: &str) -> Result<(), StoreOpError> {
+    let mut entries = read_index(path)?;
     if let Some(i) = entries.iter().position(|e| e == dns) {
         entries.remove(i);
         write_index(path, &entries)?;
@@ -236,8 +249,8 @@ pub fn store_fallback(
 }
 
 /// Delete *dns* from the fallback file (idempotent; no write if it is absent).
-pub fn delete_fallback(path: &Path, dns: &str) -> io::Result<()> {
-    let mut data = read_fallback(path);
+pub fn delete_fallback(path: &Path, dns: &str) -> Result<(), StoreOpError> {
+    let mut data = read_fallback(path)?;
     if data.remove(dns).is_some() {
         write_fallback(path, &data)?;
     }
@@ -262,9 +275,69 @@ fn entry_if_api_key(value: Option<&Value>) -> Option<Map<String, Value>> {
     }
 }
 
-fn read_json(path: &Path) -> io::Result<Value> {
-    let text = fs::read_to_string(path)?;
-    serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+/// `Ok(None)` is a missing file, or invalid JSON that Python's `json.loads`
+/// would reject (`JSONDecodeError` → empty). Anything else that cannot be
+/// parsed is an error, so a later write cannot replace the file.
+fn read_json(path: &Path) -> Result<Option<Value>, StoreOpError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let text = String::from_utf8(bytes).map_err(StoreOpError::Utf8)?;
+    match serde_json::from_str(&text) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if python_json_unsupported(&text, &e) => Err(StoreOpError::Value(e.to_string())),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `serde_json` rejects some values that Python's `json.loads` accepts. Those
+/// must raise, not look like a missing file.
+fn python_json_unsupported(text: &str, err: &serde_json::Error) -> bool {
+    let msg = err.to_string();
+    if msg.contains("recursion limit")
+        || msg.contains("invalid unicode")
+        || msg.contains("surrogate")
+    {
+        return true;
+    }
+    let rest = slice_at_json_error(text, err);
+    starts_with_token(rest, "NaN")
+        || starts_with_token(rest, "Infinity")
+        || starts_with_token(rest, "-Infinity")
+}
+
+fn slice_at_json_error<'a>(text: &'a str, err: &serde_json::Error) -> &'a str {
+    let want_line = err.line();
+    let want_col = err.column();
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (i, ch) in text.char_indices() {
+        if line == want_line && col == want_col {
+            return &text[i..];
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    if line == want_line && col == want_col {
+        return "";
+    }
+    text
+}
+
+fn starts_with_token(s: &str, token: &str) -> bool {
+    if !s.starts_with(token) {
+        return false;
+    }
+    !s[token.len()..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Python on Windows opens these files in text mode (`os.open` without
@@ -286,30 +359,77 @@ fn with_python_newlines(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Create the immediate parent at 0700 (grandparents use the default mode),
-/// then write *bytes* opening the file at 0600, matching `_write_fallback`.
+/// then write *bytes* to a temp file at 0600 and rename over *path*.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    ensure_parent(path)?;
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path)?;
-    file.write_all(&with_python_newlines(bytes))?;
-    // The file may have pre-existed at looser permissions (older quiltx).
-    drop(file);
-    let _ = chmod(path, 0o600);
-    Ok(())
+    write_atomic(path, bytes, true)
 }
 
-/// `Path.write_text`: same parent-directory rules, file mode from the umask.
+/// `Path.write_text`: same parent-directory rules, file mode from the umask,
+/// temp file plus rename.
 fn write_index_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic(path, bytes, false)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     ensure_parent(path)?;
-    let mut file = File::create(path)?;
-    file.write_all(&with_python_newlines(bytes))?;
-    Ok(())
+    let tmp = tmp_sibling(path);
+    let result = (|| {
+        {
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            if private {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+            }
+            let mut file = opts.open(&tmp)?;
+            file.write_all(&with_python_newlines(bytes))?;
+            drop(file);
+        }
+        if private {
+            let _ = chmod(&tmp, 0o600);
+        }
+        persist_tmp(&tmp, path)?;
+        if private {
+            let _ = chmod(path, 0o600);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn tmp_sibling(path: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    path.with_file_name(format!(
+        ".{}.{}.{}.{}.tmp",
+        name,
+        std::process::id(),
+        nanos,
+        seq
+    ))
+}
+
+fn persist_tmp(tmp: &Path, dest: &Path) -> io::Result<()> {
+    // On Windows `rename` will not replace an existing file.
+    #[cfg(windows)]
+    if dest.exists() {
+        fs::remove_file(dest)?;
+    }
+    fs::rename(tmp, dest)
 }
 
 fn ensure_parent(path: &Path) -> io::Result<()> {
@@ -683,20 +803,23 @@ mod tests {
     fn index_add_and_remove_are_idempotent_and_preserve_order() {
         let dir = scratch("index");
         let path = dir.join("credentials_index.json");
-        assert!(read_index(&path).is_empty());
+        assert!(read_index(&path).unwrap().is_empty());
         add_to_index(&path, "a.example.com").unwrap();
         add_to_index(&path, "b.example.com").unwrap();
         add_to_index(&path, "a.example.com").unwrap();
-        assert_eq!(read_index(&path), ["a.example.com", "b.example.com"]);
+        assert_eq!(
+            read_index(&path).unwrap(),
+            ["a.example.com", "b.example.com"]
+        );
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "[\"a.example.com\", \"b.example.com\"]"
         );
         remove_from_index(&path, "a.example.com").unwrap();
         remove_from_index(&path, "a.example.com").unwrap();
-        assert_eq!(read_index(&path), ["b.example.com"]);
+        assert_eq!(read_index(&path).unwrap(), ["b.example.com"]);
         fs::write(&path, "{}").unwrap();
-        assert!(read_index(&path).is_empty());
+        assert!(read_index(&path).unwrap().is_empty());
         cleanup(&dir);
     }
 
@@ -722,5 +845,79 @@ mod tests {
         } else {
             assert_eq!(got, input);
         }
+    }
+
+    #[test]
+    fn invalid_utf8_raises_and_does_not_overwrite() {
+        let dir = scratch("utf8");
+        let path = dir.join("credentials.json");
+        let body = b"{\"keep\": 1, \"x\": \"\xff\"}";
+        fs::write(&path, body).unwrap();
+        assert!(matches!(
+            read_fallback_value(&path),
+            Err(StoreOpError::Utf8(_))
+        ));
+        assert!(matches!(
+            store_fallback(&path, "x.example.com", "qk_x", None, None),
+            Err(StoreOpError::Utf8(_))
+        ));
+        assert!(matches!(
+            delete_fallback(&path, "keep"),
+            Err(StoreOpError::Utf8(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), body);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn nan_and_infinity_raise_and_do_not_overwrite() {
+        let dir = scratch("nan");
+        for body in [
+            r#"{"keep": {"api_key": "qk_keep", "name": null, "expires_at": NaN}}"#,
+            r#"{"keep": {"api_key": "qk_keep", "name": null, "expires_at": Infinity}}"#,
+            r#"{"keep": {"api_key": "qk_keep", "name": null, "expires_at": -Infinity}}"#,
+        ] {
+            let path = dir.join("credentials.json");
+            fs::write(&path, body).unwrap();
+            match read_fallback_value(&path) {
+                Err(StoreOpError::Value(_)) => {}
+                other => panic!("expected Value error, got {other:?}"),
+            }
+            match store_fallback(&path, "x.example.com", "qk_x", None, None) {
+                Err(StoreOpError::Value(_)) => {}
+                other => panic!("expected Value error on store, got {other:?}"),
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), body);
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn invalid_json_that_python_treats_as_empty_still_reads_empty() {
+        let dir = scratch("badjson");
+        let path = dir.join("credentials.json");
+        fs::write(&path, "not-json").unwrap();
+        assert_eq!(
+            read_fallback_value(&path).unwrap(),
+            Value::Object(Map::new())
+        );
+        store_fallback(&path, "x.example.com", "qk_x", None, None).unwrap();
+        assert!(get_fallback(&path, "x.example.com").unwrap().is_some());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn write_leaves_no_temp_file() {
+        let dir = scratch("atomic");
+        let path = dir.join("credentials.json");
+        store_fallback(&path, "a.example.com", "qk_a", None, None).unwrap();
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        cleanup(&dir);
     }
 }

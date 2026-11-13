@@ -335,7 +335,8 @@ What lives in Rust (`rust/src/`):
 
 `tests/oracle.py` keeps the replaced Python verbatim and `tests/test_core_parity.py` runs
 oracle and Rust on the same inputs (tables, a seeded random walk, the machine's own
-`platformdirs`, and byte-for-byte credential-file writes); change Rust behaviour only together with that table. After editing Rust,
+`platformdirs`, and byte-for-byte credential-file writes); change Rust
+behaviour only together with that table. After editing Rust,
 rebuild the extension into the venv with `uv sync --reinstall-package quiltx`.
 `./poe test` and `cargo test --locked` (in `rust/`) cover it. Set `pyo3/extension-module`
 only through `[tool.maturin] features` so `cargo test` can still link.

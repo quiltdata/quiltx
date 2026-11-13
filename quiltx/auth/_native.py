@@ -3,9 +3,9 @@
 Everything Rust-backed that auth needs goes through this module, so the
 boundary between the Python auth code and the Rust core is one file. The core
 is required: catalog-name normalization (``normalize_dns``) runs on every CLI
-command that takes a catalog, and the credential store's file paths, keyring key, and file-backed
-I/O come from it, so a missing extension is an error at import, with a message
-that says how to fix it, rather than a degraded mode.
+command that takes a catalog, and the credential store's file paths, keyring
+key, and file-backed I/O come from it, so a missing extension is an error at
+import, with a message that says how to fix it, rather than a degraded mode.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def keyring_entry(dns: str) -> tuple[str, str]:
 
 
 def read_fallback(path: Path) -> dict:
-    """Read ``credentials.json``; a missing or malformed file is ``{}``."""
+    """Read ``credentials.json``; a missing file is ``{}``."""
     return _core.read_fallback(path)
 
 

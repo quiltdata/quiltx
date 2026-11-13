@@ -501,6 +501,45 @@ def test_malformed_and_legacy_files_match_the_oracle(tmp_path: Path) -> None:
         assert _core.read_index(new) == oracle.read_index(old)
 
 
+def test_invalid_utf8_raises_and_does_not_overwrite(tmp_path: Path) -> None:
+    body = b'{"keep": {"api_key": "qk_keep", "name": null, "expires_at": null}, "x": "\xff"}'
+    old, new = file_pair(tmp_path, "credentials.json")
+    for path in (old, new):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    for fn, path, args in (
+        (oracle.read_fallback, old, ()),
+        (_core.read_fallback, new, ()),
+        (oracle.store_fallback, old, ("x.example.com", "qk_x")),
+        (_core.store_fallback, new, ("x.example.com", "qk_x")),
+        (oracle.delete_fallback, old, ("keep",)),
+        (_core.delete_fallback, new, ("keep",)),
+    ):
+        with pytest.raises(UnicodeDecodeError):
+            fn(path, *args)
+    assert new.read_bytes() == body
+    assert old.read_bytes() == body
+
+
+def test_nan_does_not_reset_the_file(tmp_path: Path) -> None:
+    body = b'{"keep": {"api_key": "qk_keep", "name": null, "expires_at": NaN}}'
+    old, new = file_pair(tmp_path, "credentials.json")
+    for path in (old, new):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    got = oracle.read_fallback(old)
+    expires = got["keep"]["expires_at"]
+    assert expires != expires  # NaN
+    with pytest.raises(ValueError):
+        _core.read_fallback(new)
+    with pytest.raises(ValueError):
+        _core.store_fallback(new, "x.example.com", "qk_x")
+    with pytest.raises(ValueError):
+        _core.delete_fallback(new, "keep")
+    assert new.read_bytes() == body
+    assert old.read_bytes() == body
+
+
 def test_write_fallback_over_a_looser_file_tightens_the_mode(
     tmp_path: Path,
 ) -> None:

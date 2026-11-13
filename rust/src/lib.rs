@@ -13,7 +13,9 @@
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyAttributeError, PyOSError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyAttributeError, PyRuntimeError, PyTypeError, PyUnicodeDecodeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyList};
 use serde_json::{Map, Number, Value};
@@ -63,7 +65,7 @@ fn keyring_entry(dns: &str) -> (&'static str, String) {
 }
 
 fn io_err(e: std::io::Error) -> PyErr {
-    PyOSError::new_err(e.to_string())
+    PyErr::from(e)
 }
 
 fn store_op_err(e: store::StoreOpError) -> PyErr {
@@ -74,6 +76,10 @@ fn store_op_err(e: store::StoreOpError) -> PyErr {
             PyAttributeError::new_err(format!("'{typ}' object has no attribute '{attr}'"))
         }
         store::StoreOpError::Type(msg) => PyTypeError::new_err(msg),
+        store::StoreOpError::Utf8(e) => Python::attach(|py| {
+            PyUnicodeDecodeError::new_err_from_utf8(py, e.as_bytes(), e.utf8_error())
+        }),
+        store::StoreOpError::Value(msg) => PyValueError::new_err(msg),
     }
 }
 
@@ -159,10 +165,15 @@ fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     )))
 }
 
-/// Read `credentials.json`; a missing or malformed file is `{}`.
+/// Read `credentials.json`; a missing file is `{}`. Invalid UTF-8 raises
+/// `UnicodeDecodeError`. JSON that Python would parse but this parser cannot
+/// raises `ValueError`. Other invalid JSON is `{}`.
 #[pyfunction]
 fn read_fallback(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
-    json_to_py(py, &store::read_fallback_value(&path))
+    json_to_py(
+        py,
+        &store::read_fallback_value(&path).map_err(store_op_err)?,
+    )
 }
 
 /// Write `credentials.json` with mode 0600 and Python's `indent=2` JSON.
@@ -173,8 +184,8 @@ fn write_fallback(path: PathBuf, data: Bound<'_, PyDict>) -> PyResult<()> {
 
 /// Read `credentials_index.json`; a missing or non-list file is `[]`.
 #[pyfunction]
-fn read_index(path: PathBuf) -> Vec<String> {
-    store::read_index(&path)
+fn read_index(path: PathBuf) -> PyResult<Vec<String>> {
+    store::read_index(&path).map_err(store_op_err)
 }
 
 /// Write `credentials_index.json` (compact JSON, process umask).
@@ -186,13 +197,13 @@ fn write_index(path: PathBuf, entries: Vec<String>) -> PyResult<()> {
 /// Append *dns* to the index if it is not already listed.
 #[pyfunction]
 fn add_to_index(path: PathBuf, dns: &str) -> PyResult<()> {
-    store::add_to_index(&path, dns).map_err(io_err)
+    store::add_to_index(&path, dns).map_err(store_op_err)
 }
 
 /// Remove *dns* from the index if it is listed (idempotent).
 #[pyfunction]
 fn remove_from_index(path: PathBuf, dns: &str) -> PyResult<()> {
-    store::remove_from_index(&path, dns).map_err(io_err)
+    store::remove_from_index(&path, dns).map_err(store_op_err)
 }
 
 /// The file-backend `get`: the entry for *dns*, or `None`.
@@ -220,7 +231,7 @@ fn store_fallback(
 /// The file-backend `delete` (idempotent).
 #[pyfunction]
 fn delete_fallback(path: PathBuf, dns: &str) -> PyResult<()> {
-    store::delete_fallback(&path, dns).map_err(io_err)
+    store::delete_fallback(&path, dns).map_err(store_op_err)
 }
 
 /// The file-backend `catalog_list`: `(dns, entry)` in file order.
