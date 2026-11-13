@@ -168,7 +168,7 @@ jobs:
       - name: Install the built wheel into a clean venv
         run: |
           uv venv .testenv --python "${{ matrix.python }}"
-          uv pip install --python ".testenv/${{ matrix.bin }}/python" dist/*.whl pytest
+          VIRTUAL_ENV="$PWD/.testenv" uv pip install dist/*.whl pytest
           echo "$PWD/.testenv/${{ matrix.bin }}" >> "$GITHUB_PATH"
 
       # From outside the checkout, so the source tree cannot shadow the wheel.
@@ -228,7 +228,7 @@ jobs:
       - name: Build and install from the sdist
         run: |
           uv venv .testenv --python 3.12
-          uv pip install --python .testenv/bin/python dist/*.tar.gz pytest
+          VIRTUAL_ENV="$PWD/.testenv" uv pip install dist/*.tar.gz pytest
           echo "$PWD/.testenv/bin" >> "$GITHUB_PATH"
 
       - name: Smoke test the extension
