@@ -3,7 +3,7 @@ name: Publish
 # On a push to main whose version has not been released: build and check the
 # seven release files, draft the GitHub release, then wait for approval before
 # tagging, promoting the draft and publishing to PyPI. Nothing is published
-# until a reviewer approves the `release-approval` environment.
+# until a reviewer approves the `pypi` environment.
 #
 # Only main publishes: a run from any other branch (workflow_dispatch) skips
 # every job. A PEP 440 pre-release version (0.24.0a1, 0.24.0b1, 0.24.0rc1) goes
@@ -123,15 +123,16 @@ jobs:
             echo "Approve the \`publish\` job to tag, publish the release and upload to PyPI."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The irreversible step, behind the `release-approval` GitHub Environment
-  # (required reviewers are configured in the repository settings). Order
+  # The irreversible step, behind the repository's existing `pypi` GitHub
+  # Environment (required reviewers and the main-only branch policy are configured
+  # in the repository settings; the PyPI trusted publisher names this environment). Order
   # matters, as in quilt-rs's release-crate.yaml: tag, then the GitHub release,
   # then PyPI last; a re-run of just this job finishes whatever is left.
   publish:
     needs: [check-version, draft-release]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    environment: release-approval
+    environment: pypi
     outputs:
       published: ${{ steps.tag.outputs.publish }}
     permissions:

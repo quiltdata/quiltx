@@ -342,15 +342,15 @@ only version bumps trigger a release. Otherwise:
    `python:3.14-alpine` containers on both architectures. [`scripts/check_dist.py`](scripts/check_dist.py)
    fails the run unless that set is exactly right (names, platform tags, contents, versions).
 2. `draft-release` creates a **draft** GitHub release with those files.
-3. `publish` waits for approval of the `release-approval` GitHub Environment, then tags,
+3. `publish` waits for approval of the `pypi` GitHub Environment (the one quiltx already used for PyPI), then tags,
    publishes the release and uploads to PyPI via trusted publishing.
 4. `verify` ([verify-published.yml](.github/workflows/verify-published.yml)) installs the
    release from PyPI on every platform.
 
-**Before the first release from this workflow**, in the repository settings: create the
-`release-approval` Environment with required reviewers (a workflow that names a missing
-environment creates it *without* reviewers, and the release would then proceed unapproved),
-and point quiltx's PyPI trusted publisher at that environment name if it pins one.
+**Before the first release from this workflow**, check the `pypi` Environment in the repository
+settings: it must have required reviewers and allow deployments from `main` only (an
+environment without reviewers lets `publish` run unapproved). The PyPI trusted publisher for
+quiltx already names `pypi`, so it needs no change.
 
 A PEP 440 pre-release (`0.24.0a1`, `b1`, `rc1`) takes the same path with its GitHub release
 marked pre-release. pip and uv do not install it by default while a stable release exists, so it
