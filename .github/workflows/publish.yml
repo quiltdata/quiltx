@@ -5,9 +5,13 @@ name: Publish
 # tagging, promoting the draft and publishing to PyPI. Nothing is published
 # until a reviewer approves the `release-approval` environment.
 #
-# A PEP 440 pre-release version (0.24.0a1, 0.24.0rc1, 0.24.0.dev1) goes through
-# the same path, but its GitHub release is marked pre-release, and pip and uv do
-# not install it by default while a stable release exists.
+# Only main publishes: a run from any other branch (workflow_dispatch) skips
+# every job. A PEP 440 pre-release version (0.24.0a1, 0.24.0b1, 0.24.0rc1) goes
+# through the same path, but its GitHub release is marked pre-release, and pip and
+# uv do not install it by default while a stable release exists. .devN versions
+# are rejected (scripts/bump_version.py does not produce them).
+#
+# If a run fails part-way, see "Recovering a failed release" in AGENTS.md.
 on:
   push:
     branches:
@@ -23,6 +27,7 @@ permissions:
 
 jobs:
   check-version:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.check.outputs.version }}
@@ -32,13 +37,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - id: check
         name: Check if version tag exists
         run: |
           VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if [[ "$VERSION" =~ (a|b|rc)[0-9]+$ || "$VERSION" =~ \.dev[0-9]+$ ]]; then
+          if [[ "$VERSION" =~ \.dev[0-9]+ ]]; then
+            echo "::error::$VERSION is a .devN version; this workflow releases only final versions and a/b/rc pre-releases"
+            exit 1
+          fi
+          if [[ "$VERSION" =~ (a|b|rc)[0-9]+$ ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -72,6 +82,8 @@ jobs:
       PRERELEASE: ${{ needs.check-version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v8
         with:
@@ -117,8 +129,11 @@ jobs:
   # then PyPI last; a re-run of just this job finishes whatever is left.
   publish:
     needs: [check-version, draft-release]
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     environment: release-approval
+    outputs:
+      published: ${{ steps.tag.outputs.publish }}
     permissions:
       contents: write
       id-token: write # PyPI trusted publishing; only this job gets it
@@ -139,24 +154,42 @@ jobs:
       - name: Exact file set
         run: python3 scripts/check_dist.py dist
 
+      # Idempotent, so "re-run failed jobs" after a partial failure resumes
+      # instead of dying here. The checkout fetched the tags, so a re-run has the
+      # tag locally; what decides is where the tag is on origin. Same commit as
+      # this run: ours, carry on. A different commit: another run released this
+      # version, so skip. No tag: create and push it.
       - name: Create tag
         id: tag
         run: |
+          set -euo pipefail
           TAG="v$VERSION"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Release $VERSION"
-          if git push origin "$TAG"; then
+          HEAD_SHA=$(git rev-parse HEAD)
+          remote_commit() { # commit the tag points at on origin; empty if none
+            git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | awk 'END { print $1 }'
+          }
+          EXISTING=$(remote_commit)
+          if [ -z "$EXISTING" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
+              || git tag -a "$TAG" -m "Release $VERSION"
+            if git push origin "$TAG"; then
+              EXISTING=$HEAD_SHA
+            else
+              EXISTING=$(remote_commit)
+              if [ -z "$EXISTING" ]; then
+                echo "Tag push failed for an unexpected reason." >&2
+                exit 1
+              fi
+            fi
+          fi
+          if [ "$EXISTING" = "$HEAD_SHA" ]; then
+            echo "Tag $TAG is at this commit; continuing."
             echo "publish=true" >> "$GITHUB_OUTPUT"
-          elif [ "$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)" = "$(git rev-parse HEAD)" ]; then
-            echo "Tag $TAG already points at this commit — a re-run of this release. Continuing."
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG exists at a different commit — another run won. Skipping release and publish."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Tag push failed for an unexpected reason." >&2
-            exit 1
+            echo "Tag $TAG is at $EXISTING, not this commit — another run released $VERSION. Skipping release and publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish the GitHub release
@@ -172,7 +205,7 @@ jobs:
 
       - name: Publish to PyPI
         if: steps.tag.outputs.publish == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/
           # So re-running this job after a partial upload finishes the upload.
@@ -181,6 +214,9 @@ jobs:
   # The published files, installed from PyPI on every platform.
   verify:
     needs: [check-version, publish]
+    # Not when publish skipped (another run released this version): there would be
+    # nothing of ours to find on PyPI, and the job would wait out its retries.
+    if: needs.publish.outputs.published == 'true'
     uses: ./.github/workflows/verify-published.yml
     with:
       version: ${{ needs.check-version.outputs.version }}

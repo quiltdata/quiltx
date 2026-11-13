@@ -350,9 +350,34 @@ only version bumps trigger a release. Otherwise:
 environment creates it *without* reviewers, and the release would then proceed unapproved),
 and point quiltx's PyPI trusted publisher at that environment name if it pins one.
 
-A PEP 440 pre-release (`0.24.0a1`) takes the same path with its GitHub release marked
-pre-release. pip and uv do not install it by default while a stable release exists, so it
+A PEP 440 pre-release (`0.24.0a1`, `b1`, `rc1`) takes the same path with its GitHub release
+marked pre-release. pip and uv do not install it by default while a stable release exists, so it
 is a safe way to try the whole pipeline. PyPI never lets a filename be reused: a failed
-attempt costs a version number (`a1`, then `a2`).
+attempt costs a version number (`a1`, then `a2`). `.devN` versions are rejected by `check-version`.
 
-`./poe tag` remains available for manual/local tagging if ever needed.
+Only `main` publishes: `check-version` and `publish` are skipped on any other ref, so
+`workflow_dispatch` from a branch does nothing. `scripts/check_dist.py` (run by CI on every
+PR and again before the draft and before the upload) also fails if `quiltx/_version.py`
+disagrees with `pyproject.toml`, or an archive's `_version.py` or metadata disagrees with it.
+`./poe bump` keeps the two in step; there is no `./poe tag`, because the publish job tags
+after approval and tagging by hand would make it skip the release.
+
+### Recovering a failed release
+
+First find out how far it got. `gh release view vX.Y.Z`, `git ls-remote --tags origin vX.Y.Z`
+and `https://pypi.org/project/quiltx/X.Y.Z/` answer it. Re-run **failed jobs**
+(Actions -> the run -> "Re-run failed jobs"), not "re-run all jobs": `check-version` would
+see the tag and stop, and the retained outputs and artifacts are what the later jobs use.
+
+| It failed in | State | What to do |
+|---|---|---|
+| `dist` or `draft-release` | Nothing is public: no tag, no PyPI upload; at most a draft | Fix and push to `main` again (same version). A leftover draft for the tag is replaced. |
+| `publish`, before the tag | Nothing is public | Re-run failed jobs. |
+| `publish`, after the tag, before the release or PyPI | Tag exists, release still a draft | Re-run failed jobs: the tag step sees the tag at this commit and carries on, `gh release edit` is repeatable, and the PyPI upload uses `skip-existing`, so a partial upload is completed. |
+| `publish`, PyPI failed, release already public | GitHub release is out, PyPI has none or some of the five files | Same: re-run failed jobs. If the run's artifacts have expired, download the five files from the GitHub release assets into an empty `dist/`, run `python scripts/check_dist.py dist`, and upload with `twine upload --skip-existing dist/*` using a PyPI token for a maintainer (the trusted publisher only works from the workflow). |
+| PyPI rejected a file, or a bad file got through | A filename is spent for good, even if deleted | Do not delete and re-upload. Fix forward: `./poe bump patch` (or `pre`), release that, and say in the old GitHub release that it is superseded (mark it pre-release). Yank the bad PyPI release if users could pick it up. |
+| `verify` failed | Everything is published | Usually index lag or a wheel that does not run on one platform. Re-run `verify-published.yml` by hand (Actions -> Verify published) with the version; if a platform really fails, fix forward as above. |
+| The tag points at the wrong commit | | Never move or delete a tag whose version is on PyPI. If nothing reached PyPI, delete the tag and the draft or release together, then push to `main` again. |
+
+If `publish` reports another run won ("Tag ... is at ..., not this commit"), a different commit
+already released that version: nothing to do, bump the version for your change.
