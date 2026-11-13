@@ -69,7 +69,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
       - name: Setup Rust (macOS targets)
         if: matrix.rust-targets
@@ -139,7 +139,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
       - name: Exact file set
         run: python scripts/check_dist.py dist
@@ -189,7 +189,7 @@ jobs:
           name: wheel-${{ matrix.name }}
           path: dist
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install the built wheel into a clean venv
         run: |
@@ -321,7 +321,7 @@ jobs:
           name: sdist
           path: dist
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Build and install from the sdist
         run: |
