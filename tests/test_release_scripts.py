@@ -102,15 +102,16 @@ def make_dist(directory: Path) -> None:
     prefix = f"quiltx-{VERSION}-cp310-abi3-"
     both = _fat(check.CPU_ARM64, check.CPU_X86_64)
     _wheel(
-        directory / f"{prefix}manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        directory / f"{prefix}manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
         "quiltx/_core.abi3.so",
     )
     _wheel(
-        directory / f"{prefix}manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+        directory / f"{prefix}manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
         "quiltx/_core.abi3.so",
     )
     _wheel(
-        directory / f"{prefix}macosx_10_12_universal2.whl",
+        directory
+        / f"{prefix}macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64.whl",
         "quiltx/_core.abi3.so",
         both,
     )
@@ -139,7 +140,7 @@ def test_check_dist_flags_a_musllinux_or_other_extra_file(tmp_path: Path) -> Non
 
 def test_check_dist_flags_a_thin_macos_wheel(tmp_path: Path) -> None:
     make_dist(tmp_path)
-    path = next(tmp_path.glob("*universal2.whl"))
+    path = next(tmp_path.glob("*universal2*.whl"))
     _wheel(path, "quiltx/_core.abi3.so", _fat(check.CPU_ARM64))
     (problem,) = check.check_dist(tmp_path, VERSION)
     assert "not a universal2 binary" in problem
@@ -147,7 +148,7 @@ def test_check_dist_flags_a_thin_macos_wheel(tmp_path: Path) -> None:
 
 def test_check_dist_flags_bundled_bytecode(tmp_path: Path) -> None:
     make_dist(tmp_path)
-    path = next(tmp_path.glob("*manylinux_2_17_x86_64*.whl"))
+    path = next(tmp_path.glob("*manylinux2014_x86_64*.whl"))
     _wheel(path, "quiltx/_core.abi3.so", extra=["quiltx/__pycache__/a.cpython-312.pyc"])
     (problem,) = check.check_dist(tmp_path, VERSION)
     assert "contains bytecode" in problem

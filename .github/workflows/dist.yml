@@ -1,8 +1,8 @@
 # Builds, checks and tests the five release files:
 #
 #   quiltx-<v>.tar.gz                                   sdist
-#   quiltx-<v>-cp310-abi3-manylinux_2_17_x86_64...whl   Linux x86_64
-#   quiltx-<v>-cp310-abi3-manylinux_2_17_aarch64...whl  Linux aarch64
+#   quiltx-<v>-cp310-abi3-manylinux2014_x86_64...whl    Linux x86_64
+#   quiltx-<v>-cp310-abi3-manylinux2014_aarch64...whl   Linux aarch64
 #   quiltx-<v>-cp310-abi3-macosx_*_universal2.whl       macOS arm64 + x86_64, one file
 #   quiltx-<v>-cp310-abi3-win_amd64.whl                 Windows x86_64
 #
@@ -124,7 +124,10 @@ jobs:
         run: pipx run twine check --strict dist/*
 
   # Run the built wheel, not the source tree: install it into a clean venv and
-  # run the suite from the repo root (it needs fixtures there). Linux x86_64
+  # run the suite from a copy of the repo without the quiltx/ source package
+  # (the tests import `tests.conftest` and read fixtures from the repo root, so
+  # they need `python -m pytest` there, and the checkout's quiltx/ would shadow
+  # the wheel). Linux x86_64
   # covers every supported Python; the other platforms cover the oldest and the
   # newest. macOS universal2 runs on both an arm64 and an Intel runner, so both
   # halves of the one file are executed.
@@ -188,10 +191,24 @@ jobs:
         if: matrix.arch
         run: test "$(uname -m)" = "${{ matrix.arch }}" && python -c "import platform; assert platform.machine() == '${{ matrix.arch }}'"
 
+      - name: Copy the tests away from the source package
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          skip = shutil.ignore_patterns(
+              "quiltx", "rust", ".git", ".venv", ".testenv", "dist", "__pycache__"
+          )
+          shutil.copytree(".", Path(os.environ["RUNNER_TEMP"]) / "suite", ignore=skip)
+          PY
+
       - name: Test suite
+        working-directory: ${{ runner.temp }}/suite
         env:
           QUILTX_TEST_INSTALLED: "1"
-        run: pytest tests -p no:cacheprovider
+        run: python -m pytest tests -p no:cacheprovider
 
   # The sdist must build from source with a Rust toolchain and then work.
   test-sdist:
@@ -225,10 +242,24 @@ jobs:
           assert _core.ping("ci") == "pong:ci"
           PY
 
+      - name: Copy the tests away from the source package
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          skip = shutil.ignore_patterns(
+              "quiltx", "rust", ".git", ".venv", ".testenv", "dist", "__pycache__"
+          )
+          shutil.copytree(".", Path(os.environ["RUNNER_TEMP"]) / "suite", ignore=skip)
+          PY
+
       - name: Test suite
+        working-directory: ${{ runner.temp }}/suite
         env:
           QUILTX_TEST_INSTALLED: "1"
-        run: pytest tests -p no:cacheprovider
+        run: python -m pytest tests -p no:cacheprovider
 
   # One check for the caller (and for branch protection) to depend on.
   dist:

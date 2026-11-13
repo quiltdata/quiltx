@@ -4,9 +4,9 @@
 A release is five files and no others:
 
 * ``quiltx-<v>.tar.gz`` (sdist)
-* ``quiltx-<v>-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl``
-* ``quiltx-<v>-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl``
-* ``quiltx-<v>-cp310-abi3-macosx_*_universal2.whl`` (arm64 + x86_64 in one file)
+* ``quiltx-<v>-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl``
+* ``quiltx-<v>-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl``
+* ``quiltx-<v>-cp310-abi3-macosx_10_12_universal2...whl`` (arm64 + x86_64 in one file)
 * ``quiltx-<v>-cp310-abi3-win_amd64.whl``
 
 Beyond the file names it checks what is inside: the compiled extension is
@@ -41,13 +41,17 @@ def expected_patterns(version: str) -> dict[str, str]:
         "sdist": rf"quiltx-{v}\.tar\.gz",
         "linux x86_64 (manylinux2014)": (
             rf"quiltx-{v}-cp310-abi3-"
-            r"manylinux_2_17_x86_64\.manylinux2014_x86_64\.whl"
+            r"manylinux2014_x86_64\.manylinux_2_17_x86_64\.whl"
         ),
         "linux aarch64 (manylinux2014)": (
             rf"quiltx-{v}-cp310-abi3-"
-            r"manylinux_2_17_aarch64\.manylinux2014_aarch64\.whl"
+            r"manylinux2014_aarch64\.manylinux_2_17_aarch64\.whl"
         ),
-        "macOS universal2": rf"quiltx-{v}-cp310-abi3-macosx_\d+_\d+_universal2\.whl",
+        # maturin also lists the per-architecture tags the universal2 file satisfies.
+        "macOS universal2": (
+            rf"quiltx-{v}-cp310-abi3-macosx_\d+_\d+_universal2"
+            r"(\.macosx_\d+_\d+_(x86_64|arm64))*\.whl"
+        ),
         "windows x86_64": rf"quiltx-{v}-cp310-abi3-win_amd64\.whl",
     }
 
