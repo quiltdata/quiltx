@@ -821,6 +821,237 @@ def test_store_and_delete_over_a_corrupt_keyring_entry(
 
 
 # ---------------------------------------------------------------------------
+# Registry HTTP
+# ---------------------------------------------------------------------------
+
+
+CREATED = {
+    "data": {
+        "apiKeyCreate": {
+            "__typename": "APIKeyCreated",
+            "apiKey": {
+                "id": "ak-1",
+                "name": "quiltx-host",
+                "expiresAt": "2027-05-04T00:00:00Z",
+            },
+            "secret": "qk_thesecret",
+        }
+    }
+}
+
+
+def _patch_http(
+    monkeypatch: pytest.MonkeyPatch, *, get=None, post_json=None, post_form=None
+):
+    if get is not None:
+        monkeypatch.setattr(oracle, "_get_json", get)
+        monkeypatch.setattr("quiltx.auth.registry._get_json", get)
+    if post_json is not None:
+        monkeypatch.setattr(oracle, "_post_json", post_json)
+        monkeypatch.setattr("quiltx.auth.registry._post_json", post_json)
+    if post_form is not None:
+        monkeypatch.setattr(oracle, "_post_form", post_form)
+        monkeypatch.setattr("quiltx.auth.registry._post_form", post_form)
+
+
+def test_resolve_registry_url_matches_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def get_json(url: str):
+        assert url == "https://catalog.example.com/config.json"
+        return {"registryUrl": "https://reg.example.com/"}
+
+    _patch_http(monkeypatch, get=get_json)
+    assert outcome(
+        _core.resolve_registry_url, "https://catalog.example.com/"
+    ) == outcome(oracle.resolve_registry_url, "https://catalog.example.com/")
+    assert (
+        _core.resolve_registry_url("https://catalog.example.com/")
+        == "https://reg.example.com"
+    )
+
+
+def test_resolve_registry_url_fallback_matches_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_http(monkeypatch, get=lambda url: {"foo": 1})
+    assert outcome(_core.resolve_registry_url, "http://localhost/") == outcome(
+        oracle.resolve_registry_url, "http://localhost/"
+    )
+
+
+def test_resolve_does_not_fall_back_when_config_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.registry import CatalogAuthError
+
+    def get_json(url: str):
+        raise CatalogAuthError(f"Request to {url} failed (404): missing")
+
+    _patch_http(monkeypatch, get=get_json)
+    assert outcome(
+        _core.resolve_registry_url, "https://catalog.example.com"
+    ) == outcome(oracle.resolve_registry_url, "https://catalog.example.com")
+    with pytest.raises(CatalogAuthError, match="404"):
+        _core.resolve_registry_url("https://catalog.example.com")
+
+
+def test_non_object_config_raises_instead_of_looking_like_a_missing_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.registry import CatalogAuthError
+
+    _patch_http(monkeypatch, get=lambda url: ["not", "a", "map"])
+    with pytest.raises(CatalogAuthError, match="not a JSON object"):
+        _core.resolve_registry_url("https://catalog.example.com")
+    # The old Python called .get on a list and raised AttributeError, which a
+    # caller could mistake for an unexpected bug and retry against the catalog.
+    with pytest.raises(AttributeError):
+        oracle.resolve_registry_url("https://catalog.example.com")
+
+
+def test_login_token_and_create_match_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def post_json(url: str, payload: dict, *, bearer: str | None = None):
+        if url.endswith("/api/login"):
+            assert payload == {"username": "admin", "password": "hunter2"}
+            return {"refresh_token": "rt-abc"}
+        if url.endswith("/graphql"):
+            assert bearer == "at-xyz"
+            return CREATED
+        raise AssertionError(url)
+
+    def post_form(url: str, payload: dict):
+        assert url.endswith("/api/token")
+        assert payload == {"refresh_token": "rt-abc"}
+        return {"access_token": "at-xyz"}
+
+    _patch_http(monkeypatch, post_json=post_json, post_form=post_form)
+    assert outcome(
+        _core.acquire_refresh_token, "https://catalog.example.com", "admin", "hunter2"
+    ) == outcome(
+        oracle.acquire_refresh_token, "https://catalog.example.com", "admin", "hunter2"
+    )
+    assert outcome(
+        _core.exchange_refresh_token_for_access_token,
+        "https://catalog.example.com",
+        "rt-abc",
+    ) == outcome(
+        oracle.exchange_refresh_token_for_access_token,
+        "https://catalog.example.com",
+        "rt-abc",
+    )
+    assert outcome(
+        _core.create_api_key,
+        "https://catalog.example.com",
+        "at-xyz",
+        "quiltx-host",
+        365,
+    ) == outcome(
+        lambda: oracle.create_api_key(
+            "https://catalog.example.com",
+            "at-xyz",
+            name="quiltx-host",
+            expires_in_days=365,
+        )
+    )
+
+
+def test_missing_tokens_and_graphql_errors_match_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def post_json(url: str, payload: dict, *, bearer: str | None = None):
+        if url.endswith("/api/login"):
+            return {"foo": "bar"}
+        if "InvalidInput" in str(payload):
+            return payload
+        return {"errors": [{"message": "Unauthorized"}]}
+
+    def post_json_invalid(url: str, payload: dict, *, bearer: str | None = None):
+        return {
+            "data": {
+                "apiKeyCreate": {
+                    "__typename": "InvalidInput",
+                    "errors": [{"path": "name", "message": "name in use"}],
+                }
+            }
+        }
+
+    def post_form(url: str, payload: dict):
+        return {"foo": "bar"}
+
+    _patch_http(monkeypatch, post_json=post_json, post_form=post_form)
+    assert outcome(
+        _core.acquire_refresh_token, "https://catalog.example.com", "a", "b"
+    ) == outcome(oracle.acquire_refresh_token, "https://catalog.example.com", "a", "b")
+    assert outcome(
+        _core.exchange_refresh_token_for_access_token,
+        "https://catalog.example.com",
+        "rt",
+    ) == outcome(
+        oracle.exchange_refresh_token_for_access_token,
+        "https://catalog.example.com",
+        "rt",
+    )
+    _patch_http(monkeypatch, post_json=post_json_invalid)
+    assert outcome(
+        _core.create_api_key, "https://catalog.example.com", "at", "dup", 90
+    ) == outcome(
+        lambda: oracle.create_api_key(
+            "https://catalog.example.com", "at", name="dup", expires_in_days=90
+        )
+    )
+
+
+def test_validate_and_bootstrap_match_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def get_json(url: str):
+        return {"registryUrl": "https://reg.example.com"}
+
+    def post_json(url: str, payload: dict, *, bearer: str | None = None):
+        if url.endswith("/api/login"):
+            return {"refresh_token": "rt"}
+        if url.endswith("/graphql") and payload.get("operationName") == "apiKeysList":
+            if bearer == "qk_bad":
+                return {"errors": [{"message": "Unauthorized"}]}
+            return {"data": {"apiKeysList": {"apiKeys": []}}}
+        return CREATED
+
+    def post_form(url: str, payload: dict):
+        return {"access_token": "at"}
+
+    _patch_http(monkeypatch, get=get_json, post_json=post_json, post_form=post_form)
+    assert outcome(
+        _core.validate_api_key, "https://reg.example.com", "qk_test"
+    ) == outcome(
+        lambda: oracle.validate_api_key("https://catalog.example.com", "qk_test")
+    )
+    assert outcome(
+        _core.validate_api_key, "https://reg.example.com", "qk_bad"
+    ) == outcome(
+        lambda: oracle.validate_api_key("https://catalog.example.com", "qk_bad")
+    )
+    assert outcome(
+        _core.bootstrap_api_key,
+        "https://reg.example.com",
+        "admin",
+        "hunter2",
+        "quiltx-host",
+        365,
+    ) == outcome(
+        lambda: oracle.bootstrap_api_key(
+            "https://catalog.example.com",
+            username="admin",
+            password="hunter2",
+            name="quiltx-host",
+            expires_in_days=365,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # The core is required
 # ---------------------------------------------------------------------------
 
@@ -832,7 +1063,14 @@ def run_python(code: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.parametrize(
-    "module", ["quiltx.cli", "quiltx.identity", "quiltx.stack", "quiltx.auth.store"]
+    "module",
+    [
+        "quiltx.cli",
+        "quiltx.identity",
+        "quiltx.stack",
+        "quiltx.auth.store",
+        "quiltx.auth.registry",
+    ],
 )
 def test_the_cli_path_needs_the_core(module: str) -> None:
     # `sys.modules[name] = None` makes `import name` raise ImportError.
