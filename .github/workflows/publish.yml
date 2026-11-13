@@ -123,10 +123,8 @@ jobs:
             echo "Approve the \`publish\` job to tag, publish the release and upload to PyPI."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The irreversible step, behind the repository's existing `pypi` GitHub
-  # Environment (required reviewers and the main-only branch policy are configured
-  # in the repository settings; the PyPI trusted publisher names this environment). Order
-  # matters, as in quilt-rs's release-crate.yaml: tag, then the GitHub release,
+  # The irreversible step, in the repository's existing `pypi` GitHub Environment
+  # (the one the PyPI trusted publisher names). Order matters, as in quilt-rs's release-crate.yaml: tag, then the GitHub release,
   # then PyPI last; a re-run of just this job finishes whatever is left.
   publish:
     needs: [check-version, draft-release]

@@ -347,10 +347,8 @@ only version bumps trigger a release. Otherwise:
 4. `verify` ([verify-published.yml](.github/workflows/verify-published.yml)) installs the
    release from PyPI on every platform.
 
-**Before the first release from this workflow**, check the `pypi` Environment in the repository
-settings: it must have required reviewers and allow deployments from `main` only (an
-environment without reviewers lets `publish` run unapproved). The PyPI trusted publisher for
-quiltx already names `pypi`, so it needs no change.
+`publish` runs in quiltx's existing `pypi` Environment, which the PyPI trusted publisher
+already names, so nothing needs creating or changing on PyPI.
 
 A PEP 440 pre-release (`0.24.0a1`, `b1`, `rc1`) takes the same path with its GitHub release
 marked pre-release. pip and uv do not install it by default while a stable release exists, so it
