@@ -119,7 +119,7 @@ impl registry::HttpClient for PythonHttp {
                 .import("quiltx.auth.registry")?
                 .getattr("_get_json")?
                 .call1((url,))?;
-            py_to_json(&obj)
+            json_from_response(url, &obj).map_err(registry_err)
         })
         .map_err(registry::RegistryError::Py)
     }
@@ -138,7 +138,7 @@ impl registry::HttpClient for PythonHttp {
                 kwargs.set_item("bearer", token)?;
             }
             let obj = func.call((url, json_to_py(py, payload)?), Some(&kwargs))?;
-            py_to_json(&obj)
+            json_from_response(url, &obj).map_err(registry_err)
         })
         .map_err(registry::RegistryError::Py)
     }
@@ -154,7 +154,7 @@ impl registry::HttpClient for PythonHttp {
                 .import("quiltx.auth.registry")?
                 .getattr("_post_form")?
                 .call1((url, map_to_py(py, payload)?))?;
-            py_to_json(&obj)
+            json_from_response(url, &obj).map_err(registry_err)
         })
         .map_err(registry::RegistryError::Py)
     }
@@ -260,6 +260,27 @@ fn pydict_to_map(dict: &Bound<'_, PyDict>) -> PyResult<Map<String, Value>> {
         map.insert(key, py_to_json(&value)?);
     }
     Ok(map)
+}
+
+/// Convert a Python HTTP helper's return value to JSON. A `ValueError`
+/// (including a lone surrogate that cannot be represented in Rust) is a
+/// bad response, not a bug in the caller: raise `CatalogAuthError`.
+fn json_from_response(
+    url: &str,
+    obj: &Bound<'_, PyAny>,
+) -> Result<serde_json::Value, registry::RegistryError> {
+    match py_to_json(obj) {
+        Ok(value) => Ok(value),
+        Err(err) => Python::attach(|py| {
+            if err.is_instance_of::<PyValueError>(py) {
+                Err(registry::RegistryError::Auth(format!(
+                    "Unexpected response from {url}: {err}"
+                )))
+            } else {
+                Err(registry::RegistryError::Py(err))
+            }
+        }),
+    }
 }
 
 fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<Value> {

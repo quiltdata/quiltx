@@ -1120,6 +1120,67 @@ def test_non_string_registry_url_matches_the_oracle(
     assert oracle.resolve_registry_url("https://catalog.example.com") == "True"
 
 
+def test_error_text_uses_python_repr_for_c1_bidi_and_line_separators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.registry import CatalogAuthError
+
+    def post_json(url: str, payload: dict, *, bearer: str | None = None):
+        return {"errors": [{"message": "bad\u2028key\x80end"}]}
+
+    _patch_http(monkeypatch, post_json=post_json)
+    with pytest.raises(CatalogAuthError) as raised:
+        _core.create_api_key("https://catalog.example.com", "at", "x", 90)
+    text = str(raised.value)
+    assert "\\u2028" in text
+    assert "\\x80" in text
+
+
+def test_error_text_redacts_qk_values_and_sensitive_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth.registry import CatalogAuthError
+
+    def post_json(url: str, payload: dict, *, bearer: str | None = None):
+        return {
+            "errors": [
+                {
+                    "message": "qk_should_not_leak",
+                    "access_token": "refresh_abc",
+                    "PASSWORD": "hunter2",
+                    "apiKey": "qk_also_hidden",
+                    "hint": "not a secret",
+                }
+            ]
+        }
+
+    _patch_http(monkeypatch, post_json=post_json)
+    with pytest.raises(CatalogAuthError) as raised:
+        _core.create_api_key("https://catalog.example.com", "at", "x", 90)
+    text = str(raised.value)
+    assert "qk_should_not_leak" not in text
+    assert "qk_also_hidden" not in text
+    assert "refresh_abc" not in text
+    assert "hunter2" not in text
+    assert "<redacted>" in text
+    assert "not a secret" in text
+
+
+def test_lone_surrogate_in_response_is_catalog_auth_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quiltx.auth import registry as quilt_auth
+    from quiltx.auth.registry import CatalogAuthError
+
+    def get_json(url: str):
+        return {"registryUrl": "https://reg.example.com/\ud800"}
+
+    monkeypatch.setattr(quilt_auth, "_get_json", get_json)
+    with pytest.raises(CatalogAuthError, match="Unexpected response from") as raised:
+        quilt_auth.resolve_registry_url("https://catalog.example.com")
+    assert "https://catalog.example.com/config.json" in str(raised.value)
+
+
 # ---------------------------------------------------------------------------
 # The core is required
 # ---------------------------------------------------------------------------

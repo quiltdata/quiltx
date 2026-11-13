@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get` / `store` / `delete` / `catalog_list` now run in Rust (`quiltx._core`), including the OS-keyring path. The OS secret store is still the `keyring` package, so existing entries are unchanged. A corrupt keyring entry (invalid JSON) now raises `ValueError` instead of being treated as missing, so a later store cannot silently replace it. The error names the catalog and how to fix it (`quiltx catalog login --catalog <dns>` or `quiltx catalog forget <dns>`). `catalog_list` skips a corrupt entry and prints a stderr warning that names it
 
 - Registry HTTP (`resolve_registry_url`, `/api/login`, `/api/token`, `apiKeyCreate`, `validate_api_key`) now runs in Rust (`quiltx._core`). The `urllib` transport, `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, and `open_browser` stay in Python. A `config.json` body that is not a JSON object now raises `CatalogAuthError` instead of `AttributeError`, so a later login cannot proceed against the catalog host by mistake
-- `validate_api_key` now raises `CatalogAuthError` on a 200 body that is not a JSON object (`[]`, `null`, a string, a number, `true`, or `""`) instead of treating the key as valid. An unexpected `apiKeyCreate` result redacts `secret` in the error text
+- `validate_api_key` now raises `CatalogAuthError` on a 200 body that is not a JSON object (`[]`, `null`, a string, a number, `true`, or `""`) instead of treating the key as valid
+- Error text that echoes a registry response uses Python's `repr()` (so C1 controls, bidi marks, and Unicode line/paragraph separators are escaped) and redacts any string starting with `qk_` and any value whose key matches `secret`, `token`, `password`, or `api_key` / `apikey` (case-insensitive), including GraphQL errors and InvalidInput messages
+- The `create_api_key` wrapper now applies `str(name)` and `int(expires_in_days)` before calling Rust. `int(expires_in_days)` matches the previous Python; `str(name)` is new
+- A registry response that cannot be decoded (including a lone surrogate) raises `CatalogAuthError` instead of `ValueError`
 
 ### Fixed
 

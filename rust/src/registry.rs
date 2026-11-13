@@ -8,6 +8,8 @@
 //! `REQUESTS_CA_BUNDLE` and tests that patch `_get_json` / `_post_json` /
 //! `_post_form` keep working).
 
+use pyo3::prelude::*;
+use pyo3::types::PyString;
 use serde_json::{json, Map, Value};
 
 const API_KEY_CREATE_MUTATION: &str = "\
@@ -74,33 +76,15 @@ fn nonempty_python_str(value: Option<&Value>) -> Option<String> {
 }
 
 fn python_repr_str(s: &str) -> String {
-    // Same quote rule as Python: double quotes only when the string
-    // contains a single quote and no double quote.
-    let quote = if s.contains('\'') && !s.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::new();
-    out.push(quote);
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
+    // Delegate to Python's own repr() so C0/C1, bidi marks, Zl/Zp,
+    // and anything else Python escapes are covered exactly.
+    Python::initialize();
+    Python::attach(|py| {
+        PyString::new(py, s)
+            .repr()
+            .expect("Python repr of a str")
+            .to_string()
+    })
 }
 
 fn python_repr(value: &Value) -> String {
@@ -124,15 +108,30 @@ fn python_repr(value: &Value) -> String {
     }
 }
 
-/// Replace `secret` values so an unexpected create_api_key result cannot
-/// leak a `qk_` key into an error message or log.
+/// True when a JSON key looks like a credential field.
+/// Matches `secret`, `token`, `password`, and `api_key` / `apikey`
+/// as substrings, case-insensitively (`api_?key` after lowercasing).
+fn is_sensitive_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.contains("secret")
+        || k.contains("token")
+        || k.contains("password")
+        || k.contains("apikey")
+        || k.contains("api_key")
+}
+
+const REDACTED: &str = "<redacted>";
+
+/// Redact credential material so an error message cannot leak a `qk_`
+/// key, token, or password. Applied to GraphQL errors, InvalidInput
+/// payloads, and any other echoed registry body.
 fn redact_secrets(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = Map::new();
             for (k, v) in map {
-                if k == "secret" {
-                    out.insert(k.clone(), Value::String("<redacted>".into()));
+                if is_sensitive_key(k) {
+                    out.insert(k.clone(), Value::String(REDACTED.into()));
                 } else {
                     out.insert(k.clone(), redact_secrets(v));
                 }
@@ -140,6 +139,7 @@ fn redact_secrets(value: &Value) -> Value {
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_secrets).collect()),
+        Value::String(s) if s.starts_with("qk_") => Value::String(REDACTED.into()),
         other => other.clone(),
     }
 }
@@ -259,7 +259,7 @@ pub fn create_api_key(
         if !is_falsy(errors) {
             return Err(RegistryError::Auth(format!(
                 "GraphQL errors: {}",
-                python_repr(errors)
+                python_repr_redacted(errors)
             )));
         }
     }
@@ -298,7 +298,7 @@ pub fn create_api_key(
             "Catalog rejected apiKeyCreate input: {}",
             result
                 .get("errors")
-                .map(python_repr)
+                .map(python_repr_redacted)
                 .unwrap_or_else(|| "None".into())
         )));
     }
@@ -325,14 +325,14 @@ pub fn validate_api_key(
     let Some(obj) = as_object(&response) else {
         return Err(RegistryError::Auth(format!(
             "Unexpected response from {url}: {}",
-            python_repr(&response)
+            python_repr_redacted(&response)
         )));
     };
     if let Some(errors) = obj.get("errors") {
         if !is_falsy(errors) {
             return Err(RegistryError::Auth(format!(
                 "Catalog rejected API key: {}",
-                python_repr(errors)
+                python_repr_redacted(errors)
             )));
         }
     }
@@ -750,5 +750,84 @@ mod tests {
             resolve_registry_url("https://catalog.example.com", &http).unwrap(),
             "True"
         );
+    }
+
+    #[test]
+    fn python_repr_uses_python_for_c1_bidi_and_line_separators() {
+        // C1, bidi marks, Zl/Zp: whatever Python's repr emits, we emit.
+        Python::initialize();
+        let cases = [
+            "\u{80}",
+            "\u{9f}",
+            "\u{202e}",
+            "\u{2028}",
+            "\u{2029}",
+            "\u{200e}",
+            "\u{200f}",
+            "hello\u{2028}world",
+        ];
+        for s in cases {
+            let expected = Python::attach(|py| {
+                PyString::new(py, s)
+                    .repr()
+                    .expect("Python repr")
+                    .to_string()
+            });
+            assert_eq!(python_repr_str(s), expected, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn error_text_redacts_qk_values_and_sensitive_keys() {
+        // GraphQL errors: a qk_ message, plus token/password/apiKey fields.
+        let http = MemoryHttp::default().post(
+            "https://catalog.example.com/graphql",
+            json!({"errors": [{
+                "message": "qk_should_not_leak",
+                "access_token": "refresh_abc",
+                "PASSWORD": "hunter2",
+                "apiKey": "qk_also_hidden",
+                "SessionToken": "sts_tok",
+                "hint": "not a secret"
+            }]}),
+        );
+        match create_api_key("https://catalog.example.com", "at", "x", 90, &http) {
+            Err(RegistryError::Auth(msg)) => {
+                assert!(msg.contains("GraphQL errors:"), "{msg}");
+                assert!(!msg.contains("qk_should_not_leak"), "{msg}");
+                assert!(!msg.contains("qk_also_hidden"), "{msg}");
+                assert!(!msg.contains("refresh_abc"), "{msg}");
+                assert!(!msg.contains("hunter2"), "{msg}");
+                assert!(!msg.contains("sts_tok"), "{msg}");
+                assert!(msg.contains("<redacted>"), "{msg}");
+                assert!(msg.contains("not a secret"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // InvalidInput: same redaction on the errors list.
+        let http = MemoryHttp::default().post(
+            "https://catalog.example.com/graphql",
+            json!({"data": {"apiKeyCreate": {
+                "__typename": "InvalidInput",
+                "errors": [{
+                    "path": "name",
+                    "message": "qk_in_the_message",
+                    "token": "refresh_me"
+                }]
+            }}}),
+        );
+        match create_api_key("https://catalog.example.com", "at", "x", 90, &http) {
+            Err(RegistryError::Auth(msg)) => {
+                assert!(
+                    msg.contains("Catalog rejected apiKeyCreate input:"),
+                    "{msg}"
+                );
+                assert!(!msg.contains("qk_in_the_message"), "{msg}");
+                assert!(!msg.contains("refresh_me"), "{msg}");
+                assert!(msg.contains("<redacted>"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
