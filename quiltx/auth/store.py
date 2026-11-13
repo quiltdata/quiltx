@@ -24,9 +24,7 @@ import sys
 from pathlib import Path
 from typing import TypedDict
 
-from platformdirs import user_data_path
-
-_KEYRING_SERVICE = "quiltx"
+from quiltx.auth import _native
 
 
 class CredentialEntry(TypedDict, total=False):
@@ -66,7 +64,7 @@ def _keyring_available() -> bool:
 
 
 def _fallback_path() -> Path:
-    return user_data_path("quiltx") / "credentials.json"
+    return _native.credentials_file()
 
 
 _FILE_FALLBACK_WARNED = False
@@ -128,7 +126,7 @@ def _write_fallback(data: dict[str, CredentialEntry]) -> None:
 
 
 def _index_path() -> Path:
-    return user_data_path("quiltx") / "credentials_index.json"
+    return _native.credentials_index_file()
 
 
 def _read_index() -> list[str]:
@@ -181,7 +179,7 @@ def get(dns: str) -> CredentialEntry | None:
     if _keyring_available():
         import keyring
 
-        raw = keyring.get_password(_KEYRING_SERVICE, dns)
+        raw = keyring.get_password(*_native.keyring_entry(dns))
         if raw is None:
             return None
         try:
@@ -230,7 +228,7 @@ def store(
     if _keyring_available():
         import keyring
 
-        keyring.set_password(_KEYRING_SERVICE, dns, serialised)
+        keyring.set_password(*_native.keyring_entry(dns), serialised)
         _add_to_index(dns)
     else:
         _warn_file_fallback()
@@ -246,7 +244,7 @@ def delete(dns: str) -> None:
         import keyring.errors
 
         try:
-            keyring.delete_password(_KEYRING_SERVICE, dns)
+            keyring.delete_password(*_native.keyring_entry(dns))
         except keyring.errors.PasswordDeleteError:
             pass  # already gone — idempotent
         _remove_from_index(dns)
