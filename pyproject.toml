@@ -64,7 +64,7 @@ help = "Lint without modifying files (for CI)."
 sequence = ["sync", { shell = "black --check . && mypy quiltx tests" }]
 
 [tool.poe.tasks.bump]
-help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch]"
+help = "Bump version (default patch). Usage: ./poe bump [major|minor|patch|pre|release] [--pre a|b|rc]"
 cmd = "python scripts/bump_version.py"
 
 [tool.poe.tasks.test-all]

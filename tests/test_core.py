@@ -6,6 +6,11 @@ is the built wheel, so a broken or missing extension fails here.
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
+import quiltx
 from quiltx import _core
 from quiltx.auth import _native
 
@@ -31,3 +36,12 @@ def test_extension_is_the_compiled_module() -> None:
     # A Python file named _core.py would shadow the extension; require a
     # compiled module (an extension, not source).
     assert not (getattr(_core, "__file__", "") or "").endswith(".py")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("QUILTX_TEST_INSTALLED"),
+    reason="CI sets QUILTX_TEST_INSTALLED when testing a built wheel or sdist",
+)
+def test_suite_runs_against_the_installed_package() -> None:
+    # The release CI must test the artifact, not the source tree.
+    assert "site-packages" in quiltx.__file__

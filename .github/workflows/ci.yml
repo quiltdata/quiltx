@@ -26,6 +26,37 @@ jobs:
         env:
           UV_PYTHON: "3.14"
 
+  # The Rust crate under rust/, on every OS the wheels ship for. Python is on the
+  # PATH because PyO3 links `cargo test` against it.
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: ./.github/actions/setup-rust-minimal
+        with:
+          components: clippy,rustfmt
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  # Builds, checks and tests the five release files (see dist.yml).
+  dist:
+    uses: ./.github/workflows/dist.yml
+
   test:
     runs-on: ubuntu-latest
     strategy:

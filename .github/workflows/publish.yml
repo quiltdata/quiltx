@@ -1,5 +1,13 @@
 name: Publish
 
+# On a push to main whose version has not been released: build and check the
+# five release files, draft the GitHub release, then wait for approval before
+# tagging, promoting the draft and publishing to PyPI. Nothing is published
+# until a reviewer approves the `release-approval` environment.
+#
+# A PEP 440 pre-release version (0.24.0a1, 0.24.0rc1, 0.24.0.dev1) goes through
+# the same path, but its GitHub release is marked pre-release, and pip and uv do
+# not install it by default while a stable release exists.
 on:
   push:
     branches:
@@ -10,12 +18,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   check-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.check.outputs.version }}
       should_release: ${{ steps.check.outputs.should_release }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -26,6 +38,11 @@ jobs:
           VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" =~ (a|b|rc)[0-9]+$ || "$VERSION" =~ \.dev[0-9]+$ ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping release."
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -34,46 +51,137 @@ jobs:
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  publish:
+  # Builds, checks and tests the five release files. Publishes nothing.
+  dist:
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    environment: pypi
+    uses: ./.github/workflows/dist.yml
+    with:
+      release: true
+
+  # Everything that can be reviewed before the irreversible step: the release
+  # notes, the files, the tag it will get. The draft creates no tag.
+  draft-release:
+    needs: [check-version, dist]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
-      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.check-version.outputs.version }}
+      PRERELEASE: ${{ needs.check-version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1
+
+      - uses: actions/download-artifact@v8
         with:
-          enable-cache: true
-      - name: Build
-        run: uv build
-      - id: tag
-        name: Create and push tag
-        env:
-          VERSION: ${{ needs.check-version.outputs.version }}
+          path: dist
+          merge-multiple: true
+
+      - name: Exact file set
+        run: python3 scripts/check_dist.py dist
+
+      - name: Create the GitHub release (draft)
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          python3 scripts/release_notes.py > release-notes.md
+          # A leftover draft from an earlier failed run is ours to replace;
+          # a published release is never touched.
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || echo none)" = "true" ]; then
+            gh release delete "$TAG" --yes
+          fi
+          if [ "$PRERELEASE" = "true" ]; then
+            KIND=--prerelease
+          else
+            KIND=--latest
+          fi
+          gh release create "$TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes-file release-notes.md \
+            --draft "$KIND"
+          URL=$(gh release view "$TAG" --json url -q .url)
+          {
+            echo "## Draft release ready for review"
+            echo
+            echo "- Version: \`$VERSION\` (pre-release: $PRERELEASE)"
+            echo "- Draft: $URL"
+            echo
+            echo "Approve the \`publish\` job to tag, publish the release and upload to PyPI."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The irreversible step, behind the `release-approval` GitHub Environment
+  # (required reviewers are configured in the repository settings). Order
+  # matters, as in quilt-rs's release-crate.yaml: tag, then the GitHub release,
+  # then PyPI last; a re-run of just this job finishes whatever is left.
+  publish:
+    needs: [check-version, draft-release]
+    runs-on: ubuntu-24.04
+    environment: release-approval
+    permissions:
+      contents: write
+      id-token: write # PyPI trusted publishing; only this job gets it
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.check-version.outputs.version }}
+      PRERELEASE: ${{ needs.check-version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Exact file set
+        run: python3 scripts/check_dist.py dist
+
+      - name: Create tag
+        id: tag
         run: |
           TAG="v$VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "Release $VERSION"
           if git push origin "$TAG"; then
-            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)" = "$(git rev-parse HEAD)" ]; then
+            echo "Tag $TAG already points at this commit — a re-run of this release. Continuing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists on remote — concurrent run won. Skipping release and publish."
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG exists at a different commit — another run won. Skipping release and publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "Tag push failed for an unexpected reason." >&2
             exit 1
           fi
-      - name: Create GitHub Release
-        if: steps.tag.outputs.pushed == 'true'
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: v${{ needs.check-version.outputs.version }}
-          generate_release_notes: true
-          files: dist/*
+
+      - name: Publish the GitHub release
+        if: steps.tag.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
+
       - name: Publish to PyPI
-        if: steps.tag.outputs.pushed == 'true'
+        if: steps.tag.outputs.publish == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          # So re-running this job after a partial upload finishes the upload.
+          skip-existing: true
+
+  # The published files, installed from PyPI on every platform.
+  verify:
+    needs: [check-version, publish]
+    uses: ./.github/workflows/verify-published.yml
+    with:
+      version: ${{ needs.check-version.outputs.version }}
+      prerelease: ${{ needs.check-version.outputs.prerelease == 'true' }}

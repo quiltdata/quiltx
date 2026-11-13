@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Authentication code moved into the `quiltx.auth` subpackage (`resolve`, `store`, `registry`, `session`). `quiltx.credentials` and `quiltx.quilt_auth` still import and are the same modules as `quiltx.auth.store` and `quiltx.auth.registry`; behaviour is unchanged
+- quiltx is built with maturin and ships a small Rust extension, `quiltx._core` (nothing uses it yet). Releases are now platform wheels (`cp310-abi3` for Linux x86_64 and aarch64, macOS universal2 and Windows x86_64) plus an sdist, so installing on another platform, or on musl Linux, builds from the sdist and needs a Rust toolchain (1.85+). Developing from a checkout needs Rust too
+- The release workflow builds and checks exactly those five files, drafts the GitHub release, and publishes only after the `release-approval` environment approves
+- `./poe bump` can start and advance PEP 440 pre-releases (`--pre a`, `pre`, `release`)
+
 ## [0.23.1] - 2026-10-20
 
 ### Fixed

@@ -2,7 +2,7 @@
 
 ## Developer Setup
 
-- Setup: `./poe setup` (install deps + hooks)
+- Setup: `./poe setup` (install deps + hooks). **A Rust toolchain (1.85+, [rustup](https://rustup.rs)) is required**: quiltx builds a small PyO3 extension, `quiltx._core`, from [`rust/`](rust/) with [maturin](https://www.maturin.rs), and `uv sync` compiles it.
 - Run tests: `./poe test` (unit) or `./poe test-all` (full suite)
 - Run from repo: `./poe run <tool>` (e.g., `./poe run config --help`)
 
@@ -302,14 +302,57 @@ same rule, so a public-API caller does not silently lose email-keyed entries.
 
 Functions for catalog configuration and credentials. Use `from quiltx.config import` for programmatic access.
 
+## Layout notes
+
+### Auth (`quiltx.auth`)
+
+All catalog authentication lives in the `quiltx/auth/` subpackage: `resolve`
+(the API-key resolver; its public names are re-exported from `quiltx.auth`),
+`store` (OS keyring / 0600 file fallback), `registry` (HTTP to a catalog's
+registry; never imports quilt3), `session` (registry-issued STS credentials; the
+only auth module that imports quilt3) and `_native` (the only importer of the
+Rust extension). `quiltx.credentials` and `quiltx.quilt_auth` are aliases of
+`store` and `registry` for external importers; in-repo code and tests import
+from `quiltx.auth`. `quilt3_facade` re-exports the `session` names.
+
+### Rust extension (`quiltx._core`)
+
+[`rust/`](rust/) is crate `quiltx-core`: PyO3 0.30 with `abi3-py310`, one wheel per
+platform for every CPython 3.10+. Today it exposes `core_version()` and `ping()`
+and nothing depends on it; it is the seam where Rust-backed code lands.
+`./poe test` and `cargo test --locked` (in `rust/`) cover it. Set `pyo3/extension-module`
+only through `[tool.maturin] features` so `cargo test` can still link.
+
 ## Publishing Releases
 
-1. Update `version` in [pyproject.toml](pyproject.toml), [quiltx/_version.py](quiltx/_version.py) and [CHANGELOG.md](CHANGELOG.md)
+1. Bump the version: `./poe bump [major|minor|patch]`, or for a pre-release
+   `./poe bump minor --pre a` (0.23.1 -> 0.24.0a1), then `./poe bump pre` (a1 -> a2)
+   and `./poe bump release` (-> 0.24.0). Update [CHANGELOG.md](CHANGELOG.md).
 2. Merge to `main`
 
 On each push to `main`, [.github/workflows/publish.yml](.github/workflows/publish.yml)
-checks whether a `v$VERSION` tag already exists. If not, it builds, tags, creates the
-GitHub release, and publishes to PyPI. If the tag already exists, the run is a no-op —
-so only version bumps trigger a release.
+checks whether a `v$VERSION` tag already exists. If it does, the run is a no-op, so
+only version bumps trigger a release. Otherwise:
+
+1. `dist` ([dist.yml](.github/workflows/dist.yml)) builds, checks and tests exactly five
+   files: an sdist and `cp310-abi3` wheels for Linux x86_64 and aarch64 (manylinux2014),
+   macOS (one `universal2` wheel) and Windows x86_64. There is no musllinux wheel; Alpine
+   installs from the sdist and needs Rust. [`scripts/check_dist.py`](scripts/check_dist.py)
+   fails the run unless that set is exactly right.
+2. `draft-release` creates a **draft** GitHub release with those files.
+3. `publish` waits for approval of the `release-approval` GitHub Environment, then tags,
+   publishes the release and uploads to PyPI via trusted publishing.
+4. `verify` ([verify-published.yml](.github/workflows/verify-published.yml)) installs the
+   release from PyPI on every platform.
+
+**Before the first release from this workflow**, in the repository settings: create the
+`release-approval` Environment with required reviewers (a workflow that names a missing
+environment creates it *without* reviewers, and the release would then proceed unapproved),
+and point quiltx's PyPI trusted publisher at that environment name if it pins one.
+
+A PEP 440 pre-release (`0.24.0a1`) takes the same path with its GitHub release marked
+pre-release. pip and uv do not install it by default while a stable release exists, so it
+is a safe way to try the whole pipeline. PyPI never lets a filename be reused: a failed
+attempt costs a version number (`a1`, then `a2`).
 
 `./poe tag` remains available for manual/local tagging if ever needed.
