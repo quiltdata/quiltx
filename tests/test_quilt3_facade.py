@@ -279,6 +279,63 @@ def test_catalog_sts_account_id_fails_on_incomplete_credentials(monkeypatch) -> 
         quilt3_facade.catalog_sts_account_id()
 
 
+def test_catalog_sts_http_error_names_the_status_and_registry(monkeypatch) -> None:
+    import pytest
+    from types import ModuleType
+
+    class _HttpErrorResponse:
+        status_code = 401
+
+        def json(self) -> dict:
+            raise AssertionError("4xx body must not be parsed")
+
+    calls: dict[str, object] = {}
+    fake_session = ModuleType("quilt3.session")
+
+    def get_registry_url() -> str:
+        return "https://registry.example.com"
+
+    def get_session() -> object:
+        class _Http:
+            def get(self, url: str) -> _HttpErrorResponse:
+                calls["url"] = url
+                return _HttpErrorResponse()
+
+        return _Http()
+
+    fake_session.get_registry_url = get_registry_url  # type: ignore[attr-defined]
+    fake_session.get_session = get_session  # type: ignore[attr-defined]
+    fake_quilt3 = ModuleType("quilt3")
+    fake_quilt3.session = fake_session  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "quilt3", fake_quilt3)
+    monkeypatch.setitem(__import__("sys").modules, "quilt3.session", fake_session)
+
+    with pytest.raises(
+        quilt3_facade.CatalogCredentialsError, match="HTTP 401"
+    ) as raised:
+        quilt3_facade.catalog_botocore_session()
+    text = str(raised.value)
+    assert "did not issue credentials" not in text
+    assert "https://registry.example.com/api/auth/get_credentials" in text
+    assert calls["url"] == "https://registry.example.com/api/auth/get_credentials"
+
+
+def test_catalog_sts_transport_exception_is_wrapped(monkeypatch) -> None:
+    """A raw transport failure is wrapped; the original message is preserved."""
+    import pytest
+
+    _install_fake_quilt3_session(
+        monkeypatch,
+        credentials_payload=None,
+        resolved_method=quilt3_facade.QUILT_CREDENTIALS_METHOD,
+    )
+    with pytest.raises(
+        quilt3_facade.CatalogCredentialsError,
+        match="did not issue credentials: Authentication failed",
+    ):
+        quilt3_facade.catalog_botocore_session()
+
+
 def test_admin_graphql_returns_the_data_payload(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 

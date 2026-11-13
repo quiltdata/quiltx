@@ -1,8 +1,9 @@
 """The pre-Rust Python implementations, kept verbatim as the parity oracle.
 
 ``quiltx.identity.normalize_dns``, the credential-path / file-store / keyring
-lookups in ``quiltx.auth.store``, and the registry HTTP in
-``quiltx.auth.registry`` now call ``quiltx._core``. The functions here are the
+lookups in ``quiltx.auth.store``, the registry HTTP in
+``quiltx.auth.registry``, and the STS mint in
+``quiltx.auth.session`` now call ``quiltx._core``. The functions here are the
 Python they replaced, so ``tests/test_core_parity.py`` can run old and new on
 the same inputs. Nothing under ``quiltx/`` imports this module.
 """
@@ -631,3 +632,34 @@ def bootstrap_api_key_from_refresh_token(
     return create_api_key(
         registry_url, access_token, name=name, expires_in_days=expires_in_days
     )
+
+
+from quiltx.auth.session import CatalogCredentialsError
+
+
+def _sts_get_json(url: str) -> Any:
+    """Placeholder the parity tests patch; the production helper is in session.py."""
+    raise AssertionError(f"tests must patch oracle._sts_get_json, got {url}")
+
+
+def mint_registry_credentials(registry_url: str) -> dict[str, Any]:
+    """GET ``<registry_url>/api/auth/get_credentials`` and map the STS payload.
+
+    The HTTP call and dict mapping from ``quiltx.auth.session._mint_registry_credentials``
+    at the #154 merge, with the transport left injectable so the parity
+    tests can use recorded responses (the quilt3 session lookup stays in
+    the Python facade).
+    """
+    url = registry_url.rstrip("/") + "/api/auth/get_credentials"
+    payload = _sts_get_json(url)
+    try:
+        return {
+            "access_key": payload["AccessKeyId"],
+            "secret_key": payload["SecretAccessKey"],
+            "token": payload["SessionToken"],
+            "expiry_time": payload["Expiration"],
+        }
+    except (KeyError, TypeError) as exc:
+        raise CatalogCredentialsError(
+            f"registry {registry_url} returned no usable credentials"
+        ) from exc

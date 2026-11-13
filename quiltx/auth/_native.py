@@ -175,3 +175,8 @@ def create_api_key(
 def validate_api_key(registry_url: str, api_key: str) -> None:
     """Confirm *api_key* is accepted; *registry_url* is already resolved."""
     _core.validate_api_key(registry_url, api_key)
+
+
+def mint_registry_credentials(registry_url: str) -> dict:
+    """GET ``<registry_url>/api/auth/get_credentials`` and map the STS payload."""
+    return _core.mint_registry_credentials(registry_url)

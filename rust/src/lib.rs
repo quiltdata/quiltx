@@ -27,6 +27,7 @@ use serde_json::{Map, Number, Value};
 pub mod dns;
 pub mod paths;
 pub mod registry;
+pub mod session;
 pub mod store;
 
 /// Version of this Rust crate, from `Cargo.toml` (not the Python package version).
@@ -109,6 +110,26 @@ fn catalog_auth_error(py: Python<'_>, msg: &str) -> PyResult<PyErr> {
     Ok(PyErr::from_value(inst))
 }
 
+fn session_err(e: session::SessionError) -> PyErr {
+    match e {
+        session::SessionError::Credentials(msg) => {
+            Python::attach(|py| match catalog_credentials_error(py, &msg) {
+                Ok(err) => err,
+                Err(err) => err,
+            })
+        }
+        session::SessionError::Py(e) => e,
+    }
+}
+
+fn catalog_credentials_error(py: Python<'_>, msg: &str) -> PyResult<PyErr> {
+    let inst = py
+        .import("quiltx.auth.session")?
+        .getattr("CatalogCredentialsError")?
+        .call1((msg,))?;
+    Ok(PyErr::from_value(inst))
+}
+
 struct PythonHttp;
 
 impl registry::HttpClient for PythonHttp {
@@ -160,6 +181,22 @@ impl registry::HttpClient for PythonHttp {
     }
 }
 
+struct SessionHttp;
+
+impl session::HttpClient for SessionHttp {
+    fn get_json(&self, url: &str) -> Result<serde_json::Value, session::SessionError> {
+        Python::initialize();
+        Python::attach(|py| {
+            let obj = py
+                .import("quiltx.auth.session")
+                .and_then(|m| m.getattr("_get_json"))
+                .and_then(|f| f.call1((url,)))
+                .map_err(session::SessionError::Py)?;
+            session_json_from_response(url, &obj)
+        })
+    }
+}
+
 /// Resolve the registry API base URL from ``<catalog_url>/config.json``.
 #[pyfunction]
 fn resolve_registry_url(catalog_url: &str) -> PyResult<String> {
@@ -207,6 +244,14 @@ fn create_api_key(
 #[pyfunction]
 fn validate_api_key(registry_url: &str, api_key: &str) -> PyResult<()> {
     registry::validate_api_key(registry_url, api_key, &PythonHttp).map_err(registry_err)
+}
+
+/// Fetch temporary STS credentials from ``<registry_url>/api/auth/get_credentials``.
+#[pyfunction]
+fn mint_registry_credentials(py: Python<'_>, registry_url: &str) -> PyResult<Py<PyDict>> {
+    let map =
+        session::mint_registry_credentials(registry_url, &SessionHttp).map_err(session_err)?;
+    Ok(map_to_py(py, &map)?.unbind())
 }
 
 fn map_to_py<'py>(py: Python<'py>, map: &Map<String, Value>) -> PyResult<Bound<'py, PyDict>> {
@@ -278,6 +323,24 @@ fn json_from_response(
                 )))
             } else {
                 Err(registry::RegistryError::Py(err))
+            }
+        }),
+    }
+}
+
+fn session_json_from_response(
+    url: &str,
+    obj: &Bound<'_, PyAny>,
+) -> Result<serde_json::Value, session::SessionError> {
+    match py_to_json(obj) {
+        Ok(value) => Ok(value),
+        Err(err) => Python::attach(|py| {
+            if err.is_instance_of::<PyValueError>(py) {
+                Err(session::SessionError::Credentials(format!(
+                    "Unexpected response from {url}: {err}"
+                )))
+            } else {
+                Err(session::SessionError::Py(err))
             }
         }),
     }
@@ -596,6 +659,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(create_api_key, m)?)?;
     m.add_function(wrap_pyfunction!(validate_api_key, m)?)?;
+    m.add_function(wrap_pyfunction!(mint_registry_credentials, m)?)?;
     Ok(())
 }
 
