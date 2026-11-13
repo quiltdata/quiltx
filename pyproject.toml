@@ -12,7 +12,10 @@ keywords = ["quiltx", "tools"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent"
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Rust",
 ]
 dependencies = [
   "keyring>=24.0",
@@ -90,11 +93,26 @@ quiltx = "quiltx.cli:main"
 Homepage = "https://github.com/ernest/quiltx"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
-[tool.hatch.build.targets.wheel]
-packages = ["quiltx"]
+[tool.maturin]
+manifest-path = "rust/Cargo.toml"
+module-name = "quiltx._core"
+python-source = "."
+# Adds pyo3/extension-module to the wheel build only (see rust/Cargo.toml).
+features = ["pyo3/extension-module"]
+# A local build runs after the tests have written bytecode; never ship it.
+exclude = ["**/__pycache__/**", "**/*.pyc"]
+
+[tool.uv]
+# Rebuild the editable install when the Rust sources change.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "rust/Cargo.toml" },
+  { file = "rust/Cargo.lock" },
+  { file = "rust/**/*.rs" },
+]
 
 [tool.black]
 line-length = 88
