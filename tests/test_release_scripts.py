@@ -129,6 +129,8 @@ def make_dist(directory: Path) -> None:
         directory / f"{prefix}manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
         "quiltx/_core.abi3.so",
     )
+    for arch in ("x86_64", "aarch64"):
+        _wheel(directory / f"{prefix}musllinux_1_2_{arch}.whl", "quiltx/_core.abi3.so")
     _wheel(
         directory
         / f"{prefix}macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64.whl",
@@ -139,7 +141,7 @@ def make_dist(directory: Path) -> None:
     _sdist(directory / f"quiltx-{VERSION}.tar.gz")
 
 
-def test_check_dist_accepts_exactly_the_five_files(tmp_path: Path) -> None:
+def test_check_dist_accepts_exactly_the_seven_files(tmp_path: Path) -> None:
     make_dist(tmp_path)
     assert check.check_dist(tmp_path, VERSION) == []
 
@@ -151,11 +153,40 @@ def test_check_dist_flags_a_missing_wheel(tmp_path: Path) -> None:
     assert problems == ["expected exactly one windows x86_64 file, found none"]
 
 
-def test_check_dist_flags_a_musllinux_or_other_extra_file(tmp_path: Path) -> None:
+def test_check_dist_flags_an_extra_file(tmp_path: Path) -> None:
     make_dist(tmp_path)
-    name = f"quiltx-{VERSION}-cp310-abi3-musllinux_1_2_x86_64.whl"
-    _wheel(tmp_path / name, "quiltx/_core.abi3.so")
+    name = f"quiltx-{VERSION}-cp310-abi3-win_arm64.whl"
+    _wheel(tmp_path / name, "quiltx/_core.pyd")
     assert check.check_dist(tmp_path, VERSION) == [f"unexpected file: {name}"]
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "aarch64"])
+def test_check_dist_flags_a_missing_musllinux_wheel(tmp_path: Path, arch: str) -> None:
+    make_dist(tmp_path)
+    next(tmp_path.glob(f"*musllinux_1_2_{arch}.whl")).unlink()
+    problems = check.check_dist(tmp_path, VERSION)
+    assert problems == [
+        f"expected exactly one linux {arch} (musllinux_1_2) file, found none"
+    ]
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        "musllinux_1_1_x86_64",  # older musl baseline than promised
+        "musllinux_1_2_x86_64.manylinux_2_17_x86_64",  # a mislabelled glibc build
+    ],
+)
+def test_check_dist_flags_a_wrong_musllinux_tag(tmp_path: Path, wrong: str) -> None:
+    make_dist(tmp_path)
+    next(tmp_path.glob("*musllinux_1_2_x86_64.whl")).unlink()
+    name = f"quiltx-{VERSION}-cp310-abi3-{wrong}.whl"
+    _wheel(tmp_path / name, "quiltx/_core.abi3.so")
+    problems = check.check_dist(tmp_path, VERSION)
+    assert (
+        "expected exactly one linux x86_64 (musllinux_1_2) file, found none" in problems
+    )
+    assert f"unexpected file: {name}" in problems
 
 
 def test_check_dist_flags_a_thin_macos_wheel(tmp_path: Path) -> None:
@@ -189,8 +220,8 @@ def test_check_dist_flags_a_missing_extension_and_a_rustless_sdist(
 def test_check_dist_flags_the_wrong_version(tmp_path: Path) -> None:
     make_dist(tmp_path)
     problems = check.check_dist(tmp_path, "0.24.0")
-    assert len([p for p in problems if p.startswith("expected exactly one")]) == 5
-    assert len([p for p in problems if p.startswith("unexpected file")]) == 5
+    assert len([p for p in problems if p.startswith("expected exactly one")]) == 7
+    assert len([p for p in problems if p.startswith("unexpected file")]) == 7
 
 
 def test_check_dist_flags_a_version_that_disagrees_inside_the_files(

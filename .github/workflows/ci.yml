@@ -53,7 +53,7 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  # Builds, checks and tests the five release files (see dist.yml).
+  # Builds, checks and tests the seven release files (see dist.yml).
   dist:
     uses: ./.github/workflows/dist.yml
 

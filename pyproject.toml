@@ -80,7 +80,7 @@ cmd = "python scripts/release_notes.py"
 quiltx = "quiltx.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ernest/quiltx"
+Homepage = "https://github.com/quiltdata/quiltx"
 
 [build-system]
 requires = ["maturin>=1.7,<2"]

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Check that a directory holds exactly the quiltx release artifacts.
 
-A release is five files and no others:
+A release is seven files and no others:
 
 * ``quiltx-<v>.tar.gz`` (sdist)
 * ``quiltx-<v>-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl``
 * ``quiltx-<v>-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl``
+* ``quiltx-<v>-cp310-abi3-musllinux_1_2_x86_64.whl`` (Alpine and other musl Linux)
+* ``quiltx-<v>-cp310-abi3-musllinux_1_2_aarch64.whl``
 * ``quiltx-<v>-cp310-abi3-macosx_10_12_universal2...whl`` (arm64 + x86_64 in one file,
   macOS 10.12+ on Intel, 11+ on Apple silicon)
 * ``quiltx-<v>-cp310-abi3-win_amd64.whl``
@@ -48,6 +50,12 @@ def expected_patterns(version: str) -> dict[str, str]:
         "linux aarch64 (manylinux2014)": (
             rf"quiltx-{v}-cp310-abi3-"
             r"manylinux2014_aarch64\.manylinux_2_17_aarch64\.whl"
+        ),
+        "linux x86_64 (musllinux_1_2)": (
+            rf"quiltx-{v}-cp310-abi3-musllinux_1_2_x86_64\.whl"
+        ),
+        "linux aarch64 (musllinux_1_2)": (
+            rf"quiltx-{v}-cp310-abi3-musllinux_1_2_aarch64\.whl"
         ),
         # The build pins MACOSX_DEPLOYMENT_TARGET=10.12 (dist.yml), so a runner
         # image change cannot silently move the floor. maturin also lists the

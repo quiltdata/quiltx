@@ -1,7 +1,7 @@
 name: Publish
 
 # On a push to main whose version has not been released: build and check the
-# five release files, draft the GitHub release, then wait for approval before
+# seven release files, draft the GitHub release, then wait for approval before
 # tagging, promoting the draft and publishing to PyPI. Nothing is published
 # until a reviewer approves the `release-approval` environment.
 #
@@ -61,7 +61,7 @@ jobs:
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  # Builds, checks and tests the five release files. Publishes nothing.
+  # Builds, checks and tests the seven release files. Publishes nothing.
   dist:
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'

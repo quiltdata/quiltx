@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.85"
 description = "Rust core of quiltx, exposed to Python as quiltx._core"
 license = "Apache-2.0"
+repository = "https://github.com/quiltdata/quiltx"
 publish = false
 
 [lib]

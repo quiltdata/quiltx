@@ -334,11 +334,13 @@ On each push to `main`, [.github/workflows/publish.yml](.github/workflows/publis
 checks whether a `v$VERSION` tag already exists. If it does, the run is a no-op, so
 only version bumps trigger a release. Otherwise:
 
-1. `dist` ([dist.yml](.github/workflows/dist.yml)) builds, checks and tests exactly five
-   files: an sdist and `cp310-abi3` wheels for Linux x86_64 and aarch64 (manylinux2014),
-   macOS (one `universal2` wheel) and Windows x86_64. There is no musllinux wheel; Alpine
-   installs from the sdist and needs Rust. [`scripts/check_dist.py`](scripts/check_dist.py)
-   fails the run unless that set is exactly right.
+1. `dist` ([dist.yml](.github/workflows/dist.yml)) builds, checks and tests exactly seven
+   files: an sdist and `cp310-abi3` wheels for Linux x86_64 and aarch64 on glibc
+   (manylinux2014) and on musl (musllinux_1_2, for Alpine), macOS (one `universal2` wheel)
+   and Windows x86_64. The musl wheels are built in the rust-cross musllinux containers
+   (natively on the arm runner) and tested by installing them in `python:3.10-alpine` and
+   `python:3.14-alpine` containers on both architectures. [`scripts/check_dist.py`](scripts/check_dist.py)
+   fails the run unless that set is exactly right (names, platform tags, contents, versions).
 2. `draft-release` creates a **draft** GitHub release with those files.
 3. `publish` waits for approval of the `release-approval` GitHub Environment, then tags,
    publishes the release and uploads to PyPI via trusted publishing.
@@ -374,7 +376,7 @@ see the tag and stop, and the retained outputs and artifacts are what the later 
 | `dist` or `draft-release` | Nothing is public: no tag, no PyPI upload; at most a draft | Fix and push to `main` again (same version). A leftover draft for the tag is replaced. |
 | `publish`, before the tag | Nothing is public | Re-run failed jobs. |
 | `publish`, after the tag, before the release or PyPI | Tag exists, release still a draft | Re-run failed jobs: the tag step sees the tag at this commit and carries on, `gh release edit` is repeatable, and the PyPI upload uses `skip-existing`, so a partial upload is completed. |
-| `publish`, PyPI failed, release already public | GitHub release is out, PyPI has none or some of the five files | Same: re-run failed jobs. If the run's artifacts have expired, download the five files from the GitHub release assets into an empty `dist/`, run `python scripts/check_dist.py dist`, and upload with `twine upload --skip-existing dist/*` using a PyPI token for a maintainer (the trusted publisher only works from the workflow). |
+| `publish`, PyPI failed, release already public | GitHub release is out, PyPI has none or some of the seven files | Same: re-run failed jobs. If the run's artifacts have expired, download the seven files from the GitHub release assets into an empty `dist/`, run `python scripts/check_dist.py dist`, and upload with `twine upload --skip-existing dist/*` using a PyPI token for a maintainer (the trusted publisher only works from the workflow). |
 | PyPI rejected a file, or a bad file got through | A filename is spent for good, even if deleted | Do not delete and re-upload. Fix forward: `./poe bump patch` (or `pre`), release that, and say in the old GitHub release that it is superseded (mark it pre-release). Yank the bad PyPI release if users could pick it up. |
 | `verify` failed | Everything is published | Usually index lag or a wheel that does not run on one platform. Re-run `verify-published.yml` by hand (Actions -> Verify published) with the version; if a platform really fails, fix forward as above. |
 | The tag points at the wrong commit | | Never move or delete a tag whose version is on PyPI. If nothing reached PyPI, delete the tag and the draft or release together, then push to `main` again. |

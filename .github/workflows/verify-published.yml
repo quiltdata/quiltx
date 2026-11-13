@@ -1,4 +1,4 @@
-# Installs a published quiltx from PyPI on every platform and checks that it
+# Installs a published quiltx from PyPI on every platform (including Alpine/musl) and checks that it
 # works and that it is installed (or not) by default as intended. Run by
 # publish.yml after a release, or by hand for any version.
 name: Verify published
@@ -94,3 +94,50 @@ jobs:
           else
             test "$GOT" = "$VERSION" || { echo "::error::plain install got $GOT, expected $VERSION"; exit 1; }
           fi
+
+  # Alpine (musl): the musllinux wheel must be what pip picks, with no compiler.
+  # Run through `docker run` because the runner's own node is glibc.
+  verify-musl:
+    name: verify (${{ matrix.runner }}, py${{ matrix.python }}, alpine)
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        python: ["3.10", "3.14"]
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ inputs.version }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      IMAGE: python:${{ matrix.python }}-alpine
+    steps:
+      - name: Install from PyPI in Alpine and import the extension
+        run: |
+          cat > alpine-verify.sh <<'SH'
+          set -eu
+          python -m venv /venv
+          . /venv/bin/activate
+          # --only-binary=quiltx: a missing musllinux wheel is a failure, not a
+          # silent build from the sdist. PyPI and its CDN take a while to show a new release.
+          for attempt in $(seq 1 20); do
+            if pip install --no-cache-dir --only-binary=quiltx "quiltx==$VERSION"; then
+              break
+            fi
+            [ "$attempt" -lt 20 ] || { echo "::error::quiltx $VERSION never became installable as a wheel"; exit 1; }
+            echo "quiltx $VERSION not installable yet (attempt $attempt); waiting"
+            sleep 30
+          done
+          pip show -f quiltx | grep -E '^(Version|Location)|_core'
+          cd /tmp
+          python - <<'PY'
+          import os
+          import quiltx
+          from quiltx import _core
+
+          assert quiltx.__version__ == os.environ["VERSION"], quiltx.__version__
+          assert _core.ping("pypi") == "pong:pypi"
+          print("ok", quiltx.__version__, _core.core_version())
+          PY
+          pip download --no-cache-dir --no-deps -d /tmp/dl "quiltx==$VERSION" --only-binary=:all:
+          ls /tmp/dl | grep -q musllinux_1_2 || { echo "::error::pip did not choose the musllinux wheel"; exit 1; }
+          SH
+          docker run --rm -e VERSION -v "$PWD/alpine-verify.sh:/alpine-verify.sh:ro" "$IMAGE" sh /alpine-verify.sh
