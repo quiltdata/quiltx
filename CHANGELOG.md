@@ -8,7 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-13
+
 ### Changed
+
+- The rest of quiltx authentication now runs in Rust (`quiltx._core`), completing [#150](https://github.com/quiltdata/quiltx/issues/150) ([#152](https://github.com/quiltdata/quiltx/pull/152)–[#156](https://github.com/quiltdata/quiltx/pull/156)): the file-backed store and keyring orchestration, registry HTTP protocol, STS `get_credentials`, and the post-lookup choice between a CLI prompt and the headless error. HTTP transport, the `keyring` package, prompts, the browser login, and the botocore session stay in Python. On well-formed input the login, stored API keys, and catalog STS session are unchanged
 
 - The 0600 `credentials.json` fallback and the `credentials_index.json` I/O now run in Rust (`quiltx._core`). The OS keyring backend is unchanged. Writes use a temp file and rename, still at mode 0600 (fallback) or the process umask (index), and still with Windows CRLF as Python's text-mode writes. The rename replaces a symlinked destination, and a hand-set mode on the index is reset to the process umask. `tests/test_core_parity.py` compares bytes with the old Python
 - A missing file, or invalid or truncated JSON that Python's `json.loads` already treated as empty (including `-NaN` and `{"a":NaN`), still reads as empty. A file that exists but is invalid UTF-8 raises `UnicodeDecodeError`. JSON that Python would parse but this parser cannot (`NaN`/`Infinity`, a lone surrogate as a value or a key, nesting deeper than 128) raises `ValueError` so a later write cannot replace it. Out-of-range floats (`1e400`) and large integers are read
