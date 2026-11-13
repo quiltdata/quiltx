@@ -1,6 +1,9 @@
 """API-key resolver for quiltx.
 
-Returns ``(api_key, source)`` given a catalog and context.
+Returns ``(api_key, source)`` given a catalog and context. This module
+reads flags, env, the store, and the TTY, and runs ``mint_api_key`` for
+the interactive path. After those lookups miss, ``quiltx._core.resolve_credentials``
+decides only between a CLI prompt and the headless error.
 
 CLI ladder ([05 §4]):
   1. --api-key flag
@@ -28,6 +31,7 @@ import os
 import sys
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
+from quiltx.auth import _native
 from quiltx.auth import store as credentials
 
 if TYPE_CHECKING:
@@ -54,6 +58,23 @@ def _no_prompt_active(args: object | None) -> bool:
     return False
 
 
+def _stored_api_key(dns: str, *, skip_keyring: bool) -> str | None:
+    """Read the store only when a flag and env key have already missed.
+
+    A missing entry, or a stored ``api_key`` of ``None``, is a miss
+    (``null`` falls through). An empty string is still a hit, as before.
+    """
+    if skip_keyring:
+        return None
+    stored = credentials.get(dns)
+    if stored is None:
+        return None
+    key = stored["api_key"]
+    if key is None:
+        return None
+    return key
+
+
 def resolve_cli(
     catalog: "Catalog",
     args: object | None = None,
@@ -67,7 +88,9 @@ def resolve_cli(
     """
     dns = catalog.catalog_name
 
-    # 1. Flag
+    # 1. Flag — truthy check, so "" falls through. Do not touch the store
+    # or stdin; a closed or missing stdin must not block a flag hit, and
+    # a store error must not fire when a flag (or env key) is present.
     api_key_flag = getattr(args, "api_key", None)
     if api_key_flag:
         return ResolvedCredentials(api_key_flag, "flag")
@@ -78,20 +101,28 @@ def resolve_cli(
         return ResolvedCredentials(env_key, "env")
 
     # 3. Keyring (skipped on retry after auth failure)
-    if not skip_keyring:
-        stored = credentials.get(dns)
-        if stored is not None:
-            return ResolvedCredentials(stored["api_key"], "keyring")
+    stored_key = _stored_api_key(dns, skip_keyring=skip_keyring)
+    if stored_key is not None:
+        return ResolvedCredentials(stored_key, "keyring")
 
-    # 4. Interactive auth flow
-    if _no_prompt_active(args) or not sys.stdin.isatty():
-        raise CredentialError(
-            f"No API key available for {dns}. "
-            "Provide --api-key, set QUILTX_API_KEY, "
-            f"or run `quiltx catalog api-key --catalog {dns}` interactively."
-        )
+    # 4. Interactive auth flow — only after flag, env, and store missed.
+    allow_interactive = not _no_prompt_active(args) and sys.stdin.isatty()
+    result = _native.resolve_credentials(
+        dns,
+        None,
+        None,
+        None,
+        skip_keyring,
+        allow_interactive,
+        "cli",
+    )
+    if result["status"] == "found":
+        # Dead branch kept for now: the wrappers already returned any
+        # flag, env, or store hit, so Rust only decides need_interactive
+        # versus the headless error.
+        return ResolvedCredentials(result["api_key"], result["source"])
 
-    if skip_keyring:
+    if result["rejected"]:
         print(
             f"Stored API key for {dns} was rejected.",
             file=sys.stderr,
@@ -126,7 +157,8 @@ def resolve_api(
     """
     dns = catalog.catalog_name
 
-    # 1. Constructor kwarg
+    # 1. Constructor kwarg — same truthy check as before, so a non-string
+    # (bytes, int) still passes through, and "" falls through.
     if api_key:
         return ResolvedCredentials(api_key, "flag")
 
@@ -136,13 +168,19 @@ def resolve_api(
         return ResolvedCredentials(env_key, "env")
 
     # 3. Keyring
-    if not skip_keyring:
-        stored = credentials.get(dns)
-        if stored is not None:
-            return ResolvedCredentials(stored["api_key"], "keyring")
+    stored_key = _stored_api_key(dns, skip_keyring=skip_keyring)
+    if stored_key is not None:
+        return ResolvedCredentials(stored_key, "keyring")
 
-    raise CredentialError(
-        f"No API key available for {dns}. "
-        "Pass api_key=... to Catalog.from_dns, set QUILTX_API_KEY, "
-        "or run a CLI command first to store one."
+    # Dead found path kept for now: flag, env, and store already missed,
+    # so Rust should only raise the headless CredentialError.
+    result = _native.resolve_credentials(
+        dns,
+        None,
+        None,
+        None,
+        skip_keyring,
+        False,
+        "api",
     )
+    return ResolvedCredentials(result["api_key"], result["source"])

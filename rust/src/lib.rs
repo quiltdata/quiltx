@@ -27,6 +27,7 @@ use serde_json::{Map, Number, Value};
 pub mod dns;
 pub mod paths;
 pub mod registry;
+pub mod resolve;
 pub mod session;
 pub mod store;
 
@@ -126,6 +127,14 @@ fn catalog_credentials_error(py: Python<'_>, msg: &str) -> PyResult<PyErr> {
     let inst = py
         .import("quiltx.auth.session")?
         .getattr("CatalogCredentialsError")?
+        .call1((msg,))?;
+    Ok(PyErr::from_value(inst))
+}
+
+fn credential_error(py: Python<'_>, msg: &str) -> PyResult<PyErr> {
+    let inst = py
+        .import("quiltx.auth.resolve")?
+        .getattr("CredentialError")?
         .call1((msg,))?;
     Ok(PyErr::from_value(inst))
 }
@@ -252,6 +261,50 @@ fn mint_registry_credentials(py: Python<'_>, registry_url: &str) -> PyResult<Py<
     let map =
         session::mint_registry_credentials(registry_url, &SessionHttp).map_err(session_err)?;
     Ok(map_to_py(py, &map)?.unbind())
+}
+
+/// Resolve an API key from already-read flag, env, and store inputs.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn resolve_credentials(
+    py: Python<'_>,
+    dns: &str,
+    provided: Option<&str>,
+    env_key: Option<&str>,
+    stored_key: Option<&str>,
+    skip_keyring: bool,
+    allow_interactive: bool,
+    mode: &str,
+) -> PyResult<Py<PyDict>> {
+    match resolve::resolve_credentials(
+        dns,
+        provided,
+        env_key,
+        stored_key,
+        skip_keyring,
+        allow_interactive,
+        mode,
+    ) {
+        resolve::ResolveResult::Found { api_key, source } => {
+            let dict = PyDict::new(py);
+            dict.set_item("status", "found")?;
+            dict.set_item("api_key", api_key)?;
+            dict.set_item("source", source)?;
+            Ok(dict.unbind())
+        }
+        resolve::ResolveResult::NeedInteractive { rejected } => {
+            let dict = PyDict::new(py);
+            dict.set_item("status", "need_interactive")?;
+            dict.set_item("rejected", rejected)?;
+            Ok(dict.unbind())
+        }
+        resolve::ResolveResult::Error(msg) => {
+            Err(Python::attach(|py| match credential_error(py, &msg) {
+                Ok(err) => err,
+                Err(err) => err,
+            }))
+        }
+    }
 }
 
 fn map_to_py<'py>(py: Python<'py>, map: &Map<String, Value>) -> PyResult<Bound<'py, PyDict>> {
@@ -660,6 +713,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_api_key, m)?)?;
     m.add_function(wrap_pyfunction!(validate_api_key, m)?)?;
     m.add_function(wrap_pyfunction!(mint_registry_credentials, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_credentials, m)?)?;
     Ok(())
 }
 

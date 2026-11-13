@@ -180,3 +180,24 @@ def validate_api_key(registry_url: str, api_key: str) -> None:
 def mint_registry_credentials(registry_url: str) -> dict:
     """GET ``<registry_url>/api/auth/get_credentials`` and map the STS payload."""
     return _core.mint_registry_credentials(registry_url)
+
+
+def resolve_credentials(
+    dns: str,
+    provided: str | None,
+    env_key: str | None,
+    stored_key: str | None,
+    skip_keyring: bool,
+    allow_interactive: bool,
+    mode: str,
+) -> dict:
+    """Non-interactive API-key ladder; raises CredentialError when none is found."""
+    return _core.resolve_credentials(
+        dns,
+        provided,
+        env_key,
+        stored_key,
+        skip_keyring,
+        allow_interactive,
+        mode,
+    )

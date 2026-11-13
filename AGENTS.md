@@ -334,6 +334,7 @@ What lives in Rust (`rust/src/`):
 - `registry.rs`: resolve the catalog's registry URL, log in, mint a `qk_` API key,
   and validate one. HTTP is injectable; production uses the Python `urllib` helpers.
 - `session.rs`: `GET /api/auth/get_credentials` and the STS payload mapping. HTTP is injectable; production uses the Python helper in `quiltx.auth.session` (quilt3's authenticated session). STS is never written to disk. Botocore wrapping and the ambient-chain refusal stay in Python.
+- `resolve.rs`: the non-interactive API-key ladder. Prompts, flags, and `mint_api_key` stay in Python.
 - `core_version()` and `ping()`, the original smoke functions.
 
 `tests/oracle.py` keeps the replaced Python verbatim and `tests/test_core_parity.py` runs
