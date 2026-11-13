@@ -380,7 +380,8 @@ fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
             let _ = chmod(&tmp, 0o600);
         }
         persist_tmp(&tmp, path)?;
-        sync_parent(path)?;
+        // Directory fsync is best-effort so a later chmod still runs.
+        let _ = sync_parent(path);
         if private {
             let _ = chmod(path, 0o600);
         }
@@ -418,11 +419,15 @@ fn persist_tmp(tmp: &Path, dest: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
         const SHARING_VIOLATION: i32 = 32;
+        const ACCESS_DENIED: i32 = 5;
         let mut delay = Duration::from_millis(10);
         for attempt in 0..5 {
             match fs::rename(tmp, dest) {
                 Ok(()) => return Ok(()),
-                Err(e) if attempt < 4 && e.raw_os_error() == Some(SHARING_VIOLATION) => {
+                Err(e)
+                    if attempt < 4
+                        && matches!(e.raw_os_error(), Some(SHARING_VIOLATION | ACCESS_DENIED)) =>
+                {
                     std::thread::sleep(delay);
                     delay *= 2;
                 }
@@ -439,7 +444,7 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            File::open(parent)?.sync_all()?;
+            let _ = File::open(parent).and_then(|f| f.sync_all());
         }
     }
     let _ = path;
