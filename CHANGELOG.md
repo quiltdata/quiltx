@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The 0600 `credentials.json` fallback and the `credentials_index.json` I/O now run in Rust (`quiltx._core`). The OS keyring backend is unchanged. Writes use a temp file and rename, still at mode 0600 (fallback) or the process umask (index), and still with Windows CRLF as Python's text-mode writes. The rename replaces a symlinked destination, and a hand-set mode on the index is reset to the process umask. `tests/test_core_parity.py` compares bytes with the old Python
+- A missing file, or invalid or truncated JSON that Python's `json.loads` already treated as empty (including `-NaN` and `{"a":NaN`), still reads as empty. A file that exists but is invalid UTF-8 raises `UnicodeDecodeError`. JSON that Python would parse but this parser cannot (`NaN`/`Infinity`, a lone surrogate as a value or a key, nesting deeper than 128) raises `ValueError` so a later write cannot replace it. Out-of-range floats (`1e400`) and large integers are read
+- A `NaN` or `inf` written from Python becomes `null`. Tuples and non-string keys are accepted (tuples as lists, other keys as `str(key)`); a bool key becomes `"True"` / `"False"`
+- A corrupt index keeps only string entries (non-string elements are dropped). Odd legacy floats may not round-trip exactly
+
 ## [0.24.0] - 2026-11-13
 
 ### Changed

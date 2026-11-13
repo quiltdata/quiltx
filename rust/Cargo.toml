@@ -23,6 +23,10 @@ pyo3 = { version = "0.30", features = ["abi3-py310"] }
 unicode-normalization = "0.1"
 # General category Nd, for Python's notion of a decimal digit.
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+# Ordered JSON maps, so a rewrite keeps key order; dumps is in store.rs so it
+# matches Python's json.dumps (ensure_ascii, indent=2). arbitrary_precision and
+# float_roundtrip let us read out-of-range floats and large integers.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "float_roundtrip"] }
 
 [target.'cfg(unix)'.dependencies]
 # getpwuid_r, for the passwd home directory.

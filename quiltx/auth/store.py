@@ -19,10 +19,9 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from quiltx.auth import _native
 
@@ -85,36 +84,11 @@ def _warn_file_fallback() -> None:
 
 
 def _read_fallback() -> dict[str, CredentialEntry]:
-    path = _fallback_path()
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return _native.read_fallback(_fallback_path())
 
 
 def _write_fallback(data: dict[str, CredentialEntry]) -> None:
-    path = _fallback_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # Tighten parent dir mode in case it pre-existed at a looser umask.
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    payload = json.dumps(data, indent=2).encode("utf-8")
-    # Open with mode 0o600 from the start so the secret never sits at the
-    # default umask between create and chmod (TOCTOU window on shared hosts).
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
-    # If the file pre-existed at looser perms (older quiltx), tighten it now.
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    _native.write_fallback(_fallback_path(), data)
 
 
 # ---------------------------------------------------------------------------
@@ -130,43 +104,19 @@ def _index_path() -> Path:
 
 
 def _read_index() -> list[str]:
-    path = _index_path()
-    if not path.exists():
-        return []
-    try:
-        result = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(result, list):
-            return result
-        return []
-    except (json.JSONDecodeError, OSError):
-        return []
+    return _native.read_index(_index_path())
 
 
 def _write_index(entries: list[str]) -> None:
-    path = _index_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # Tighten parent dir mode in case it pre-existed at a looser umask:
-    # the index leaks DNS names (not secrets), but on a shared host that is
-    # still better kept private. Mirrors the pattern in _write_fallback.
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    path.write_text(json.dumps(entries), encoding="utf-8")
+    _native.write_index(_index_path(), entries)
 
 
 def _add_to_index(dns: str) -> None:
-    entries = _read_index()
-    if dns not in entries:
-        entries.append(dns)
-        _write_index(entries)
+    _native.add_to_index(_index_path(), dns)
 
 
 def _remove_from_index(dns: str) -> None:
-    entries = _read_index()
-    if dns in entries:
-        entries.remove(dns)
-        _write_index(entries)
+    _native.remove_from_index(_index_path(), dns)
 
 
 # ---------------------------------------------------------------------------
@@ -190,11 +140,7 @@ def get(dns: str) -> CredentialEntry | None:
             return None
         return CredentialEntry(**entry)
     else:
-        data = _read_fallback()
-        entry = data.get(dns)
-        if entry is None or "api_key" not in entry:
-            return None
-        return entry
+        return cast(CredentialEntry | None, _native.get_fallback(_fallback_path(), dns))
 
 
 def store(
@@ -232,9 +178,9 @@ def store(
         _add_to_index(dns)
     else:
         _warn_file_fallback()
-        data = _read_fallback()
-        data[dns] = payload
-        _write_fallback(data)
+        _native.store_fallback(
+            _fallback_path(), dns, api_key, name=name, expires_at=expires_at
+        )
 
 
 def delete(dns: str) -> None:
@@ -249,10 +195,7 @@ def delete(dns: str) -> None:
             pass  # already gone — idempotent
         _remove_from_index(dns)
     else:
-        data = _read_fallback()
-        if dns in data:
-            data.pop(dns)
-            _write_fallback(data)
+        _native.delete_fallback(_fallback_path(), dns)
 
 
 def catalog_list() -> list[tuple[str, CredentialEntry]]:
@@ -264,10 +207,9 @@ def catalog_list() -> list[tuple[str, CredentialEntry]]:
             if entry is not None:
                 results.append((dns, entry))
     else:
-        data = _read_fallback()
-        for dns, entry in data.items():
-            if "api_key" in entry:
-                results.append((dns, entry))
+        return cast(
+            list[tuple[str, CredentialEntry]], _native.list_fallback(_fallback_path())
+        )
     return results
 
 

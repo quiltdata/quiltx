@@ -15,7 +15,7 @@ responsibility. It was extracted from flat modules without changing behaviour:
   botocore session built from them. The only auth module that imports quilt3.
 * :mod:`quiltx.auth._native` - the single importer of the compiled
   ``quiltx._core`` extension, which is required: catalog-name normalization and the
-  credential store's paths and keyring key come from it.
+  credential store's paths, keyring key and file-backed I/O come from it.
 
 ``quiltx.credentials`` and ``quiltx.quilt_auth`` remain as aliases of
 ``store`` and ``registry`` for external importers; new code should import from

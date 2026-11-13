@@ -407,6 +407,201 @@ def test_store_writes_where_the_oracle_says(
 
 
 # ---------------------------------------------------------------------------
+# File-backed store
+# ---------------------------------------------------------------------------
+
+
+def file_pair(tmp: Path, name: str) -> tuple[Path, Path]:
+    old = tmp / "old" / name
+    new = tmp / "new" / name
+    return old, new
+
+
+def test_fallback_bytes_and_modes_match_the_oracle(tmp_path: Path) -> None:
+    old, new = file_pair(tmp_path, "credentials.json")
+    entries = [
+        ("nightly.quilttest.com", "qk_abc", None, None),
+        ("a.example.com", "qk_a", "alice-key", 1_800_000_000),
+        ("ünï.example", "qk_x", "naïve", None),
+    ]
+    for dns, key, name, expires in entries:
+        oracle.store_fallback(old, dns, key, name, expires)
+        _core.store_fallback(new, dns, key, name, expires)
+    assert new.read_bytes() == old.read_bytes()
+    if POSIX:
+        assert oct(new.stat().st_mode)[-3:] == "600"
+        assert oct(old.stat().st_mode)[-3:] == "600"
+        assert oct(new.parent.stat().st_mode)[-3:] == "700"
+        assert oct(old.parent.stat().st_mode)[-3:] == "700"
+    assert _core.read_fallback(new) == oracle.read_fallback(old)
+    assert _core.get_fallback(new, "a.example.com") == oracle.get_fallback(
+        old, "a.example.com"
+    )
+    assert _core.list_fallback(new) == oracle.list_fallback(old)
+    _core.delete_fallback(new, "a.example.com")
+    oracle.delete_fallback(old, "a.example.com")
+    assert new.read_bytes() == old.read_bytes()
+    assert _core.get_fallback(new, "a.example.com") is None
+    _core.delete_fallback(new, "a.example.com")
+    oracle.delete_fallback(old, "a.example.com")
+    assert new.read_bytes() == old.read_bytes()
+
+
+def test_index_bytes_match_the_oracle(tmp_path: Path) -> None:
+    old, new = file_pair(tmp_path, "credentials_index.json")
+    for dns in ("a.example.com", "b.example.com", "a.example.com"):
+        oracle.add_to_index(old, dns)
+        _core.add_to_index(new, dns)
+    assert new.read_bytes() == old.read_bytes()
+    assert new.read_text(encoding="utf-8") == '["a.example.com", "b.example.com"]'
+    assert _core.read_index(new) == oracle.read_index(old)
+    _core.remove_from_index(new, "a.example.com")
+    oracle.remove_from_index(old, "a.example.com")
+    assert new.read_bytes() == old.read_bytes()
+    _core.remove_from_index(new, "a.example.com")
+    oracle.remove_from_index(old, "a.example.com")
+    assert new.read_bytes() == old.read_bytes()
+
+
+def test_store_validation_matches_the_oracle(tmp_path: Path) -> None:
+    old, new = file_pair(tmp_path, "credentials.json")
+    for key in ("", "   ", "not-a-key"):
+        assert outcome(oracle.store_fallback, old, "x.example.com", key) == outcome(
+            _core.store_fallback, new, "x.example.com", key
+        )
+        assert not old.exists() and not new.exists()
+    oracle.store_fallback(old, "x.example.com", "  qk_ok  ")
+    _core.store_fallback(new, "x.example.com", "  qk_ok  ")
+    assert new.read_bytes() == old.read_bytes()
+    got = _core.get_fallback(new, "x.example.com")
+    assert got is not None and got["api_key"] == "qk_ok"
+
+
+def test_malformed_and_legacy_files_match_the_oracle(tmp_path: Path) -> None:
+    for name, body in (
+        ("missing", None),
+        ("bad.json", "not-json"),
+        ("list.json", "[]"),
+        (
+            "legacy.json",
+            '{"old.example.com": {"username": "u", "secret": "s"}}',
+        ),
+    ):
+        old, new = file_pair(tmp_path, name)
+        if body is not None:
+            old.parent.mkdir(parents=True, exist_ok=True)
+            new.parent.mkdir(parents=True, exist_ok=True)
+            old.write_text(body)
+            new.write_text(body)
+        assert _core.read_fallback(new) == oracle.read_fallback(old)
+        assert outcome(_core.get_fallback, new, "old.example.com") == outcome(
+            oracle.get_fallback, old, "old.example.com"
+        )
+        assert outcome(_core.list_fallback, new) == outcome(oracle.list_fallback, old)
+        assert _core.read_index(new) == oracle.read_index(old)
+
+
+def test_invalid_utf8_raises_and_does_not_overwrite(tmp_path: Path) -> None:
+    body = b'{"keep": {"api_key": "qk_keep", "name": null, "expires_at": null}, "x": "\xff"}'
+    old, new = file_pair(tmp_path, "credentials.json")
+    for path in (old, new):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    for fn, path, args in (
+        (oracle.read_fallback, old, ()),
+        (_core.read_fallback, new, ()),
+        (oracle.store_fallback, old, ("x.example.com", "qk_x")),
+        (_core.store_fallback, new, ("x.example.com", "qk_x")),
+        (oracle.delete_fallback, old, ("keep",)),
+        (_core.delete_fallback, new, ("keep",)),
+    ):
+        with pytest.raises(UnicodeDecodeError):
+            fn(path, *args)
+    assert new.read_bytes() == body
+    assert old.read_bytes() == body
+
+
+def test_nan_does_not_reset_the_file(tmp_path: Path) -> None:
+    body = b'{"keep": {"api_key": "qk_keep", "name": null, "expires_at": NaN}}'
+    old, new = file_pair(tmp_path, "credentials.json")
+    for path in (old, new):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    got = oracle.read_fallback(old)
+    expires = got["keep"]["expires_at"]
+    assert expires != expires  # NaN
+    with pytest.raises(ValueError):
+        _core.read_fallback(new)
+    with pytest.raises(ValueError):
+        _core.store_fallback(new, "x.example.com", "qk_x")
+    with pytest.raises(ValueError):
+        _core.delete_fallback(new, "keep")
+    assert new.read_bytes() == body
+    assert old.read_bytes() == body
+
+
+def test_lone_surrogates_do_not_reset_the_file(tmp_path: Path) -> None:
+    bodies = (
+        b'{"a":"\\ud800"}',
+        b'{"a":"\\ud800abc"}',
+        b'{"\\ud800":1}',
+    )
+    for i, body in enumerate(bodies):
+        old, new = file_pair(tmp_path, f"surrogate-{i}.json")
+        for path in (old, new):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        got = oracle.read_fallback(old)
+        assert got, body
+        with pytest.raises(ValueError):
+            _core.read_fallback(new)
+        with pytest.raises(ValueError):
+            _core.store_fallback(new, "x.example.com", "qk_x")
+        with pytest.raises(ValueError):
+            _core.delete_fallback(new, "a")
+        assert new.read_bytes() == body
+        assert old.read_bytes() == body
+
+
+def test_out_of_range_numbers_match_the_oracle(tmp_path: Path) -> None:
+    bodies = (
+        b'{"n": 1e400}',
+        b'{"n": -1e400}',
+        b'{"n": ' + b"1" * 400 + b"}",
+    )
+    for i, body in enumerate(bodies):
+        old, new = file_pair(tmp_path, f"num-{i}.json")
+        for path in (old, new):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        assert _core.read_fallback(new) == oracle.read_fallback(old)
+        _core.store_fallback(new, "x.example.com", "qk_x")
+        oracle.store_fallback(old, "x.example.com", "qk_x")
+        rust = _core.read_fallback(new)
+        py = oracle.read_fallback(old)
+        assert rust == py
+        assert "n" in rust
+        assert rust["x.example.com"]["api_key"] == "qk_x"
+
+
+def test_write_fallback_over_a_looser_file_tightens_the_mode(
+    tmp_path: Path,
+) -> None:
+    if not POSIX:
+        pytest.skip("POSIX permission bits do not exist on Windows")
+    old, new = file_pair(tmp_path, "credentials.json")
+    for path in (old, new):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+        path.chmod(0o644)
+    oracle.store_fallback(old, "x.example.com", "qk_x")
+    _core.store_fallback(new, "x.example.com", "qk_x")
+    assert new.read_bytes() == old.read_bytes()
+    assert oct(new.stat().st_mode)[-3:] == "600"
+    assert oct(old.stat().st_mode)[-3:] == "600"
+
+
+# ---------------------------------------------------------------------------
 # The core is required
 # ---------------------------------------------------------------------------
 

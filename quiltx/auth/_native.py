@@ -3,9 +3,9 @@
 Everything Rust-backed that auth needs goes through this module, so the
 boundary between the Python auth code and the Rust core is one file. The core
 is required: catalog-name normalization (``normalize_dns``) runs on every CLI
-command that takes a catalog, and the credential store's file paths and keyring
-key come from it, so a missing extension is an error at import, with a message
-that says how to fix it, rather than a degraded mode.
+command that takes a catalog, and the credential store's file paths, keyring
+key, and file-backed I/O come from it, so a missing extension is an error at
+import, with a message that says how to fix it, rather than a degraded mode.
 """
 
 from __future__ import annotations
@@ -56,3 +56,59 @@ def credentials_index_file() -> Path:
 def keyring_entry(dns: str) -> tuple[str, str]:
     """``(service, username)`` of the OS-keyring entry for *dns*."""
     return _core.keyring_entry(dns)
+
+
+def read_fallback(path: Path) -> dict:
+    """Read ``credentials.json``; a missing file is ``{}``."""
+    return _core.read_fallback(path)
+
+
+def write_fallback(path: Path, data: dict) -> None:
+    """Write ``credentials.json`` at mode 0600, in Python's ``indent=2`` form."""
+    _core.write_fallback(path, data)
+
+
+def read_index(path: Path) -> list[str]:
+    """Read ``credentials_index.json``; a missing or non-list file is ``[]``."""
+    return _core.read_index(path)
+
+
+def write_index(path: Path, entries: list[str]) -> None:
+    """Write ``credentials_index.json`` (compact JSON, process umask)."""
+    _core.write_index(path, entries)
+
+
+def add_to_index(path: Path, dns: str) -> None:
+    """Append *dns* to the index if it is not already listed."""
+    _core.add_to_index(path, dns)
+
+
+def remove_from_index(path: Path, dns: str) -> None:
+    """Remove *dns* from the index if it is listed (idempotent)."""
+    _core.remove_from_index(path, dns)
+
+
+def get_fallback(path: Path, dns: str) -> dict | None:
+    """File-backend ``get``: the entry for *dns*, or ``None``."""
+    return _core.get_fallback(path, dns)
+
+
+def store_fallback(
+    path: Path,
+    dns: str,
+    api_key: str,
+    name: str | None = None,
+    expires_at: int | None = None,
+) -> None:
+    """File-backend ``store``: validate the key and write the entry."""
+    _core.store_fallback(path, dns, api_key, name, expires_at)
+
+
+def delete_fallback(path: Path, dns: str) -> None:
+    """File-backend ``delete`` (idempotent)."""
+    _core.delete_fallback(path, dns)
+
+
+def list_fallback(path: Path) -> list[tuple[str, dict]]:
+    """File-backend ``catalog_list``: ``(dns, entry)`` in file order."""
+    return _core.list_fallback(path)
