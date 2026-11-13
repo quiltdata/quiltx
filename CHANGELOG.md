@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /api/auth/get_credentials` (the STS mint that builds the `access_key` / `secret_key` / `token` / `expiry_time` dict) now runs in Rust (`quiltx._core`). The HTTP transport stays in Python (`quiltx.auth.session._get_json` via quilt3's authenticated session), and `session.py` still wraps the result in botocore and refuses the ambient AWS chain. STS credentials are still not written to disk
 - `AccessKeyId`, `SecretAccessKey`, and `SessionToken` must be non-empty strings, and `Expiration` must be a timezone-aware datetime string (offset or `Z`); otherwise `mint_registry_credentials` raises `CatalogCredentialsError`. A body that is not a JSON object raises `CatalogCredentialsError` naming the registry and echoing only the body's type and length. A 4xx or 5xx response raises `CatalogCredentialsError` naming the HTTP status and the registry URL. A lone surrogate in the response raises `CatalogCredentialsError` instead of `ValueError`
 - Error text also redacts `AccessKeyId` / `accesskeyid` keys, AKIA/ASIA-style ids, and long base64-like token strings
+- The non-interactive API-key resolve ladder (`flag` / `env` / `keyring`, or a headless error) now runs in Rust (`quiltx._core.resolve_credentials`). `resolve_cli` and `resolve_api` still read flags, env, the store, and the TTY in Python, and `mint_api_key` stays in Python for prompts. Behaviour and error messages are unchanged
 
 ### Fixed
 

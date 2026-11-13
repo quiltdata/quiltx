@@ -2,8 +2,9 @@
 
 ``quiltx.identity.normalize_dns``, the credential-path / file-store / keyring
 lookups in ``quiltx.auth.store``, the registry HTTP in
-``quiltx.auth.registry``, and the STS mint in
-``quiltx.auth.session`` now call ``quiltx._core``. The functions here are the
+``quiltx.auth.registry``, the STS mint in
+``quiltx.auth.session``, and the resolve ladder in
+``quiltx.auth.resolve`` now call ``quiltx._core``. The functions here are the
 Python they replaced, so ``tests/test_core_parity.py`` can run old and new on
 the same inputs. Nothing under ``quiltx/`` imports this module.
 """
@@ -663,3 +664,37 @@ def mint_registry_credentials(registry_url: str) -> dict[str, Any]:
         raise CatalogCredentialsError(
             f"registry {registry_url} returned no usable credentials"
         ) from exc
+
+
+from quiltx.auth.resolve import CredentialError as _CredentialError
+
+
+def resolve_credentials(
+    dns: str,
+    provided: str | None,
+    env_key: str | None,
+    stored_key: str | None,
+    skip_keyring: bool,
+    allow_interactive: bool,
+    mode: str,
+) -> dict[str, Any]:
+    """The non-interactive resolve ladder from ``quiltx.auth.resolve`` at the #155 merge."""
+    if provided:
+        return {"status": "found", "api_key": provided, "source": "flag"}
+    if env_key:
+        return {"status": "found", "api_key": env_key, "source": "env"}
+    if not skip_keyring and stored_key is not None:
+        return {"status": "found", "api_key": stored_key, "source": "keyring"}
+    if mode == "cli" and allow_interactive:
+        return {"status": "need_interactive", "rejected": skip_keyring}
+    if mode == "cli":
+        raise _CredentialError(
+            f"No API key available for {dns}. "
+            "Provide --api-key, set QUILTX_API_KEY, "
+            f"or run `quiltx catalog api-key --catalog {dns}` interactively."
+        )
+    raise _CredentialError(
+        f"No API key available for {dns}. "
+        "Pass api_key=... to Catalog.from_dns, set QUILTX_API_KEY, "
+        "or run a CLI command first to store one."
+    )

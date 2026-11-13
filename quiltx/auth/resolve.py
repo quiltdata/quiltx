@@ -1,6 +1,10 @@
 """API-key resolver for quiltx.
 
-Returns ``(api_key, source)`` given a catalog and context.
+Returns ``(api_key, source)`` given a catalog and context. The ladder
+decision runs in Rust (``quiltx._core.resolve_credentials``); this module
+still reads flags, env, the store, and the TTY, and still runs
+``mint_api_key`` for the interactive path.
+
 
 CLI ladder ([05 §4]):
   1. --api-key flag
@@ -66,32 +70,29 @@ def resolve_cli(
     ``skip_keyring`` is set by the retry envelope after an auth failure.
     """
     dns = catalog.catalog_name
+    from quiltx.auth import _native
 
-    # 1. Flag
-    api_key_flag = getattr(args, "api_key", None)
-    if api_key_flag:
-        return ResolvedCredentials(api_key_flag, "flag")
-
-    # 2. Env var
+    provided = getattr(args, "api_key", None)
     env_key = os.environ.get("QUILTX_API_KEY")
-    if env_key:
-        return ResolvedCredentials(env_key, "env")
-
-    # 3. Keyring (skipped on retry after auth failure)
+    stored_key = None
     if not skip_keyring:
         stored = credentials.get(dns)
         if stored is not None:
-            return ResolvedCredentials(stored["api_key"], "keyring")
+            stored_key = stored["api_key"]
+    allow_interactive = not _no_prompt_active(args) and sys.stdin.isatty()
+    result = _native.resolve_credentials(
+        dns,
+        provided,
+        env_key,
+        stored_key,
+        skip_keyring,
+        allow_interactive,
+        "cli",
+    )
+    if result["status"] == "found":
+        return ResolvedCredentials(result["api_key"], result["source"])
 
-    # 4. Interactive auth flow
-    if _no_prompt_active(args) or not sys.stdin.isatty():
-        raise CredentialError(
-            f"No API key available for {dns}. "
-            "Provide --api-key, set QUILTX_API_KEY, "
-            f"or run `quiltx catalog api-key --catalog {dns}` interactively."
-        )
-
-    if skip_keyring:
+    if result["rejected"]:
         print(
             f"Stored API key for {dns} was rejected.",
             file=sys.stderr,
@@ -125,24 +126,21 @@ def resolve_api(
     No prompting — API consumers use kwargs, env vars, or keyring.
     """
     dns = catalog.catalog_name
+    from quiltx.auth import _native
 
-    # 1. Constructor kwarg
-    if api_key:
-        return ResolvedCredentials(api_key, "flag")
-
-    # 2. Env var
     env_key = os.environ.get("QUILTX_API_KEY")
-    if env_key:
-        return ResolvedCredentials(env_key, "env")
-
-    # 3. Keyring
+    stored_key = None
     if not skip_keyring:
         stored = credentials.get(dns)
         if stored is not None:
-            return ResolvedCredentials(stored["api_key"], "keyring")
-
-    raise CredentialError(
-        f"No API key available for {dns}. "
-        "Pass api_key=... to Catalog.from_dns, set QUILTX_API_KEY, "
-        "or run a CLI command first to store one."
+            stored_key = stored["api_key"]
+    result = _native.resolve_credentials(
+        dns,
+        api_key,
+        env_key,
+        stored_key,
+        skip_keyring,
+        False,
+        "api",
     )
+    return ResolvedCredentials(result["api_key"], result["source"])

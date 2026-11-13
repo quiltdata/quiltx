@@ -1369,6 +1369,52 @@ def test_mint_lone_surrogate_in_response_is_catalog_credentials_error(
     assert "https://registry.example.com/api/auth/get_credentials" in str(raised.value)
 
 
+def test_resolve_credentials_matches_the_oracle() -> None:
+    dns = "nightly.example"
+    cases: list[tuple[object, ...]] = [
+        ("qk_flag", "qk_env", "qk_stored", False, False, "cli"),
+        ("", "qk_env", "qk_stored", False, False, "cli"),
+        (None, "qk_env", "qk_stored", False, False, "cli"),
+        (None, "", "qk_stored", False, False, "cli"),
+        (None, None, "qk_stored", False, False, "cli"),
+        (None, None, "", False, False, "api"),
+        (None, None, "qk_stored", True, False, "api"),
+        (None, None, "qk_stored", True, True, "cli"),
+        (None, None, None, False, True, "cli"),
+        (None, None, None, False, False, "cli"),
+        (None, None, None, False, True, "api"),
+        (None, None, None, False, False, "api"),
+        ("qk_kw", None, None, True, False, "api"),
+    ]
+    for provided, env_key, stored_key, skip, allow, mode in cases:
+        assert outcome(
+            _core.resolve_credentials,
+            dns,
+            provided,
+            env_key,
+            stored_key,
+            skip,
+            allow,
+            mode,
+        ) == outcome(
+            oracle.resolve_credentials,
+            dns,
+            provided,
+            env_key,
+            stored_key,
+            skip,
+            allow,
+            mode,
+        ), (
+            provided,
+            env_key,
+            stored_key,
+            skip,
+            allow,
+            mode,
+        )
+
+
 # ---------------------------------------------------------------------------
 # The core is required
 # ---------------------------------------------------------------------------
