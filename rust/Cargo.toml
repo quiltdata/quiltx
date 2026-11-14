@@ -31,7 +31,7 @@ pyo3 = { version = "0.30", features = ["abi3-py310"], optional = true }
 # with quilt-rs. Pinned by commit; re-pin to the commit on quilt-rs `main` that
 # holds the crate. It builds without Python, so the `python` feature below leaves
 # it alone.
-quilt-auth = { git = "https://github.com/quiltdata/quilt-rs", rev = "d5e980ce9004b7abdda48342d375d0a5a9e3be6a" }
+quilt-auth = { git = "https://github.com/quiltdata/quilt-rs", rev = "5e380609210a0a0763cbb67755e7b559a34708ff" }
 # Ordered JSON maps, so a rewrite keeps key order; dumps is in store.rs so it
 # matches Python's json.dumps (ensure_ascii, indent=2). arbitrary_precision and
 # float_roundtrip let us read out-of-range floats and large integers.
