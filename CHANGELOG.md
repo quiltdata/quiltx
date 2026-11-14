@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Under the hood, `quiltx-core` takes catalog-name normalization and credential-location rules from the `quilt-auth` crate in quilt-rs, which quilt-rs shares, instead of carrying its own copy. Behavior, the wheel and the parity tests are unchanged. A source build fetches that crate from GitHub
 - The `quiltx-core` Rust crate has a `python` cargo feature, on by default, that holds PyO3 and the modules that still call into Python (`registry`, `resolve`, `session`, `store`). With `default-features = false` a Rust consumer gets only `dns` and `paths`, with no PyO3 in the build. The wheel and the `quiltx._core` module are unchanged
 
 ## [0.25.0] - 2026-11-13

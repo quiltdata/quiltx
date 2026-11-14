@@ -324,11 +324,16 @@ command needs it and a missing extension fails at import with a message saying h
 
 What lives in Rust (`rust/src/`):
 
-- `dns.rs`: `normalize_dns(value, insecure)`, the catalog-name normalizer behind
-  `quiltx.identity.normalize_dns`, with the exact error messages of the Python it replaced.
-- `paths.rs`: the credential store's directory (the `platformdirs.user_data_path("quiltx")`
+- `dns` and `paths`: no longer files here. They live in the `quilt-auth` crate in
+  [quiltdata/quilt-rs](https://github.com/quiltdata/quilt-rs) (`quilt-auth/`), which
+  quilt-rs shares, and are re-exported from `lib.rs` (a git dependency pinned by commit
+  in `rust/Cargo.toml`; re-pin it to the commit on quilt-rs `main`). `dns` is
+  `normalize_dns(value, insecure)`, the catalog-name normalizer behind
+  `quiltx.identity.normalize_dns`, with the exact error messages of the Python it replaced;
+  `paths` is the credential store's directory (the `platformdirs.user_data_path("quiltx")`
   rules), `credentials.json`, `credentials_index.json`, and the keyring `(service, username)`
-  for a catalog; used by `quiltx.auth.store`.
+  for a catalog, used by `quiltx.auth.store`. Change their behavior in quilt-rs, together
+  with the parity table in `tests/test_core_parity.py`.
 - `store.rs`: the 0600 `credentials.json` fallback, the index file, and the public
   get/store/delete/list (OS keyring via the Python `keyring` package, or the file fallback).
 - `registry.rs`: resolve the catalog's registry URL, log in, mint a `qk_` API key,
@@ -346,8 +351,8 @@ rebuild the extension into the venv with `uv sync --reinstall-package quiltx`.
 
 The crate's `python` cargo feature (on by default) holds PyO3 and the modules that
 still call into Python: `registry`, `resolve`, `session`, `store`, and the extension
-module in `python.rs`. With `--no-default-features` only `dns` and `paths` are built,
-with no PyO3, which is what a Rust consumer such as quilt-rs depends on. Check that
+module in `python.rs`. With `--no-default-features` only `dns` and `paths` (from
+`quilt-auth`) are built, with no PyO3, which is what a Rust consumer such as quilt-rs depends on. Check that
 build with `cargo test --locked --no-default-features` and
 `cargo clippy --locked --all-targets --no-default-features -- -D warnings` (in
 `rust/`); CI runs both, and a CI step fails if `pyo3` shows up in
