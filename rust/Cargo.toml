@@ -13,12 +13,19 @@ publish = false
 name = "_core"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The Python extension and the modules that still call into Python. On by
+# default, so the wheel build is unchanged; a Rust consumer that wants only the
+# pure parts (`dns`, `paths`) sets `default-features = false`.
+default = ["python"]
+python = ["dep:pyo3", "dep:serde_json"]
+
 [dependencies]
 # abi3-py310 matches requires-python >=3.10: one wheel per platform serves every
 # CPython 3.10+. `extension-module` is deliberately NOT set here: maturin adds it
 # (see [tool.maturin] features in pyproject.toml), so `cargo test` can still link
 # against libpython.
-pyo3 = { version = "0.30", features = ["abi3-py310"] }
+pyo3 = { version = "0.30", features = ["abi3-py310"], optional = true }
 # NFKC, for the check urllib.parse makes on a non-ASCII host.
 unicode-normalization = "0.1"
 # General category Nd, for Python's notion of a decimal digit.
@@ -26,7 +33,7 @@ unicode-properties = { version = "0.1", default-features = false, features = ["g
 # Ordered JSON maps, so a rewrite keeps key order; dumps is in store.rs so it
 # matches Python's json.dumps (ensure_ascii, indent=2). arbitrary_precision and
 # float_roundtrip let us read out-of-range floats and large integers.
-serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "float_roundtrip"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "float_roundtrip"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # getpwuid_r, for the passwd home directory.

@@ -52,6 +52,11 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      # The Python-free surface a Rust consumer (quilt-rs) depends on.
+      - name: Clippy without Python
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: Test without Python
+        run: cargo test --locked --no-default-features
 
   # Builds, checks and tests the seven release files (see dist.yml).
   dist:
