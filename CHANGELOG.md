@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `quiltx-core` Rust crate has a `python` cargo feature, on by default, that holds PyO3 and the modules that still call into Python (`registry`, `resolve`, `session`, `store`). With `default-features = false` a Rust consumer gets only `dns` and `paths`, with no PyO3 in the build. The wheel and the `quiltx._core` module are unchanged
+
 ## [0.25.0] - 2026-11-13
 
 ### Changed
