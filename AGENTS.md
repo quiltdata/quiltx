@@ -342,7 +342,17 @@ oracle and Rust on the same inputs (tables, a seeded random walk, the machine's 
 `platformdirs`, and byte-for-byte credential-file writes); change Rust
 behaviour only together with that table. After editing Rust,
 rebuild the extension into the venv with `uv sync --reinstall-package quiltx`.
-`./poe test` and `cargo test --locked` (in `rust/`) cover it. Set `pyo3/extension-module`
+`./poe test` and `cargo test --locked` (in `rust/`) cover it.
+
+The crate's `python` cargo feature (on by default) holds PyO3 and the modules that
+still call into Python: `registry`, `resolve`, `session`, `store`, and the extension
+module in `python.rs`. With `--no-default-features` only `dns` and `paths` are built,
+with no PyO3, which is what a Rust consumer such as quilt-rs depends on. Check that
+build with `cargo test --locked --no-default-features` and
+`cargo clippy --locked --all-targets --no-default-features -- -D warnings` (in
+`rust/`); CI runs both, and a CI step fails if `pyo3` shows up in
+`cargo tree --no-default-features`. New code in `dns` or `paths` must not import
+PyO3; put anything that needs Python behind `#[cfg(feature = "python")]`. Set `pyo3/extension-module`
 only through `[tool.maturin] features` so `cargo test` can still link.
 
 ## Publishing Releases
