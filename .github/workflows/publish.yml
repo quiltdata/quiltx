@@ -28,7 +28,7 @@ permissions:
 jobs:
   check-version:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.check.outputs.version }}
       should_release: ${{ steps.check.outputs.should_release }}
@@ -73,7 +73,7 @@ jobs:
   # notes, the files, the tag it will get. The draft creates no tag.
   draft-release:
     needs: [check-version, dist]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     env:
@@ -129,7 +129,7 @@ jobs:
   publish:
     needs: [check-version, draft-release]
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment: pypi
     outputs:
       published: ${{ steps.tag.outputs.publish }}
