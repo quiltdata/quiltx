@@ -169,15 +169,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "quiltx-core"
-version = "0.1.0"
+name = "quilt-auth"
+version = "0.1.0-dev"
+source = "git+https://github.com/quiltdata/quilt-rs?rev=70fd37a1ea5699aacc49e2ee11ec08bf98d5c26d#70fd37a1ea5699aacc49e2ee11ec08bf98d5c26d"
 dependencies = [
  "dirs",
  "libc",
- "pyo3",
- "serde_json",
  "unicode-normalization",
  "unicode-properties",
+]
+
+[[package]]
+name = "quiltx-core"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "quilt-auth",
+ "serde_json",
 ]
 
 [[package]]

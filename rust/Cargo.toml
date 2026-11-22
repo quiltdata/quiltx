@@ -16,7 +16,8 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # The Python extension and the modules that still call into Python. On by
 # default, so the wheel build is unchanged; a Rust consumer that wants only the
-# pure parts (`dns`, `paths`) sets `default-features = false`.
+# pure parts (`dns`, `paths`, which come from `quilt-auth`) sets
+# `default-features = false`.
 default = ["python"]
 python = ["dep:pyo3", "dep:serde_json"]
 
@@ -26,23 +27,15 @@ python = ["dep:pyo3", "dep:serde_json"]
 # (see [tool.maturin] features in pyproject.toml), so `cargo test` can still link
 # against libpython.
 pyo3 = { version = "0.30", features = ["abi3-py310"], optional = true }
-# NFKC, for the check urllib.parse makes on a non-ASCII host.
-unicode-normalization = "0.1"
-# General category Nd, for Python's notion of a decimal digit.
-unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+# Catalog-name normalization (`dns`) and credential locations (`paths`), shared
+# with quilt-rs. Pinned by commit; re-pin to the commit on quilt-rs `main` that
+# holds the crate. It builds without Python, so the `python` feature below leaves
+# it alone.
+quilt-auth = { git = "https://github.com/quiltdata/quilt-rs", rev = "70fd37a1ea5699aacc49e2ee11ec08bf98d5c26d" }
 # Ordered JSON maps, so a rewrite keeps key order; dumps is in store.rs so it
 # matches Python's json.dumps (ensure_ascii, indent=2). arbitrary_precision and
 # float_roundtrip let us read out-of-range floats and large integers.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "float_roundtrip"], optional = true }
-
-[target.'cfg(unix)'.dependencies]
-# getpwuid_r, for the passwd home directory.
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-# The Local AppData folder (the same crate and call quilt-rs uses); the rest of the
-# data-dir rules are in src/paths.rs because they must match platformdirs exactly.
-dirs = "7"
 
 [profile.release]
 # Smaller wheels: the extension ships in every platform file.
