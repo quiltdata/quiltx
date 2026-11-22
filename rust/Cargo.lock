@@ -171,7 +171,7 @@ dependencies = [
 [[package]]
 name = "quilt-auth"
 version = "0.1.0-dev"
-source = "git+https://github.com/quiltdata/quilt-rs?rev=5e380609210a0a0763cbb67755e7b559a34708ff#5e380609210a0a0763cbb67755e7b559a34708ff"
+source = "git+https://github.com/quiltdata/quilt-rs?rev=70fd37a1ea5699aacc49e2ee11ec08bf98d5c26d#70fd37a1ea5699aacc49e2ee11ec08bf98d5c26d"
 dependencies = [
  "dirs",
  "libc",
