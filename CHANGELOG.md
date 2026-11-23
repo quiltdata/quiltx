@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Building quiltx from source (the sdist, or a checkout) now needs Rust 1.99 or newer, the same as the rest of the Quilt Rust code. The `quiltx-core` crate uses the 2024 edition, and a checkout pins Rust 1.100.0 in `rust-toolchain.toml`, which CI and the release wheels build with
 - Under the hood, `quiltx-core` takes catalog-name normalization and credential-location rules from the `quilt-auth` crate in quilt-rs, which quilt-rs shares, instead of carrying its own copy. Behavior, the wheel and the parity tests are unchanged. A source build fetches that crate from GitHub
 - The `quiltx-core` Rust crate has a `python` cargo feature, on by default, that holds PyO3 and the modules that still call into Python (`registry`, `resolve`, `session`, `store`). With `default-features = false` a Rust consumer gets only `dns` and `paths`, with no PyO3 in the build. The wheel and the `quiltx._core` module are unchanged
 

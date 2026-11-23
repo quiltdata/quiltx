@@ -18,7 +18,7 @@ except ImportError as exc:  # pragma: no cover - only without the compiled core
     raise ImportError(
         "quiltx's compiled core (quiltx._core) is missing. Reinstall quiltx from a "
         "wheel (pip install --force-reinstall quiltx); from a source checkout run "
-        "`uv sync`, which builds it and needs a Rust toolchain (1.85 or newer)."
+        "`uv sync`, which builds it and needs a Rust toolchain (1.99 or newer)."
     ) from exc
 
 
