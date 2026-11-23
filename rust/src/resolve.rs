@@ -66,13 +66,11 @@ pub fn resolve_credentials(
             source: "env",
         };
     }
-    if !skip_keyring {
-        if let Some(api_key) = stored_key {
-            return ResolveResult::Found {
-                api_key: api_key.to_string(),
-                source: "keyring",
-            };
-        }
+    if !skip_keyring && let Some(api_key) = stored_key {
+        return ResolveResult::Found {
+            api_key: api_key.to_string(),
+            source: "keyring",
+        };
     }
     if mode == "cli" && allow_interactive {
         return ResolveResult::NeedInteractive {

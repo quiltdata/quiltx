@@ -10,7 +10,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyString;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 const API_KEY_CREATE_MUTATION: &str = "\
 mutation apiKeyCreate($input: APIKeyCreateInput!) {
@@ -321,13 +321,13 @@ pub fn create_api_key(
         "variables": {"input": {"name": name, "expiresInDays": expires_in_days}},
     });
     let response = http.post_json(&url, &payload, Some(access_token))?;
-    if let Some(errors) = response.get("errors") {
-        if !is_falsy(errors) {
-            return Err(RegistryError::Auth(format!(
-                "GraphQL errors: {}",
-                python_repr_redacted(errors)
-            )));
-        }
+    if let Some(errors) = response.get("errors")
+        && !is_falsy(errors)
+    {
+        return Err(RegistryError::Auth(format!(
+            "GraphQL errors: {}",
+            python_repr_redacted(errors)
+        )));
     }
     let data = mapping_or_empty(response.get("data"));
     let Some(result) = data.get("apiKeyCreate") else {
@@ -394,13 +394,13 @@ pub fn validate_api_key(
             python_repr_redacted(&response)
         )));
     };
-    if let Some(errors) = obj.get("errors") {
-        if !is_falsy(errors) {
-            return Err(RegistryError::Auth(format!(
-                "Catalog rejected API key: {}",
-                python_repr_redacted(errors)
-            )));
-        }
+    if let Some(errors) = obj.get("errors")
+        && !is_falsy(errors)
+    {
+        return Err(RegistryError::Auth(format!(
+            "Catalog rejected API key: {}",
+            python_repr_redacted(errors)
+        )));
     }
     Ok(())
 }

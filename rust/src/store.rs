@@ -578,10 +578,10 @@ fn persist_tmp(tmp: &Path, dest: &Path) -> io::Result<()> {
 
 fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = File::open(parent).and_then(|f| f.sync_all());
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = File::open(parent).and_then(|f| f.sync_all());
     }
     let _ = path;
     Ok(())
@@ -595,10 +595,12 @@ fn ensure_parent(path: &Path) -> io::Result<()> {
         return Ok(());
     }
     if !parent.exists() {
-        if let Some(grand) = parent.parent() {
-            if !grand.as_os_str().is_empty() && grand != Path::new(".") && !grand.exists() {
-                fs::create_dir_all(grand)?;
-            }
+        if let Some(grand) = parent.parent()
+            && !grand.as_os_str().is_empty()
+            && grand != Path::new(".")
+            && !grand.exists()
+        {
+            fs::create_dir_all(grand)?;
         }
         mkdir_mode(parent, 0o700)?;
     }
@@ -1251,9 +1253,11 @@ mod tests {
             r#"{"api_key": "qk_a", "name": "alice", "expires_at": 9}"#
         );
         delete_credential("a.example.com", true, &fallback, &index, &kr).unwrap();
-        assert!(get_credential("a.example.com", true, &fallback, &kr)
-            .unwrap()
-            .is_none());
+        assert!(
+            get_credential("a.example.com", true, &fallback, &kr)
+                .unwrap()
+                .is_none()
+        );
         delete_credential("a.example.com", true, &fallback, &index, &kr).unwrap();
         let listed: Vec<String> = list_credentials(true, &fallback, &index, &kr)
             .unwrap()
@@ -1284,9 +1288,11 @@ mod tests {
             other => panic!("expected Value error, got {other:?}"),
         }
         // A missing entry is still None.
-        assert!(get_credential("missing.example.com", true, &fallback, &kr)
-            .unwrap()
-            .is_none());
+        assert!(
+            get_credential("missing.example.com", true, &fallback, &kr)
+                .unwrap()
+                .is_none()
+        );
         // The corrupt payload is still there (get did not clear it).
         assert_eq!(
             kr.get_password("quiltx", "x.example.com")
@@ -1359,13 +1365,16 @@ mod tests {
         kr.set_password("quiltx", "x.example.com", "not-json")
             .unwrap();
         delete_credential("x.example.com", true, &fallback, &index, &kr).unwrap();
-        assert!(get_credential("x.example.com", true, &fallback, &kr)
-            .unwrap()
-            .is_none());
-        assert!(kr
-            .get_password("quiltx", "x.example.com")
-            .unwrap()
-            .is_none());
+        assert!(
+            get_credential("x.example.com", true, &fallback, &kr)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            kr.get_password("quiltx", "x.example.com")
+                .unwrap()
+                .is_none()
+        );
         cleanup(&dir);
     }
 
@@ -1387,13 +1396,16 @@ mod tests {
         )
         .unwrap();
         assert!(fallback.exists());
-        assert!(kr
-            .get_password("quiltx", "a.example.com")
-            .unwrap()
-            .is_none());
-        assert!(get_credential("a.example.com", false, &fallback, &kr)
-            .unwrap()
-            .is_some());
+        assert!(
+            kr.get_password("quiltx", "a.example.com")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_credential("a.example.com", false, &fallback, &kr)
+                .unwrap()
+                .is_some()
+        );
         cleanup(&dir);
     }
 }

@@ -2,7 +2,7 @@
 
 ## Developer Setup
 
-- Setup: `./poe setup` (install deps + hooks). **A Rust toolchain (1.85+, [rustup](https://rustup.rs)) is required**: quiltx builds a small PyO3 extension, `quiltx._core`, from [`rust/`](rust/) with [maturin](https://www.maturin.rs), and `uv sync` compiles it.
+- Setup: `./poe setup` (install deps + hooks). **A Rust toolchain (1.99+, [rustup](https://rustup.rs)) is required**: quiltx builds a small PyO3 extension, `quiltx._core`, from [`rust/`](rust/) with [maturin](https://www.maturin.rs), and `uv sync` compiles it.
 - Run tests: `./poe test` (unit) or `./poe test-all` (full suite)
 - Run from repo: `./poe run <tool>` (e.g., `./poe run config --help`)
 
