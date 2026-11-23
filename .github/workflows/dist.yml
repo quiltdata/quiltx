@@ -101,7 +101,7 @@ jobs:
 
   sdist:
     name: sdist
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -126,7 +126,7 @@ jobs:
   check:
     name: exact file set
     needs: [wheels, sdist]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -310,7 +310,7 @@ jobs:
   test-sdist:
     name: test (sdist)
     needs: sdist
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -364,7 +364,7 @@ jobs:
     name: Dist complete
     needs: [wheels, sdist, check, test-wheels, test-musl-wheels, test-sdist]
     if: ${{ always() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Every build, check and test passed
         run: |
